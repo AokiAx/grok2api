@@ -69,7 +69,7 @@ http://127.0.0.1:8787/panel
 | 功能 | 说明 |
 |------|------|
 | 服务状态 | health / 版本 / 默认模型 |
-| CLI 号池 | 列表、删除、从 `auth.json` 导入、热重载 |
+| CLI 号池 | 列表、删除、手动导入 tokens、热重载 |
 | 额度 | 调用 `/v1/billing` |
 | 最近请求 | 本地 usage 摘要 |
 | 网页对话 | 直连本机 `/v1/chat/completions`（支持流式） |
@@ -100,11 +100,10 @@ copy config.example.json config.json
 
 | 方式 | 命令 / 操作 |
 |------|-------------|
-| 本机已登录 grok CLI | `python -m app login` 或面板「导入 auth.json」 |
-| 浏览器 / device OIDC | `python -m app login --method browser` |
 | 已有 access/refresh | 面板导入，或写入 `data/cli_accounts.json` |
+| 注册机 / mint | 写入 `data/cli_accounts.json` |
 
-号池文件：`data/cli_accounts.json`（git 忽略）。可选同步到 `~/.grok/auth.json` 供官方 CLI 使用。
+号池文件：`data/cli_accounts.json`（git 忽略）。与 `~/.grok` 无关。
 
 ## 项目结构
 
@@ -131,7 +130,7 @@ data/                # 运行时（本地，不入库）
 python -m app login [--method auto|refresh|browser|device|cli]
 python -m app status
 python -m app serve
-python -m app cli-pool [--import-auth] [--delete id]
+python -m app cli-pool [--delete id]
 python -m app mint-cli --email ... --password ... --turnstile ...
 ```
 

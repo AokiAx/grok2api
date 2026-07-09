@@ -11,7 +11,7 @@ Automated post-register path:
   C) Manual redirect walk on /oauth2/authorize + PKCE
      → extract code from Location: http://127.0.0.1/.../callback?code=
      → POST /oauth2/token
-  D) Save access_token + refresh_token into CLI pool (+ optional auth.json sync)
+  D) Save access_token + refresh_token into CLI pool (data/cli_accounts.json)
 """
 
 from __future__ import annotations

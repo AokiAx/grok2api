@@ -190,15 +190,13 @@
           <div class="card">
             <h2>快捷操作</h2>
             <div class="row">
-              <button class="primary" id="btnImportAuth">导入 auth.json</button>
               <button id="btnReloadPool">重载号池</button>
               <button id="btnBilling">查询 Billing</button>
               <button id="btnModels">查询 Models</button>
             </div>
             <p class="muted" style="margin:.85rem 0 0;font-size:.84rem;line-height:1.5">
-              添加账号：面板导入 tokens，或本机执行<br/>
-              <span class="mono">python -m app login</span> / 导入 <span class="mono">~/.grok/auth.json</span><br/>
-              外部写入 <span class="mono">data/cli_accounts.json</span> 后点「重载号池」。
+              凭证只在 <span class="mono">data/cli_accounts.json</span>。<br/>
+              面板可手动导入 access/refresh；外部写入后点「重载号池」。
             </p>
           </div>
           <div class="card">
@@ -455,13 +453,6 @@
         if (e.status === 401) showLogin("登录已失效");
         else toast(e.message || String(e));
       }
-    };
-    $("btnImportAuth").onclick = async () => {
-      try {
-        const r = await api("/admin/api/cli-accounts/import-auth", { method: "POST", body: "{}" });
-        toast(`导入 ${r.imported ?? 0}，可用 ${r.usable ?? "?"}`);
-        refresh();
-      } catch (e) { toast(e.message || String(e)); }
     };
     $("btnReloadPool").onclick = async () => {
       try {

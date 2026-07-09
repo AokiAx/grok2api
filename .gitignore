@@ -27,3 +27,6 @@ scripts/start-turnstile.ps1
 .vscode/
 *.swp
 Thumbs.db
+
+auth.json
+

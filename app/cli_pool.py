@@ -58,7 +58,7 @@ def _parse_expires(value: Any) -> float | None:
 
 @dataclass
 class CliAccount:
-    """One CLI OIDC session (same fields family as ~/.grok/auth.json entry)."""
+    """One CLI OIDC session for cli-chat-proxy."""
 
     id: str
     key: str
@@ -87,7 +87,7 @@ class CliAccount:
             return None
         return int(exp - time.time())
 
-    def to_public(self) -> dict[str, Any]:
+    def to_public(self, *, inflight: int = 0, max_concurrent: int = 1) -> dict[str, Any]:
         key = self.key or ""
         masked = (key[:10] + "…" + key[-6:]) if len(key) > 20 else "***"
         return {
@@ -101,6 +101,8 @@ class CliAccount:
             "request_count": self.request_count,
             "fail_count": self.fail_count,
             "cooldown_until": self.cooldown_until,
+            "inflight": inflight,
+            "max_concurrent": max_concurrent,
             "user_id": self.user_id,
             "note": self.note,
         }
@@ -127,13 +129,16 @@ class CliAccount:
 
 
 class CliAccountPool:
-    """Thread-safe multi-account CLI OIDC pool + optional sync to auth.json."""
+    """Thread-safe multi-account CLI OIDC pool (data/cli_accounts.json only)."""
 
     def __init__(self, cfg: Settings | None = None) -> None:
         self.cfg = cfg or settings
         self._lock = threading.RLock()
         self._accounts: dict[str, CliAccount] = {}
         self._rr = 0
+        # in-flight requests per account (runtime only, not persisted)
+        self._inflight: dict[str, int] = {}
+        self._slot_cv = threading.Condition(self._lock)
         self._load()
 
     @property
@@ -201,6 +206,22 @@ class CliAccountPool:
         )
         tmp.replace(path)
 
+    @property
+    def max_concurrent(self) -> int:
+        return max(1, int(getattr(self.cfg, "cli_pool_max_concurrent", 1) or 1))
+
+    def _inflight_of(self, account_id: str) -> int:
+        return int(self._inflight.get(account_id) or 0)
+
+    def _is_usable_unlocked(self, a: CliAccount, *, now: float, need_slot: bool) -> bool:
+        if not a.enabled or not a.key:
+            return False
+        if a.cooldown_until is not None and a.cooldown_until > now:
+            return False
+        if need_slot and self._inflight_of(a.id) >= self.max_concurrent:
+            return False
+        return True
+
     def count(self, *, enabled_only: bool = True) -> int:
         with self._lock:
             if not enabled_only:
@@ -209,14 +230,29 @@ class CliAccountPool:
             return sum(
                 1
                 for a in self._accounts.values()
-                if a.enabled
-                and a.key
-                and (a.cooldown_until is None or a.cooldown_until <= now)
+                if self._is_usable_unlocked(a, now=now, need_slot=False)
+            )
+
+    def count_available_slots(self) -> int:
+        """Accounts that can accept another concurrent request right now."""
+        with self._lock:
+            now = time.time()
+            return sum(
+                1
+                for a in self._accounts.values()
+                if self._is_usable_unlocked(a, now=now, need_slot=True)
             )
 
     def list_public(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [a.to_public() for a in self._accounts.values()]
+            mc = self.max_concurrent
+            return [
+                a.to_public(
+                    inflight=self._inflight_of(a.id),
+                    max_concurrent=mc,
+                )
+                for a in self._accounts.values()
+            ]
 
     def upsert_from_tokens(
         self,
@@ -261,87 +297,69 @@ class CliAccountPool:
             )
             self._accounts[aid] = acc
             self._save()
-            if self.cfg.cli_pool_sync_auth_json:
-                self._sync_auth_json_unlocked()
             log.info("upserted CLI account id=%s email=%s", aid, acc.email)
             return acc
 
-    def _sync_auth_json_unlocked(self) -> None:
-        """Write best active account (+ all as multi-scope) into auth.json."""
-        path = self.cfg.resolved_auth_file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    data = raw
-            except Exception:
-                data = {}
-        # Keep non-oidc keys; replace our managed scopes
-        for acc in self._accounts.values():
-            if not acc.enabled or not acc.key:
-                continue
-            scope = f"{acc.oidc_issuer.rstrip('/')}::{acc.oidc_client_id}"
-            # multi-account: use email suffix in scope when multiple
-            if acc.email:
-                scope = f"{scope}::{acc.email}"
-            data[scope] = acc.to_auth_json_entry()
-        # Also write canonical single scope for stock grok CLI (pick best)
-        best = self._pick_best_unlocked()
-        if best:
-            canon = f"{best.oidc_issuer.rstrip('/')}::{best.oidc_client_id}"
-            data[canon] = best.to_auth_json_entry()
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-        log.info("synced CLI pool → %s (%d keys)", path, len(data))
+    def acquire(self, *, wait: bool = True) -> CliAccount | None:
+        """Pick an account with free concurrency capacity.
 
-    def _pick_best_unlocked(self) -> CliAccount | None:
-        now = time.time()
-        usable = [
-            a
-            for a in self._accounts.values()
-            if a.enabled
-            and a.key
-            and (a.cooldown_until is None or a.cooldown_until <= now)
-        ]
-        if not usable:
-            return None
-        usable.sort(
-            key=lambda a: (
-                a.seconds_left() is not None,
-                a.seconds_left() or 0,
-                -(a.fail_count),
-                -(a.last_used_at or 0),
-            ),
-            reverse=True,
-        )
-        return usable[0]
+        Preference order among free-slot accounts:
+        lowest inflight → least recently used → lowest request_count → lowest fails.
 
-    def acquire(self) -> CliAccount | None:
-        with self._lock:
-            now = time.time()
-            usable = [
-                a
-                for a in self._accounts.values()
-                if a.enabled
-                and a.key
-                and (a.cooldown_until is None or a.cooldown_until <= now)
-            ]
-            if not usable:
-                return None
-            usable.sort(
-                key=lambda a: (a.last_used_at or 0.0, a.request_count, a.fail_count)
-            )
-            pick = usable[0]
-            pick.request_count += 1
-            pick.last_used_at = now
-            self._save()
-            return pick
+        If all accounts are at ``cli_pool_max_concurrent``, waits up to
+        ``cli_pool_acquire_timeout`` seconds for a slot (when wait=True).
+        """
+        timeout = float(getattr(self.cfg, "cli_pool_acquire_timeout", 60.0) or 0.0)
+        deadline = time.time() + max(0.0, timeout) if wait else time.time()
+
+        with self._slot_cv:
+            while True:
+                now = time.time()
+                free = [
+                    a
+                    for a in self._accounts.values()
+                    if self._is_usable_unlocked(a, now=now, need_slot=True)
+                ]
+                if free:
+                    free.sort(
+                        key=lambda a: (
+                            self._inflight_of(a.id),
+                            a.last_used_at or 0.0,
+                            a.request_count,
+                            a.fail_count,
+                        )
+                    )
+                    pick = free[0]
+                    self._inflight[pick.id] = self._inflight_of(pick.id) + 1
+                    pick.request_count += 1
+                    pick.last_used_at = now
+                    # persist counts occasionally — every request is ok for small pools
+                    self._save()
+                    return pick
+
+                # no free slot: any enabled account at all?
+                any_enabled = any(
+                    self._is_usable_unlocked(a, now=now, need_slot=False)
+                    for a in self._accounts.values()
+                )
+                if not any_enabled:
+                    return None
+                if not wait or time.time() >= deadline:
+                    return None
+                remaining = deadline - time.time()
+                self._slot_cv.wait(timeout=min(0.5, max(0.05, remaining)))
+
+    def release(self, account_id: str) -> None:
+        """Release one in-flight slot for the account (must pair with acquire)."""
+        if not account_id:
+            return
+        with self._slot_cv:
+            cur = self._inflight_of(account_id)
+            if cur <= 1:
+                self._inflight.pop(account_id, None)
+            else:
+                self._inflight[account_id] = cur - 1
+            self._slot_cv.notify_all()
 
     def report_success(self, account_id: str) -> None:
         with self._lock:
@@ -358,7 +376,7 @@ class CliAccountPool:
         cooldown_secs: float = 300,
         disable: bool = False,
     ) -> None:
-        with self._lock:
+        with self._slot_cv:
             a = self._accounts.get(account_id)
             if not a:
                 return
@@ -367,6 +385,7 @@ class CliAccountPool:
             if disable or a.fail_count >= self.cfg.sso_max_fails:
                 a.enabled = False
             self._save()
+            self._slot_cv.notify_all()
 
     def update_tokens(
         self,
@@ -388,8 +407,6 @@ class CliAccountPool:
             a.cooldown_until = None
             a.enabled = True
             self._save()
-            if self.cfg.cli_pool_sync_auth_json:
-                self._sync_auth_json_unlocked()
 
     def get(self, account_id: str) -> CliAccount | None:
         with self._lock:
@@ -402,47 +419,5 @@ class CliAccountPool:
             del self._accounts[account_id]
             self._save()
             return True
-
-    def import_from_auth_json(self) -> int:
-        """Import existing ~/.grok/auth.json entries into pool."""
-        path = self.cfg.resolved_auth_file
-        if not path.exists():
-            return 0
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return 0
-        if not isinstance(data, dict):
-            return 0
-        n = 0
-        for scope, entry in data.items():
-            if not isinstance(entry, dict) or not entry.get("key"):
-                continue
-            email = str(entry.get("email") or "")
-            aid = email or scope
-            self.upsert_from_tokens(
-                access_token=str(entry["key"]),
-                refresh_token=entry.get("refresh_token"),
-                expires_in=None,
-                email=email,
-                user_id=str(entry.get("user_id") or ""),
-                team_id=str(entry.get("team_id") or ""),
-                oidc_issuer=str(entry.get("oidc_issuer") or "https://auth.x.ai"),
-                oidc_client_id=str(
-                    entry.get("oidc_client_id")
-                    or "b1a00492-073a-47ea-816f-4c329264a828"
-                ),
-                note=f"imported from auth.json scope={scope[:40]}",
-                account_id=aid,
-            )
-            # preserve expires_at string
-            with self._lock:
-                acc = self._accounts.get(aid)
-                if acc and entry.get("expires_at"):
-                    acc.expires_at = str(entry["expires_at"])
-                    self._save()
-            n += 1
-        return n
-
 
 cli_pool = CliAccountPool()

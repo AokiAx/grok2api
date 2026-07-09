@@ -42,7 +42,6 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("auto-register", help="Alias of register --auto")
 
     p_cli = sub.add_parser("cli-pool", help="Show multi-account CLI OIDC pool")
-    p_cli.add_argument("--import-auth", action="store_true")
     p_cli.add_argument("--delete", default=None)
 
     p_mint = sub.add_parser(
@@ -156,10 +155,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "cli-pool":
         from .cli_pool import cli_pool
 
-        if args.import_auth:
-            n = cli_pool.import_from_auth_json()
-            print(json.dumps({"imported": n, "usable": cli_pool.count()}, indent=2))
-            return 0
         if args.delete:
             ok = cli_pool.delete(args.delete)
             print(json.dumps({"ok": ok}, indent=2))

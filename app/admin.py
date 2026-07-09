@@ -100,16 +100,6 @@ async def delete_cli_account(
     return {"ok": ok, "message": "deleted" if ok else "not found"}
 
 
-@router.post("/admin/api/cli-accounts/import-auth")
-async def import_auth_json(_: None = Depends(require_admin)) -> Any:
-    n = cli_pool.import_from_auth_json()
-    return {
-        "ok": True,
-        "imported": n,
-        "usable": cli_pool.count(enabled_only=True),
-    }
-
-
 @router.post("/admin/api/cli-accounts/reload")
 async def reload_cli_accounts(_: None = Depends(require_admin)) -> Any:
     """Reload pool from data/cli_accounts.json (after external register)."""

@@ -24,8 +24,9 @@ def _file_defaults() -> dict[str, Any]:
         "auto_client_version": "auto_client_version",
         "default_model": "default_model",
         "data_dir": "data_dir",
-        "cli_pool_sync_auth_json": "cli_pool_sync_auth_json",
         "cli_pool_rotate": "cli_pool_rotate",
+        "cli_pool_max_concurrent": "cli_pool_max_concurrent",
+        "cli_pool_acquire_timeout": "cli_pool_acquire_timeout",
         "ensure_auth_on_start": "ensure_auth_on_start",
         "stream_fallback": "stream_fallback",
         "fold_reasoning": "fold_reasoning",
@@ -71,9 +72,11 @@ class Settings(BaseSettings):
     ensure_auth_on_start: bool = True
 
     data_dir: Path = Path("data")
-    cli_pool_sync_auth_json: bool = True
     cli_pool_rotate: bool = True
-    cli_pool_import_auth_on_start: bool = True
+    # Max in-flight upstream requests per CLI account (free tier: keep low)
+    cli_pool_max_concurrent: int = 1
+    # Seconds to wait for an account with free concurrency slot
+    cli_pool_acquire_timeout: float = 60.0
     sso_max_fails: int = 5
 
     force_upstream_stream: bool = False

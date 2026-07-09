@@ -206,6 +206,15 @@ class AuthStore:
         return self._load(force=True)
 
     def get_access_token(self, force_refresh: bool = False) -> str:
+        token, _account_id = self.get_access_token_with_account(
+            force_refresh=force_refresh
+        )
+        return token
+
+    def get_access_token_with_account(
+        self, force_refresh: bool = False
+    ) -> tuple[str, str | None]:
+        """Return ``(access_token, cli_account_id|None)`` for pool-aware retries."""
         # Prefer multi-account CLI pool when enabled and non-empty
         if getattr(self.cfg, "cli_pool_rotate", True):
             try:
@@ -230,14 +239,18 @@ class AuthStore:
                     if cred.expires_at is not None and cred.expires_at <= now:
                         raise
                     log.exception("token refresh failed; using existing token")
-            return cred.key
+            return cred.key, None
 
-    def _token_from_cli_pool(self, force_refresh: bool = False) -> str:
+    def _token_from_cli_pool(
+        self, force_refresh: bool = False
+    ) -> tuple[str, str]:
         from .cli_pool import cli_pool
 
-        acc = cli_pool.acquire()
+        acc = cli_pool.acquire(wait=True)
         if acc is None:
-            raise RuntimeError("CLI account pool empty")
+            raise RuntimeError(
+                "CLI account pool empty or all accounts at concurrency limit / cooldown"
+            )
         now = time.time()
         exp = acc.expires_ts()
         need = force_refresh
@@ -282,13 +295,16 @@ class AuthStore:
                     expires_in=int(expires_in) if expires_in is not None else None,
                 )
                 cli_pool.report_success(acc.id)
-                return access
+                return access, acc.id
             except Exception:
                 log.exception("cli pool refresh failed for %s", acc.id)
                 if exp is not None and exp <= now:
+                    # release slot: caller won't get a usable token
                     cli_pool.report_failure(acc.id, cooldown_secs=60)
+                    cli_pool.release(acc.id)
                     raise
-        return acc.key
+                # keep using existing access token; slot still held for caller
+        return acc.key, acc.id
 
     def status(self) -> dict[str, Any]:
         with self._lock:

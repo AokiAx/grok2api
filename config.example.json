@@ -27,8 +27,10 @@
 
   "_comment_data": "===== 数据 / 多账号 CLI 号池 =====",
   "data_dir": "data",
-  "cli_pool_sync_auth_json": true,
-  "_help_cli_pool_sync_auth_json": "同步号池到 ~/.grok/auth.json 供本机 grok CLI 使用",
   "cli_pool_rotate": true,
-  "_help_cli_pool_rotate": "多账号时轮询取 token"
+  "_help_cli_pool_rotate": "多账号时轮询取 token",
+  "cli_pool_max_concurrent": 1,
+  "_help_cli_pool_max_concurrent": "每个 CLI 账号允许的最大在途请求数；满了会自动选其它号",
+  "cli_pool_acquire_timeout": 60,
+  "_help_cli_pool_acquire_timeout": "所有号并发都满时最长等待秒数"
 }

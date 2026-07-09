@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator
 
@@ -10,6 +11,9 @@ from .compat import aggregate_sse_to_completion
 from .config import Settings, settings
 
 log = logging.getLogger("grok2api.upstream")
+
+# Rate-limit / auth issues that warrant switching CLI pool account
+_ROTATE_STATUSES = {401, 403, 429}
 
 
 class UpstreamClient:
@@ -42,12 +46,31 @@ class UpstreamClient:
         }
         return headers
 
-    async def _token(self, force_refresh: bool = False) -> str:
-        import asyncio
-
+    async def _token_pair(
+        self, force_refresh: bool = False
+    ) -> tuple[str, str | None]:
         return await asyncio.to_thread(
-            self.store.get_access_token, force_refresh
+            self.store.get_access_token_with_account, force_refresh
         )
+
+    def _release(self, account_id: str | None) -> None:
+        if not account_id:
+            return
+        try:
+            from .cli_pool import cli_pool
+
+            cli_pool.release(account_id)
+        except Exception:
+            log.debug("release failed for %s", account_id, exc_info=True)
+
+    def _pool_max_tries(self) -> int:
+        try:
+            from .cli_pool import cli_pool
+
+            n = cli_pool.count(enabled_only=True)
+        except Exception:
+            n = 0
+        return max(1, min(n or 1, 5))
 
     async def _request_with_auth_retry(
         self,
@@ -57,7 +80,9 @@ class UpstreamClient:
         model: str,
         stream: bool = False,
         json_body: dict[str, Any] | None = None,
-    ) -> httpx.Response:
+    ) -> tuple[httpx.Response, str | None]:
+        """Return ``(response, account_id)``. Caller must ``release(account_id)``."""
+
         async def once(token: str) -> httpx.Response:
             headers = self._headers(model, token, stream=stream)
             req = self._client.build_request(
@@ -68,16 +93,89 @@ class UpstreamClient:
             )
             return await self._client.send(req, stream=stream)
 
-        token = await self._token()
-        resp = await once(token)
-        if resp.status_code in (401, 403):
-            await resp.aclose()
-            token = await self._token(force_refresh=True)
+        max_tries = self._pool_max_tries()
+        last_code = 0
+        held_id: str | None = None
+
+        try:
+            for attempt in range(max_tries):
+                # drop previous slot before acquiring a new account
+                if held_id:
+                    self._release(held_id)
+                    held_id = None
+
+                force = attempt > 0 and last_code in (401, 403)
+                token, account_id = await self._token_pair(force_refresh=force)
+                held_id = account_id
+
+                resp = await once(token)
+                code = resp.status_code
+                last_code = code
+
+                if code not in _ROTATE_STATUSES:
+                    # transfer ownership of held_id to caller
+                    out_id, held_id = held_id, None
+                    return resp, out_id
+
+                body_preview = ""
+                try:
+                    body_preview = (await resp.aread())[:240].decode(
+                        "utf-8", "replace"
+                    )
+                except Exception:
+                    pass
+                await resp.aclose()
+
+                if account_id:
+                    try:
+                        from .cli_pool import cli_pool
+
+                        if code == 429:
+                            cli_pool.report_failure(
+                                account_id, cooldown_secs=45, disable=False
+                            )
+                            log.warning(
+                                "upstream 429 on %s; cool down account=%s try=%s/%s %s",
+                                path,
+                                account_id,
+                                attempt + 1,
+                                max_tries,
+                                body_preview[:120],
+                            )
+                        else:
+                            cli_pool.report_failure(
+                                account_id, cooldown_secs=90, disable=False
+                            )
+                            log.warning(
+                                "upstream %s on %s; rotate account=%s try=%s/%s %s",
+                                code,
+                                path,
+                                account_id,
+                                attempt + 1,
+                                max_tries,
+                                body_preview[:120],
+                            )
+                    except Exception:
+                        log.debug("report_failure failed", exc_info=True)
+
+            # last attempt: one more shot, return whatever we get
+            if held_id:
+                self._release(held_id)
+                held_id = None
+            token, account_id = await self._token_pair(
+                force_refresh=(last_code in (401, 403))
+            )
+            held_id = account_id
             resp = await once(token)
-        return resp
+            out_id, held_id = held_id, None
+            return resp, out_id
+        except Exception:
+            if held_id:
+                self._release(held_id)
+            raise
 
     async def list_models(self) -> dict[str, Any]:
-        r = await self._request_with_auth_retry(
+        r, acc = await self._request_with_auth_retry(
             "GET",
             "/models",
             model=self.cfg.default_model,
@@ -88,9 +186,10 @@ class UpstreamClient:
             return r.json()
         finally:
             await r.aclose()
+            self._release(acc)
 
     async def billing(self) -> dict[str, Any]:
-        r = await self._request_with_auth_retry(
+        r, acc = await self._request_with_auth_retry(
             "GET",
             "/billing",
             model=self.cfg.default_model,
@@ -101,13 +200,13 @@ class UpstreamClient:
             return r.json()
         finally:
             await r.aclose()
+            self._release(acc)
 
     async def responses(self, body: dict[str, Any]) -> httpx.Response | AsyncIterator[bytes]:
-        """Passthrough OpenAI Responses API if upstream supports it."""
         model = str(body.get("model") or self.cfg.default_model)
         stream = bool(body.get("stream"))
         body = {**body, "model": model}
-        resp = await self._request_with_auth_retry(
+        resp, acc = await self._request_with_auth_retry(
             "POST",
             "/responses",
             model=model,
@@ -115,7 +214,7 @@ class UpstreamClient:
             json_body=body,
         )
         if stream:
-            return self._iter_sse(resp)
+            return self._iter_sse(resp, release_account=acc)
         try:
             if resp.status_code >= 400:
                 text = (await resp.aread()).decode("utf-8", "replace")
@@ -128,24 +227,20 @@ class UpstreamClient:
         except Exception:
             await resp.aclose()
             raise
+        finally:
+            # free concurrency slot; response body remains readable by caller
+            self._release(acc)
 
     async def chat_completions(
         self, body: dict[str, Any]
     ) -> dict[str, Any] | AsyncIterator[bytes]:
-        """
-        Returns:
-          - dict for non-stream (already parsed JSON)
-          - AsyncIterator[bytes] for stream SSE bytes
-        """
         model = str(body.get("model") or self.cfg.default_model)
         body = {**body, "model": model}
         want_stream = bool(body.get("stream"))
 
-        # Client wants SSE: always stream upstream
         if want_stream:
             return await self._chat_stream(body, model)
 
-        # Client wants a single JSON object
         force = self.cfg.force_upstream_stream
         if force:
             return await self._chat_nonstream_via_stream(body, model)
@@ -154,7 +249,6 @@ class UpstreamClient:
             return await self._chat_nonstream(body, model)
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
-            # Stream-only clusters often return 4xx for non-stream
             if self.cfg.stream_fallback and status in (400, 404, 405, 415, 422, 501):
                 log.warning(
                     "non-stream failed (%s); falling back to stream aggregation",
@@ -167,7 +261,7 @@ class UpstreamClient:
         self, body: dict[str, Any], model: str
     ) -> dict[str, Any]:
         payload = {**body, "stream": False}
-        resp = await self._request_with_auth_retry(
+        resp, acc = await self._request_with_auth_retry(
             "POST",
             "/chat/completions",
             model=model,
@@ -185,19 +279,20 @@ class UpstreamClient:
             return resp.json()
         finally:
             await resp.aclose()
+            self._release(acc)
 
     async def _chat_stream(
         self, body: dict[str, Any], model: str
     ) -> AsyncIterator[bytes]:
         payload = {**body, "stream": True}
-        resp = await self._request_with_auth_retry(
+        resp, acc = await self._request_with_auth_retry(
             "POST",
             "/chat/completions",
             model=model,
             stream=True,
             json_body=payload,
         )
-        return self._iter_sse(resp)
+        return self._iter_sse(resp, release_account=acc)
 
     async def _chat_nonstream_via_stream(
         self, body: dict[str, Any], model: str
@@ -205,7 +300,12 @@ class UpstreamClient:
         stream_iter = await self._chat_stream(body, model)
         return await aggregate_sse_to_completion(stream_iter, model=model)
 
-    async def _iter_sse(self, resp: httpx.Response) -> AsyncIterator[bytes]:
+    async def _iter_sse(
+        self,
+        resp: httpx.Response,
+        *,
+        release_account: str | None = None,
+    ) -> AsyncIterator[bytes]:
         try:
             if resp.status_code >= 400:
                 text = (await resp.aread()).decode("utf-8", "replace")
@@ -219,6 +319,7 @@ class UpstreamClient:
                     yield chunk
         finally:
             await resp.aclose()
+            self._release(release_account)
 
 
 upstream = UpstreamClient()

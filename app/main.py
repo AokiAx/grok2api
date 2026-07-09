@@ -50,10 +50,6 @@ async def lifespan(_app: FastAPI):
     try:
         from .cli_pool import cli_pool
 
-        if settings.cli_pool_import_auth_on_start:
-            n = cli_pool.import_from_auth_json()
-            if n:
-                log.info("imported %d CLI accounts from auth.json", n)
         log.info("CLI pool usable=%s", cli_pool.count(enabled_only=True))
     except Exception:
         log.exception("CLI pool bootstrap failed")
@@ -208,7 +204,21 @@ def _to_upstream_body(req: ChatCompletionRequest) -> dict[str, Any]:
     if "max_completion_tokens" in data and "max_tokens" not in data:
         data["max_tokens"] = data.pop("max_completion_tokens")
     if settings.normalize_content and isinstance(data.get("messages"), list):
+        # normalize text parts only; keep tool_calls / tool messages intact
         data["messages"] = normalize_messages(data["messages"])
+    # OpenAI clients sometimes send empty string content with tool_calls;
+    # upstream accepts null better for some paths
+    if isinstance(data.get("messages"), list):
+        fixed = []
+        for m in data["messages"]:
+            if not isinstance(m, dict):
+                fixed.append(m)
+                continue
+            msg = dict(m)
+            if msg.get("tool_calls") and msg.get("content") == "":
+                msg["content"] = None
+            fixed.append(msg)
+        data["messages"] = fixed
     return data
 
 
