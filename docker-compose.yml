@@ -1,0 +1,17 @@
+services:
+  grok2api:
+    build: .
+    container_name: grok2api
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+    environment:
+      - GROK2API_HOST=0.0.0.0
+      - GROK2API_PORT=8787
+      - GROK2API_MODE=cli
+      - GROK2API_API_KEY=${GROK2API_API_KEY:-}
+      - GROK2API_APP_KEY=${GROK2API_APP_KEY:-}
+      - GROK2API_PANEL_PASSWORD=${GROK2API_PANEL_PASSWORD:-}
+    restart: unless-stopped

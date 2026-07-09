@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+.DS_Store
+
+# Secrets & runtime data (never push)
+.env
+config.json
+data/
+
+# Private: auto-registration stack (kept local only)
+register/
+scripts/start-turnstile.ps1
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
