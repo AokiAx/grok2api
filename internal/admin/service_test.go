@@ -280,3 +280,14 @@ func TestImportAcceptsAccessTokenAlias(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceList(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {ID: "a", Pool: account.PoolReady},
+	}}
+	service := admin.NewService(repository, validator{})
+	items, err := service.List(context.Background())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list=%#v err=%v", items, err)
+	}
+}

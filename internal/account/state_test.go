@@ -75,3 +75,14 @@ func TestUnavailableReasonsRemainExplicit(t *testing.T) {
 		seen[reason] = true
 	}
 }
+
+func TestAvailableDefaultMaxActive(t *testing.T) {
+	item := account.Account{Pool: account.PoolReady, Active: 0, MaxActive: 0}
+	if !item.Available(time.Now()) {
+		t.Fatal("expected available with default max active")
+	}
+	item.Active = 1
+	if item.Available(time.Now()) {
+		t.Fatal("expected unavailable when active reaches default max")
+	}
+}

@@ -121,6 +121,23 @@ func TestParseRateLimitHeadersIgnoresMissing(t *testing.T) {
 	}
 }
 
+func TestParseRateLimitHeadersIgnoresPartialPairs(t *testing.T) {
+	header := make(http.Header)
+	header.Set("x-ratelimit-limit-tokens", "1000000")
+	// remaining missing — must NOT be treated as exhausted.
+	usage := upstream.ParseRateLimitHeaders(header)
+	if usage.Present() || usage.Exhausted() {
+		t.Fatalf("partial headers should be ignored: %#v", usage)
+	}
+
+	header = make(http.Header)
+	header.Set("x-ratelimit-remaining-tokens", "0")
+	usage = upstream.ParseRateLimitHeaders(header)
+	if usage.Present() || usage.Exhausted() {
+		t.Fatalf("remaining-only headers should be ignored: %#v", usage)
+	}
+}
+
 func TestClassifyFailureAuthMessageWithout401(t *testing.T) {
 	failure := upstream.ClassifyFailure(400, []byte(`{"error":"Invalid or expired credentials (no auth context)"}`))
 	if failure.Kind != upstream.FailureAuth || failure.Reason != account.ReasonAuth {
@@ -132,5 +149,15 @@ func TestClassifyFailureQuotaTextOn403(t *testing.T) {
 	failure := upstream.ClassifyFailure(403, []byte(`{"error":"free usage exhausted for rolling 24-hour window"}`))
 	if failure.Kind != upstream.FailureQuota || failure.Reason != account.ReasonQuota {
 		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func TestParseRateLimitHeadersRequestCounters(t *testing.T) {
+	header := make(http.Header)
+	header.Set("x-ratelimit-limit-requests", "100")
+	header.Set("x-ratelimit-remaining-requests", "40")
+	usage := upstream.ParseRateLimitHeaders(header)
+	if usage.QuotaLimit() != 100 || usage.QuotaActual() != 60 {
+		t.Fatalf("usage limit/actual = %d/%d", usage.QuotaLimit(), usage.QuotaActual())
 	}
 }

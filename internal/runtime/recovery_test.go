@@ -290,3 +290,59 @@ func TestRecoverCredentialsBacksOffRejectedRefresh(t *testing.T) {
 		t.Fatalf("saved = %#v", store.saved[0])
 	}
 }
+
+func TestRunRecoveryOptionsWire(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &recoveryStore{}
+	pool := scheduler.New(nil)
+	err := runtime.RunRecovery(
+		ctx,
+		pool,
+		store,
+		time.Hour,
+		runtime.WithCredentialRecovery(store, credentialRefresher{}, credentialValidator{}),
+		runtime.WithQuotaProber(quotaProbe{}),
+		runtime.WithQuotaRetry(15*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("run recovery: %v", err)
+	}
+}
+
+type quotaProbe struct{}
+
+func (quotaProbe) ProbeFreeQuota(context.Context, account.Account) (account.UnavailableReason, string, error) {
+	return "", "", nil
+}
+
+type errQuotaProbe struct{}
+
+func (errQuotaProbe) ProbeFreeQuota(context.Context, account.Account) (account.UnavailableReason, string, error) {
+	return "", "", context.DeadlineExceeded
+}
+
+func TestRecoverQuotaTransportErrorDefers(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	quota := account.Account{ID: "q", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota, RetryAt: now.Add(-time.Minute)}
+	store := &recoveryStore{accounts: []account.Account{quota}}
+	pool := scheduler.New([]account.Account{quota})
+	result, err := runtime.RecoverQuota(context.Background(), pool, store, errQuotaProbe{}, credentialValidator{}, now, time.Hour)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if result.Failed != 1 || len(store.saved) != 1 {
+		t.Fatalf("result=%#v saved=%#v", result, store.saved)
+	}
+}
+
+func TestRecoverQuotaUsesValidatorWhenProberNil(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	quota := account.Account{ID: "q", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota, RetryAt: now.Add(-time.Minute)}
+	store := &recoveryStore{accounts: []account.Account{quota}}
+	pool := scheduler.New([]account.Account{quota})
+	result, err := runtime.RecoverQuota(context.Background(), pool, store, nil, credentialValidator{}, now, time.Hour)
+	if err != nil || result.Recovered != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}

@@ -77,6 +77,7 @@ func (u RateLimitUsage) QuotaLimit() int64 {
 }
 
 // Exhausted reports whether free capacity is fully consumed.
+// Only evaluates complete limit+remaining pairs; partial headers never exhaust.
 func (u RateLimitUsage) Exhausted() bool {
 	if u.HasTokens && u.RemainingTokens <= 0 && u.LimitTokens > 0 {
 		return true
@@ -149,20 +150,20 @@ func ParseRateLimitHeaders(header http.Header) RateLimitUsage {
 		return RateLimitUsage{}
 	}
 	usage := RateLimitUsage{}
-	if value, ok := headerInt64(header, "x-ratelimit-limit-requests"); ok {
-		usage.LimitRequests = value
+	limitReq, hasLimitReq := headerInt64(header, "x-ratelimit-limit-requests")
+	remainReq, hasRemainReq := headerInt64(header, "x-ratelimit-remaining-requests")
+	// Require a complete pair. A lone limit with zero remaining default would
+	// false-exhaust free accounts behind incomplete proxies.
+	if hasLimitReq && hasRemainReq {
+		usage.LimitRequests = limitReq
+		usage.RemainingRequests = remainReq
 		usage.HasRequests = true
 	}
-	if value, ok := headerInt64(header, "x-ratelimit-remaining-requests"); ok {
-		usage.RemainingRequests = value
-		usage.HasRequests = true
-	}
-	if value, ok := headerInt64(header, "x-ratelimit-limit-tokens"); ok {
-		usage.LimitTokens = value
-		usage.HasTokens = true
-	}
-	if value, ok := headerInt64(header, "x-ratelimit-remaining-tokens"); ok {
-		usage.RemainingTokens = value
+	limitTok, hasLimitTok := headerInt64(header, "x-ratelimit-limit-tokens")
+	remainTok, hasRemainTok := headerInt64(header, "x-ratelimit-remaining-tokens")
+	if hasLimitTok && hasRemainTok {
+		usage.LimitTokens = limitTok
+		usage.RemainingTokens = remainTok
 		usage.HasTokens = true
 	}
 	return usage

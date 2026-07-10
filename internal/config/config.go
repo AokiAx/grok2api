@@ -70,7 +70,7 @@ func Defaults() Config {
 		DataDir:             "data",
 		MaxConcurrent:       1,
 		AcquireTimeoutSec:   60,
-		QuotaRetryMinutes:   30,
+		QuotaRetryMinutes:   1440,
 		RateRetrySeconds:    45,
 		RequestTimeoutSec:   600,
 		AccountsBase:        "https://accounts.x.ai",

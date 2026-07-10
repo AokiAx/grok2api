@@ -46,36 +46,58 @@ func (c *Client) Chat(
 }
 
 // ProbeFreeQuota checks whether a free account still has usable capacity.
-// Free tier has no reliable billing query, so this issues a minimal chat and
-// inspects either free-usage errors or x-ratelimit remaining headers.
+// Free tier has no reliable billing query. Production chat for grok-4.5 goes
+// through /responses (prompt-cache friendly), so recovery probes the same path.
 func (c *Client) ProbeFreeQuota(
 	ctx context.Context,
 	item account.Account,
 ) (account.UnavailableReason, string, error) {
+	reason, code, _, _, _, err := c.ProbeFreeQuotaUsage(ctx, item)
+	return reason, code, err
+}
+
+// ProbeFreeQuotaUsage is like ProbeFreeQuota but also returns rate-limit usage
+// observed on the probe response for persistence.
+func (c *Client) ProbeFreeQuotaUsage(
+	ctx context.Context,
+	item account.Account,
+) (account.UnavailableReason, string, int64, int64, bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	payload := []byte(`{"model":"grok-4.5","stream":false,"max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`)
-	response, err := c.Request(probeCtx, item, http.MethodPost, "/chat/completions", payload, false)
+	// Minimal responses stream probe — same surface as live chat backend.
+	payload := []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"ping"}],"stream":true,"max_output_tokens":8}`)
+	response, err := c.Request(probeCtx, item, http.MethodPost, "/responses", payload, true)
 	if err != nil {
-		return "", "", fmt.Errorf("probe free quota: %w", err)
+		return "", "", 0, 0, false, fmt.Errorf("probe free quota: %w", err)
 	}
 	defer response.Body.Close()
+	usage := ParseRateLimitHeaders(response.Header)
+	hasUsage := usage.Present()
+	actual, limit := usage.QuotaActual(), usage.QuotaLimit()
+	if response.StatusCode < 400 {
+		// Drain a tiny prefix so headers are complete, then stop.
+		_, _ = io.CopyN(io.Discard, response.Body, 256)
+		if hasUsage && usage.Exhausted() {
+			return account.ReasonQuota, "subscription:free-usage-exhausted", actual, limit, true, nil
+		}
+		return "", "", actual, limit, hasUsage, nil
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return "", "", fmt.Errorf("read free quota probe: %w", err)
-	}
-	usage := ParseRateLimitHeaders(response.Header)
-	if response.StatusCode < 400 {
-		if usage.Present() && usage.Exhausted() {
-			return account.ReasonQuota, "subscription:free-usage-exhausted", nil
-		}
-		return "", "", nil
+		return "", "", actual, limit, hasUsage, fmt.Errorf("read free quota probe: %w", err)
 	}
 	failure := ClassifyFailure(response.StatusCode, body)
-	if failure.Reason == "" {
-		return account.ReasonValidating, failure.Code, nil
+	if failure.Kind == FailureQuota && failure.QuotaLimit == 0 && hasUsage {
+		failure.QuotaActual = actual
+		failure.QuotaLimit = limit
 	}
-	return failure.Reason, failure.Code, nil
+	if failure.Reason == "" {
+		return account.ReasonValidating, failure.Code, actual, limit, hasUsage, nil
+	}
+	if failure.QuotaLimit > 0 || failure.QuotaActual > 0 {
+		return failure.Reason, failure.Code, failure.QuotaActual, failure.QuotaLimit, true, nil
+	}
+	return failure.Reason, failure.Code, actual, limit, hasUsage, nil
 }
 
 func (c *Client) Request(
@@ -132,17 +154,18 @@ func (c *Client) Validate(
 	ctx context.Context,
 	item account.Account,
 ) (account.UnavailableReason, string, error) {
-	// Stage 1: lightweight /models auth/quota probe.
+	// Stage 1: lightweight /models auth probe.
 	reason, code, err := c.validateModels(ctx, item)
 	if err != nil || reason != "" {
 		return reason, code, err
 	}
-	// Stage 2: optional short responses stream probe when models succeeds.
-	// This catches tokens that can list models but fail inference auth/quota.
-	if probeReason, probeCode, probeErr := c.validateResponsesProbe(ctx, item); probeErr != nil {
-		// Infrastructure/probe transport errors should not mark account bad.
-		return "", "", nil
-	} else if probeReason != "" {
+	// Stage 2: short /responses probe (same backend as live chat).
+	// Transport errors are not "healthy"; leave as validating so callers backoff.
+	probeReason, probeCode, probeErr := c.validateResponsesProbe(ctx, item)
+	if probeErr != nil {
+		return account.ReasonValidating, "probe-transport-error", nil
+	}
+	if probeReason != "" {
 		return probeReason, probeCode, nil
 	}
 	return "", "", nil

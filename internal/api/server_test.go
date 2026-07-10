@@ -304,10 +304,12 @@ func TestBillingAndResponsesProxyThroughAccountGateway(t *testing.T) {
 }
 
 func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
-	gateway := &fakeGateway{result: service.ChatResult{
+	// Anthropic messages for catalog models go through /responses (same as OpenAI chat).
+	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"pong\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
-		Header: make(http.Header),
-		Body:   []byte(`{"model":"grok-4.5","choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`),
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Stream: io.NopCloser(strings.NewReader(sse)),
 	}}
 	server := api.NewServer(gateway, fakeStatus{}, "")
 	recorder := httptest.NewRecorder()
@@ -318,13 +320,15 @@ func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	if gateway.method != http.MethodPost || gateway.path != "/responses" || !gateway.stream {
+		t.Fatalf("upstream = %s %s stream=%v", gateway.method, gateway.path, gateway.stream)
+	}
 	var forwarded map[string]any
 	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
 		t.Fatalf("decode forwarded: %v", err)
 	}
-	messages := forwarded["messages"].([]any)
-	if len(messages) != 2 || messages[0].(map[string]any)["role"] != "system" {
-		t.Fatalf("forwarded = %#v", forwarded)
+	if _, ok := forwarded["input"]; !ok {
+		t.Fatalf("forwarded missing input: %#v", forwarded)
 	}
 	var response map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -336,10 +340,11 @@ func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
 }
 
 func TestAnthropicMessagesConvertsStreamingSSE(t *testing.T) {
-	gateway := &fakeGateway{result: service.ChatResult{
+	sse := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_s\",\"model\":\"grok-4.5\",\"output_text\":\"hello\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
 		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
-		Stream: io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
+		Stream: io.NopCloser(strings.NewReader(sse)),
 	}}
 	server := api.NewServer(gateway, fakeStatus{}, "")
 	recorder := httptest.NewRecorder()
@@ -349,7 +354,7 @@ func TestAnthropicMessagesConvertsStreamingSSE(t *testing.T) {
 	)
 	body := recorder.Body.String()
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/event-stream" {
-		t.Fatalf("status=%d content-type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
+		t.Fatalf("status=%d content-type=%q body=%s", recorder.Code, recorder.Header().Get("Content-Type"), body)
 	}
 	for _, event := range []string{"event: message_start", "event: content_block_delta", "event: message_stop"} {
 		if !strings.Contains(body, event) {

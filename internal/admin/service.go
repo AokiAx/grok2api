@@ -48,7 +48,7 @@ func NewService(repository Repository, validator Validator, options ...Option) *
 		repository: repository,
 		validator:  validator,
 		now:        time.Now,
-		quotaRetry: 30 * time.Minute,
+		quotaRetry: 24 * time.Hour,
 		rateRetry:  45 * time.Second,
 	}
 	for _, option := range options {

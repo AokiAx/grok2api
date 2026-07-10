@@ -94,3 +94,58 @@ func TestChatToResponsesPassesBackendSearch(t *testing.T) {
 		t.Fatalf("backend_search = %#v", payload["backend_search"])
 	}
 }
+
+func TestNormalizeChatRequestFillsModelAndEffort(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"MAX"}`)
+	out, model, stream, err := compat.NormalizeChatRequest(body, "grok-4.5")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if model != "grok-4.5" || stream {
+		t.Fatalf("model=%q stream=%v", model, stream)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["reasoning_effort"] != "xhigh" {
+		t.Fatalf("effort=%#v", payload["reasoning_effort"])
+	}
+}
+
+func TestResponsesToChatReadsOutputArray(t *testing.T) {
+	body := []byte(`{"id":"resp_2","model":"grok-4.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"array-hi"}]}]}`)
+	out, err := compat.ResponsesToChat(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if !strings.Contains(string(out), "array-hi") {
+		t.Fatalf("out=%s", out)
+	}
+}
+
+func TestResponsesToChatHandlesCreatedAtNumber(t *testing.T) {
+	body := []byte("{\"id\":\"resp_n\",\"model\":\"grok-4.5\",\"created_at\":1710000000,\"status\":\"completed\",\"output_text\":\"n\"}")
+	out, err := compat.ResponsesToChat(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if !strings.Contains(string(out), "\"created\":1710000000") && !strings.Contains(string(out), "created") {
+		t.Fatalf("out=%s", out)
+	}
+}
+
+func TestOpenAIToAnthropicFromAggregatedResponses(t *testing.T) {
+	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"pong\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+	out, err := compat.AggregateResponsesStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	anth, err := compat.OpenAIToAnthropic(out)
+	if err != nil {
+		t.Fatalf("anthropic: %v out=%s", err, out)
+	}
+	if !strings.Contains(string(anth), "pong") {
+		t.Fatalf("anth=%s", anth)
+	}
+}

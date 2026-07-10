@@ -70,7 +70,7 @@ func NewGateway(
 		scheduler:  scheduler,
 		store:      store,
 		upstream:   upstream,
-		quotaRetry: 30 * time.Minute,
+		quotaRetry: 24 * time.Hour,
 		rateRetry:  45 * time.Second,
 		now:        time.Now,
 	}
@@ -124,11 +124,8 @@ func (g *Gateway) Request(
 			return ChatResult{}, err
 		}
 		if stream && response.StatusCode < 400 {
-			if err := g.persistSuccessUsage(ctx, lease, response.Header); err != nil {
-				_ = response.Body.Close()
-				lease.Release()
-				return ChatResult{}, err
-			}
+			// Best-effort: never fail a successful upstream response because SQLite is busy.
+			_ = g.persistSuccessUsage(ctx, lease, response.Header)
 			// Keep returning this successful stream even if remaining hit 0;
 			// the account is already marked unavailable for subsequent traffic.
 			g.resetCircuit()
@@ -152,10 +149,8 @@ func (g *Gateway) Request(
 			return ChatResult{}, fmt.Errorf("close upstream response: %w", closeErr)
 		}
 		if response.StatusCode < 400 {
-			if err := g.persistSuccessUsage(ctx, lease, response.Header); err != nil {
-				lease.Release()
-				return ChatResult{}, err
-			}
+			// Best-effort persist; upstream already succeeded.
+			_ = g.persistSuccessUsage(ctx, lease, response.Header)
 			// Return the successful body even if this response exhausted free quota.
 			lease.Release()
 			g.resetCircuit()

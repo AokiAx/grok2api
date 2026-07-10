@@ -787,7 +787,81 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid Anthropic request")
 		return
 	}
-	result, err := s.gateway.Chat(request.Context(), openAIRequest, stream)
+	// Prefer the same responses backend as OpenAI chat for catalog models so
+	// free-quota headers / prompt-cache behavior stay consistent.
+	model := requestModel(openAIRequest, s.defaultModel)
+	var result service.ChatResult
+	if s.preferResponses && s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
+		responsesBody, _, convertErr := compat.ChatToResponses(openAIRequest)
+		if convertErr != nil {
+			writeOpenAIError(writer, http.StatusBadRequest, "Invalid Anthropic request")
+			return
+		}
+		result, err = s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
+		if err != nil {
+			s.writeGatewayError(writer, err)
+			return
+		}
+		if result.Status >= http.StatusBadRequest {
+			if result.Stream != nil {
+				data, readErr := io.ReadAll(result.Stream)
+				_ = result.Stream.Close()
+				if readErr == nil {
+					result.Body = data
+					result.Stream = nil
+				}
+			}
+			s.writeResult(writer, result)
+			return
+		}
+		if stream {
+			if result.Stream == nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Upstream stream missing")
+				return
+			}
+			// responses SSE -> chat SSE -> anthropic SSE
+			chatStream := compat.NewResponsesToChatStream(result.Stream, model)
+			result.Stream = compat.NewAnthropicStream(chatStream, model)
+			if result.Header == nil {
+				result.Header = make(http.Header)
+			}
+			result.Header.Del("Content-Length")
+			result.Header.Set("Content-Type", "text/event-stream")
+			s.writeResult(writer, result)
+			return
+		}
+		if result.Stream != nil {
+			aggregated, aggErr := compat.AggregateResponsesStream(result.Stream, model)
+			if aggErr != nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
+				return
+			}
+			result.Body = aggregated
+			result.Stream = nil
+		} else {
+			convertedChat, convErr := compat.ResponsesToChat(result.Body)
+			if convErr != nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
+				return
+			}
+			result.Body = convertedChat
+		}
+		converted, convErr := compat.OpenAIToAnthropic(result.Body)
+		if convErr != nil {
+			writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
+			return
+		}
+		result.Body = converted
+		if result.Header == nil {
+			result.Header = make(http.Header)
+		}
+		result.Header.Del("Content-Length")
+		result.Header.Set("Content-Type", "application/json")
+		s.writeResult(writer, result)
+		return
+	}
+
+	result, err = s.gateway.Chat(request.Context(), openAIRequest, stream)
 	if err != nil {
 		s.writeGatewayError(writer, err)
 		return

@@ -12,7 +12,7 @@
   "data_dir": "data",
   "cli_pool_max_concurrent": 1,
   "cli_pool_acquire_timeout": 60,
-  "quota_retry_minutes": 30,
+  "quota_retry_minutes": 1440,
   "rate_retry_seconds": 45,
   "timeout_secs": 600,
   "_help_pool": "只有 ready / unavailable 两个逻辑池；Ready 使用简单环形轮询，不评分。",

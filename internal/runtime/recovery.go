@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
@@ -27,9 +28,14 @@ type CredentialValidator interface {
 }
 
 // QuotaProber verifies free-tier capacity before re-entry.
-// Prefer a real chat/rate-limit probe over a pure timer.
+// Prefer a real /responses probe (same path as live chat) over a pure timer.
 type QuotaProber interface {
 	ProbeFreeQuota(context.Context, account.Account) (account.UnavailableReason, string, error)
+}
+
+// QuotaUsageProber optionally returns free-tier used/limit observed on the probe.
+type QuotaUsageProber interface {
+	ProbeFreeQuotaUsage(context.Context, account.Account) (account.UnavailableReason, string, int64, int64, bool, error)
 }
 
 type CredentialRecoveryResult struct {
@@ -45,9 +51,11 @@ type QuotaRecoveryResult struct {
 	Skipped   int
 }
 
+const maxQuotaProbesPerTick = 8
+
 func RecoverCredentials(
 	ctx context.Context,
-	scheduler *scheduler.Scheduler,
+	pool *scheduler.Scheduler,
 	store CredentialStore,
 	refresher CredentialRefresher,
 	validator CredentialValidator,
@@ -73,10 +81,10 @@ func RecoverCredentials(
 			item.RetryAt = now.Add(30 * time.Minute)
 			item.LastErrorCode = "refresh-failed"
 			item.UpdatedAt = now.UTC()
-			if err := store.SaveAccount(ctx, item); err != nil {
-				return result, fmt.Errorf("save refresh failure for %s: %w", item.ID, err)
+			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+				result.Failed++
+				continue
 			}
-			scheduler.Upsert(item)
 			result.Failed++
 			continue
 		}
@@ -102,10 +110,10 @@ func RecoverCredentials(
 			result.Failed++
 		}
 		refreshed.UpdatedAt = now.UTC()
-		if err := store.SaveAccount(ctx, refreshed); err != nil {
-			return result, fmt.Errorf("save refreshed account %s: %w", refreshed.ID, err)
+		if err := saveAccountBestEffort(ctx, store, pool, refreshed); err != nil {
+			result.Failed++
+			continue
 		}
-		scheduler.Upsert(refreshed)
 	}
 	return result, nil
 }
@@ -113,7 +121,8 @@ func RecoverCredentials(
 func credentialRetryAt(reason account.UnavailableReason, now time.Time) time.Time {
 	switch reason {
 	case account.ReasonQuota:
-		return now.Add(30 * time.Minute)
+		// Free usage is a rolling ~24h window; short retries just burn probes.
+		return now.Add(24 * time.Hour)
 	case account.ReasonCooldown:
 		return now.Add(45 * time.Second)
 	case account.ReasonAuth, account.ReasonValidating:
@@ -177,13 +186,14 @@ func RecoverQuota(
 		return QuotaRecoveryResult{}, nil
 	}
 	if quotaRetry <= 0 {
-		quotaRetry = 30 * time.Minute
+		quotaRetry = 24 * time.Hour
 	}
 	accounts, err := store.ListAccounts(ctx)
 	if err != nil {
 		return QuotaRecoveryResult{}, fmt.Errorf("list accounts for quota recovery: %w", err)
 	}
 	result := QuotaRecoveryResult{}
+	probed := 0
 	for _, item := range accounts {
 		if item.Pool != account.PoolUnavailable || item.UnavailableReason != account.ReasonQuota {
 			result.Skipped++
@@ -193,27 +203,24 @@ func RecoverQuota(
 			result.Skipped++
 			continue
 		}
-
-		var (
-			reason    account.UnavailableReason
-			errorCode string
-			probeErr  error
-		)
-		if prober != nil {
-			reason, errorCode, probeErr = prober.ProbeFreeQuota(ctx, item)
-		} else {
-			reason, errorCode, probeErr = validator.Validate(ctx, item)
+		if probed >= maxQuotaProbesPerTick {
+			// Leave remaining due accounts for the next worker tick.
+			result.Skipped++
+			continue
 		}
+		probed++
+
+		reason, errorCode, actual, limit, hasUsage, probeErr := probeQuota(ctx, prober, validator, item)
 		if probeErr != nil {
 			// Transport/infra failures: keep unavailable and retry later without
 			// treating the account as still quota-exhausted.
 			item.RetryAt = now.Add(5 * time.Minute)
 			item.LastErrorCode = "quota-probe-error"
 			item.UpdatedAt = now.UTC()
-			if err := store.SaveAccount(ctx, item); err != nil {
-				return result, fmt.Errorf("save quota probe error for %s: %w", item.ID, err)
+			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+				result.Failed++
+				continue
 			}
-			pool.Upsert(item)
 			result.Failed++
 			continue
 		}
@@ -223,10 +230,18 @@ func RecoverQuota(
 			item.RetryAt = time.Time{}
 			item.LastErrorCode = ""
 			item.UpdatedAt = now.UTC()
-			if err := store.SaveAccount(ctx, item); err != nil {
-				return result, fmt.Errorf("save recovered quota account %s: %w", item.ID, err)
+			if hasUsage {
+				item.QuotaActual = actual
+				item.QuotaLimit = limit
+				item.LastSuccessAt = now.UTC()
+			} else if item.QuotaLimit > 0 && item.QuotaActual >= item.QuotaLimit {
+				// Clear "looks full" counters when probe succeeded without headers.
+				item.QuotaActual = 0
 			}
-			pool.Upsert(item)
+			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+				result.Failed++
+				continue
+			}
 			result.Recovered++
 			continue
 		}
@@ -239,11 +254,15 @@ func RecoverQuota(
 		if reason == account.ReasonQuota {
 			item.RetryAt = now.Add(quotaRetry)
 		}
-		item.UpdatedAt = now.UTC()
-		if err := store.SaveAccount(ctx, item); err != nil {
-			return result, fmt.Errorf("save deferred quota account %s: %w", item.ID, err)
+		if hasUsage {
+			item.QuotaActual = actual
+			item.QuotaLimit = limit
 		}
-		pool.Upsert(item)
+		item.UpdatedAt = now.UTC()
+		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+			result.Failed++
+			continue
+		}
 		if reason == account.ReasonQuota {
 			result.Deferred++
 		} else {
@@ -251,6 +270,39 @@ func RecoverQuota(
 		}
 	}
 	return result, nil
+}
+
+func probeQuota(
+	ctx context.Context,
+	prober QuotaProber,
+	validator CredentialValidator,
+	item account.Account,
+) (account.UnavailableReason, string, int64, int64, bool, error) {
+	if usageProber, ok := prober.(QuotaUsageProber); ok {
+		return usageProber.ProbeFreeQuotaUsage(ctx, item)
+	}
+	if prober != nil {
+		reason, code, err := prober.ProbeFreeQuota(ctx, item)
+		return reason, code, 0, 0, false, err
+	}
+	reason, code, err := validator.Validate(ctx, item)
+	return reason, code, 0, 0, false, err
+}
+
+func saveAccountBestEffort(
+	ctx context.Context,
+	store AccountStore,
+	pool *scheduler.Scheduler,
+	item account.Account,
+) error {
+	if err := store.SaveAccount(ctx, item); err != nil {
+		slog.Error("recovery save account failed", "account_id", item.ID, "error", err)
+		return err
+	}
+	if pool != nil {
+		pool.Upsert(item)
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -272,7 +324,9 @@ func RecoverDue(
 	// Quota is recovered via RecoverQuota after a real probe.
 	for _, item := range pool.PromoteDue(now) {
 		if err := store.SaveAccount(ctx, item); err != nil {
-			return fmt.Errorf("save promoted account %s: %w", item.ID, err)
+			// Do not abort the whole recovery tick for one account.
+			slog.Error("recovery promote save failed", "account_id", item.ID, "error", err)
+			continue
 		}
 	}
 	return nil
@@ -280,49 +334,46 @@ func RecoverDue(
 
 func RunRecovery(
 	ctx context.Context,
-	scheduler *scheduler.Scheduler,
+	pool *scheduler.Scheduler,
 	store AccountStore,
 	interval time.Duration,
 	options ...RecoveryOption,
 ) error {
-	config := recoveryConfig{quotaRetry: 30 * time.Minute}
+	config := recoveryConfig{quotaRetry: 24 * time.Hour}
 	for _, option := range options {
 		option(&config)
 	}
-	runOnce := func(now time.Time) error {
-		if err := RecoverDue(ctx, scheduler, store, now); err != nil {
-			return err
+	runOnce := func(now time.Time) {
+		if err := RecoverDue(ctx, pool, store, now); err != nil {
+			slog.Error("recovery promote tick failed", "error", err)
 		}
 		if config.credentialStore != nil && (config.quotaProber != nil || config.validator != nil) {
 			if _, err := RecoverQuota(
 				ctx,
-				scheduler,
+				pool,
 				config.credentialStore,
 				config.quotaProber,
 				config.validator,
 				now,
 				config.quotaRetry,
 			); err != nil {
-				return err
+				slog.Error("recovery quota tick failed", "error", err)
 			}
 		}
 		if config.credentialStore != nil && config.refresher != nil && config.validator != nil {
 			if _, err := RecoverCredentials(
 				ctx,
-				scheduler,
+				pool,
 				config.credentialStore,
 				config.refresher,
 				config.validator,
 				now,
 			); err != nil {
-				return err
+				slog.Error("recovery credential tick failed", "error", err)
 			}
 		}
-		return nil
 	}
-	if err := runOnce(time.Now().UTC()); err != nil {
-		return err
-	}
+	runOnce(time.Now().UTC())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -330,9 +381,7 @@ func RunRecovery(
 		case <-ctx.Done():
 			return nil
 		case now := <-ticker.C:
-			if err := runOnce(now); err != nil {
-				return err
-			}
+			runOnce(now.UTC())
 		}
 	}
 }

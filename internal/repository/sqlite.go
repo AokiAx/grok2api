@@ -229,7 +229,7 @@ func (a pythonV1Account) toV2(now time.Time, index int) account.Account {
 		pool = account.PoolUnavailable
 		reason = classifyLegacyDisabledReason(a.disabledReason, a.expiresAt.String, a.failCount, now)
 		if reason == account.ReasonQuota {
-			retryAt = now.Add(30*time.Minute + time.Duration(index)*30*time.Second)
+			retryAt = now.Add(24*time.Hour + time.Duration(index)*30*time.Second)
 		} else if reason == account.ReasonCooldown && cooldown.After(now) {
 			retryAt = cooldown
 		}
@@ -415,7 +415,7 @@ func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, boo
 			reason = account.ReasonDisabled
 		}
 		if reason == account.ReasonQuota {
-			retryAt = now.Add(30*time.Minute + time.Duration(index)*30*time.Second)
+			retryAt = now.Add(24*time.Hour + time.Duration(index)*30*time.Second)
 		}
 	}
 	return account.Account{
@@ -427,6 +427,7 @@ func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, boo
 		OIDCClientID:        a.OIDCClientID,
 		Email:               strings.ToLower(strings.TrimSpace(a.Email)),
 		UserID:              a.UserID,
+		TeamID:              strings.TrimSpace(a.TeamID),
 		Pool:                pool,
 		UnavailableReason:   reason,
 		RetryAt:             retryAt,

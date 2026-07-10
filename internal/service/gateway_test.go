@@ -372,3 +372,10 @@ func TestSuccessfulChatWithZeroRemainingMovesToQuota(t *testing.T) {
 	}
 	lease.Release()
 }
+
+func TestPoolUnavailableErrorString(t *testing.T) {
+	err := &service.PoolUnavailableError{Status: 429, RetryAfter: time.Minute}
+	if err.Error() == "" {
+		t.Fatal("empty error string")
+	}
+}

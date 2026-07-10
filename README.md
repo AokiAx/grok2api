@@ -189,7 +189,7 @@ curl http://127.0.0.1:8787/v1/chat/completions `
 
 关键恢复参数：
 
-- `quota_retry_minutes`：额度耗尽后的首次重试间隔，默认 30 分钟。
+- `quota_retry_minutes`：额度耗尽后的首次重试/探测间隔，默认 1440 分钟（24 小时，贴合 free 滚动窗口）。
 - `rate_retry_seconds`：普通 429 冷却时间，默认 45 秒。
 - `timeout_secs`：单次上游请求超时，默认 600 秒。
 

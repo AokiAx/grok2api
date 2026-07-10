@@ -148,3 +148,74 @@ func TestRefreshRejectsMissingRefreshFields(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestProbeFreeQuotaUsesRateLimitHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-ratelimit-limit-tokens", "1000")
+		w.Header().Set("x-ratelimit-remaining-tokens", "10")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL, "0.2.93", server.Client())
+	reason, code, err := client.ProbeFreeQuota(context.Background(), account.Account{AccessToken: "t"})
+	if err != nil || reason != "" {
+		t.Fatalf("probe err=%v reason=%q code=%q", err, reason, code)
+	}
+}
+
+func TestProbeFreeQuotaDetectsExhausted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-ratelimit-limit-tokens", "1000")
+		w.Header().Set("x-ratelimit-remaining-tokens", "0")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL, "0.2.93", server.Client())
+	reason, code, err := client.ProbeFreeQuota(context.Background(), account.Account{AccessToken: "t"})
+	if err != nil || reason != account.ReasonQuota {
+		t.Fatalf("probe err=%v reason=%q code=%q", err, reason, code)
+	}
+}
+
+func TestValidateModelsAndProbeSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/models"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case strings.HasSuffix(r.URL.Path, "/responses"):
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			payload := "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+			_, _ = w.Write([]byte(payload))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL, "0.2.93", server.Client())
+	reason, code, err := client.Validate(context.Background(), account.Account{AccessToken: "t"})
+	if err != nil || reason != "" || code != "" {
+		t.Fatalf("validate err=%v reason=%q code=%q", err, reason, code)
+	}
+}
+
+func TestValidateResponsesProbeAuthFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"Invalid or expired credentials"}`))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL, "0.2.93", server.Client())
+	reason, _, err := client.Validate(context.Background(), account.Account{AccessToken: "t"})
+	if err != nil || reason != account.ReasonAuth {
+		t.Fatalf("err=%v reason=%q", err, reason)
+	}
+}

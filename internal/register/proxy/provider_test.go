@@ -49,3 +49,11 @@ func TestNewDirectWhenEmpty(t *testing.T) {
 		t.Fatalf("expected direct empty, got %q", provider.Next())
 	}
 }
+
+func TestProviderAll(t *testing.T) {
+	provider := proxy.New("http://127.0.0.1:1", []string{"http://127.0.0.1:2", "http://127.0.0.1:3"})
+	all := provider.All()
+	if len(all) < 1 {
+		t.Fatalf("all=%#v", all)
+	}
+}

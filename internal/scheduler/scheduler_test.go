@@ -219,3 +219,18 @@ func TestUpsertAndPromotionAdvanceRevision(t *testing.T) {
 		t.Fatal("promotion did not advance revision")
 	}
 }
+
+func TestRecordUsageUpdatesQuotaAndSuccessTime(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	s := scheduler.New([]account.Account{readyAccount("a")})
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	lease.RecordUsage(10, 100, now)
+	item := lease.Account()
+	lease.Release()
+	if item.QuotaActual != 10 || item.QuotaLimit != 100 || item.LastSuccessAt.IsZero() {
+		t.Fatalf("item=%#v", item)
+	}
+}

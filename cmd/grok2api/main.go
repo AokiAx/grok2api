@@ -179,9 +179,11 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 
 	recoveryCtx, cancelRecovery := context.WithCancel(ctx)
 	defer cancelRecovery()
-	recoveryErrors := make(chan error, 1)
+	recoveryDone := make(chan struct{})
 	go func() {
-		recoveryErrors <- runtimeworker.RunRecovery(
+		defer close(recoveryDone)
+		// RunRecovery only exits on context cancel; per-account errors are logged.
+		if err := runtimeworker.RunRecovery(
 			recoveryCtx,
 			pool,
 			repo,
@@ -189,7 +191,9 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 			runtimeworker.WithCredentialRecovery(repo, upstreamClient, upstreamClient),
 			runtimeworker.WithQuotaProber(upstreamClient),
 			runtimeworker.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
-		)
+		); err != nil {
+			slog.Error("recovery worker stopped", "error", err)
+		}
 	}()
 	serverErrors := make(chan error, 1)
 	go func() {
@@ -201,13 +205,13 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
-	case err := <-recoveryErrors:
-		if err != nil {
-			return fmt.Errorf("recovery worker: %w", err)
-		}
-		return nil
+		err := server.Shutdown(shutdownCtx)
+		cancelRecovery()
+		<-recoveryDone
+		return err
 	case err := <-serverErrors:
+		cancelRecovery()
+		<-recoveryDone
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}

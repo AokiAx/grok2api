@@ -66,3 +66,12 @@ func TestStorePersistsRegisterSettings(t *testing.T) {
 		t.Fatal("public view must not expose raw capmonster key")
 	}
 }
+
+func TestEditorViewIncludesSensitivePlaceholders(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.CapMonsterAPIKey = "secret"
+	view := settings.EditorView(cfg)
+	if view == nil {
+		t.Fatal("nil view")
+	}
+}

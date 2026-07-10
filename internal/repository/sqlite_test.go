@@ -445,3 +445,29 @@ func TestSaveAccountPersistsTeamID(t *testing.T) {
 		t.Fatalf("accounts = %#v", accounts)
 	}
 }
+
+func TestImportLegacyJSONKeepsTeamID(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "cli_accounts.json")
+	payload := map[string]any{"accounts": []map[string]any{{
+		"id": "with-team", "key": "token", "email": "t@example.com", "user_id": "u1", "team_id": "team-42", "enabled": true,
+	}}}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(legacy, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := repository.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	count, err := repo.ImportLegacyJSON(ctx, legacy)
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil || accounts[0].TeamID != "team-42" {
+		t.Fatalf("accounts=%#v err=%v", accounts, err)
+	}
+}

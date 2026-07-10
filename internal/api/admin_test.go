@@ -280,3 +280,34 @@ func TestRegisterSettingsRoutes(t *testing.T) {
 		t.Fatalf("store after put = %#v", store.cfg)
 	}
 }
+
+func TestRegisterHealthRoute(t *testing.T) {
+	jobs := &fakeRegisterJobs{}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(&fakeAdmin{}, "secret"), api.WithRegisterJobs(jobs))
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/register/health", nil)
+	req.Header.Set("x-api-key", "secret")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cfmail") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestRegisterRoutesUnauthorized(t *testing.T) {
+	jobs := &fakeRegisterJobs{}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(&fakeAdmin{}, "secret"), api.WithRegisterJobs(jobs))
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/admin/api/register/status", nil),
+		httptest.NewRequest(http.MethodGet, "/admin/api/register/health", nil),
+		httptest.NewRequest(http.MethodPost, "/admin/api/register/stop", nil),
+	} {
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status=%d", req.URL.Path, rec.Code)
+		}
+	}
+}

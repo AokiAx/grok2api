@@ -16,3 +16,19 @@ func TestDefaultCatalogRoutesGrok45ToResponses(t *testing.T) {
 		t.Fatalf("item = %#v ok=%v", item, ok)
 	}
 }
+
+func TestCatalogListAndEnrich(t *testing.T) {
+	catalog := upstream.NewDefaultCatalog()
+	list := catalog.List()
+	if len(list) < 2 {
+		t.Fatalf("list=%#v", list)
+	}
+	item := map[string]any{"id": "grok-4.5"}
+	enriched := catalog.EnrichModelMap(item)
+	if enriched["api_backend"] != upstream.BackendResponses {
+		t.Fatalf("enriched=%#v", enriched)
+	}
+	if enriched["context_window"] != 500000 {
+		t.Fatalf("context=%#v", enriched["context_window"])
+	}
+}
