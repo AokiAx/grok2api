@@ -159,6 +159,17 @@ func NormalizeResponsesTools(raw any, maxTools int) []any {
 			}
 			seen[key] = struct{}{}
 		}
+		// Strict Responses backends require function.parameters.
+		if typeName == "function" {
+			if fn, ok := tool["function"].(map[string]any); ok {
+				if _, has := fn["parameters"]; !has {
+					fn["parameters"] = map[string]any{
+						"type":       "object",
+						"properties": map[string]any{},
+					}
+				}
+			}
+		}
 		out = append(out, tool)
 	}
 
