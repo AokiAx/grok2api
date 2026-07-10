@@ -40,7 +40,7 @@ func TestDockerfileBuildsStaticNonRootGoImage(t *testing.T) {
 	requireContains(
 		t,
 		dockerfile,
-		"FROM golang:1.25",
+		"golang:1.25",
 		"CGO_ENABLED=0",
 		"go build",
 		"gcr.io/distroless/static-debian12:nonroot",

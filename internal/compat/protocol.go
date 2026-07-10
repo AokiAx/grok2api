@@ -19,6 +19,7 @@ const MaxUpstreamTools = 512
 //   - backend_search / web_search / supports_backend_search
 //   - web_search_options
 //   - tools: [{ "type": "web_search" }] (OpenAI-style)
+//
 // Call EnsureBackendSearch after conversion to default-on for catalog models that
 // advertise supports_backend_search.
 func ChatToResponses(payload []byte) ([]byte, bool, error) {
