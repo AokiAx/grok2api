@@ -25,14 +25,24 @@ func (s *fakeStore) SaveAccount(_ context.Context, item account.Account) error {
 type fakeUpstream struct {
 	responses map[string][]*http.Response
 	err       error
+	method    string
+	path      string
+	payload   []byte
+	stream    bool
 }
 
-func (u *fakeUpstream) Chat(
+func (u *fakeUpstream) Request(
 	_ context.Context,
 	item account.Account,
-	_ []byte,
-	_ bool,
+	method string,
+	path string,
+	payload []byte,
+	stream bool,
 ) (*http.Response, error) {
+	u.method = method
+	u.path = path
+	u.payload = append([]byte(nil), payload...)
+	u.stream = stream
 	if u.err != nil {
 		return nil, u.err
 	}
@@ -198,5 +208,29 @@ func TestBadRequestIsReturnedWithoutMovingAccount(t *testing.T) {
 	}
 	if result.Status != 422 || len(store.saved) != 0 {
 		t.Fatalf("result = %d, saved=%d", result.Status, len(store.saved))
+	}
+}
+
+func TestGenericRequestUsesSameRotationAndLeasePipeline(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"b": {response(200, `{"data":[{"id":"grok-4.5"}]}`)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a"), ready("b")}),
+		store,
+		upstream,
+	)
+
+	result, err := gateway.Request(context.Background(), http.MethodGet, "/models", nil, false)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if result.Status != http.StatusOK || upstream.method != http.MethodGet || upstream.path != "/models" {
+		t.Fatalf("result=%d upstream=%s %s", result.Status, upstream.method, upstream.path)
+	}
+	if len(store.saved) != 1 || store.saved[0].UnavailableReason != account.ReasonQuota {
+		t.Fatalf("saved = %#v", store.saved)
 	}
 }

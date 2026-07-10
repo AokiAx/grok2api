@@ -15,14 +15,33 @@ import (
 )
 
 type fakeGateway struct {
-	result  service.ChatResult
-	err     error
-	payload []byte
+	result        service.ChatResult
+	err           error
+	payload       []byte
+	requestResult service.ChatResult
+	requestErr    error
+	method        string
+	path          string
+	stream        bool
 }
 
 func (g *fakeGateway) Chat(_ context.Context, payload []byte, _ bool) (service.ChatResult, error) {
 	g.payload = append([]byte(nil), payload...)
 	return g.result, g.err
+}
+
+func (g *fakeGateway) Request(
+	_ context.Context,
+	method string,
+	path string,
+	payload []byte,
+	stream bool,
+) (service.ChatResult, error) {
+	g.method = method
+	g.path = path
+	g.payload = append([]byte(nil), payload...)
+	g.stream = stream
+	return g.requestResult, g.requestErr
 }
 
 type fakeStatus struct{}
@@ -193,5 +212,144 @@ func TestChatAcceptsXAPIKey(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
+func TestModelsNormalizesUpstreamList(t *testing.T) {
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"data":[{"model":"grok-4.5"},{"id":"grok-fast","owned_by":"xai-cli"}]}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodGet, "/v1/models", nil),
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if gateway.method != http.MethodGet || gateway.path != "/models" {
+		t.Fatalf("upstream request = %s %s", gateway.method, gateway.path)
+	}
+	var payload struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if payload.Object != "list" || len(payload.Data) != 2 {
+		t.Fatalf("models = %#v", payload)
+	}
+	if payload.Data[0].ID != "grok-4.5" || payload.Data[0].Object != "model" || payload.Data[0].OwnedBy != "xai" {
+		t.Fatalf("first model = %#v", payload.Data[0])
+	}
+}
+
+func TestModelsFallsBackToConfiguredDefaults(t *testing.T) {
+	gateway := &fakeGateway{requestErr: context.DeadlineExceeded}
+	server := api.NewServer(
+		gateway,
+		fakeStatus{},
+		"",
+		api.WithDefaultModel("grok-custom"),
+	)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodGet, "/v1/models", nil),
+	)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "grok-custom") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBillingAndResponsesProxyThroughAccountGateway(t *testing.T) {
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"X-Upstream": []string{"yes"}},
+		Body:   []byte(`{"limit":100,"used":20}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+
+	billing := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		billing,
+		httptest.NewRequest(http.MethodGet, "/v1/billing", nil),
+	)
+	if billing.Code != http.StatusOK || gateway.path != "/billing" {
+		t.Fatalf("billing status=%d path=%q body=%s", billing.Code, gateway.path, billing.Body.String())
+	}
+
+	gateway.requestResult.Body = []byte(`{"id":"resp_1","object":"response"}`)
+	responses := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		responses,
+		httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok-4.5","input":"hi"}`)),
+	)
+	if responses.Code != http.StatusOK || gateway.method != http.MethodPost || gateway.path != "/responses" {
+		t.Fatalf("responses status=%d request=%s %s", responses.Code, gateway.method, gateway.path)
+	}
+}
+
+func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"model":"grok-4.5","choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","system":"be brief","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}`)),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode forwarded: %v", err)
+	}
+	messages := forwarded["messages"].([]any)
+	if len(messages) != 2 || messages[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("forwarded = %#v", forwarded)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["type"] != "message" || response["stop_reason"] != "end_turn" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestAnthropicMessagesConvertsStreamingSSE(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Stream: io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)),
+	)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status=%d content-type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
+	}
+	for _, event := range []string{"event: message_start", "event: content_block_delta", "event: message_stop"} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("missing %q in %s", event, body)
+		}
 	}
 }
