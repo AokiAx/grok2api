@@ -134,3 +134,38 @@ func TestPromoteDueMovesRecoverableAccountsBackToReady(t *testing.T) {
 		t.Fatalf("selected %q", lease.Account().ID)
 	}
 }
+
+func TestStatusAndEarliestRetry(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	s := scheduler.New([]account.Account{
+		readyAccount("ready"),
+		{
+			ID:                "quota",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonQuota,
+			RetryAt:           now.Add(20 * time.Minute),
+			MaxActive:         1,
+		},
+		{
+			ID:                "auth",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonAuth,
+			RetryAt:           now.Add(40 * time.Minute),
+			MaxActive:         1,
+		},
+	})
+
+	if s.ReadyCount() != 1 {
+		t.Fatalf("ready count = %d", s.ReadyCount())
+	}
+	ready, unavailable, reasons := s.Status()
+	if ready != 1 || unavailable != 2 {
+		t.Fatalf("status = %d/%d", ready, unavailable)
+	}
+	if reasons[account.ReasonQuota] != 1 || reasons[account.ReasonAuth] != 1 {
+		t.Fatalf("reasons = %#v", reasons)
+	}
+	if !s.EarliestRetry().Equal(now.Add(20 * time.Minute)) {
+		t.Fatalf("earliest retry = %s", s.EarliestRetry())
+	}
+}

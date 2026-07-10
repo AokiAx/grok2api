@@ -137,3 +137,61 @@ func TestChatAddsConfiguredDefaultModel(t *testing.T) {
 		t.Fatalf("model = %v; want grok-default", payload["model"])
 	}
 }
+
+func TestChatRequiresConfiguredAPIKey(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"ok":true}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "secret")
+
+	unauthorized := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		unauthorized,
+		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)),
+	)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+
+	authorizedRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{}`),
+	)
+	authorizedRequest.Header.Set("Authorization", "Bearer secret")
+	authorized := httptest.NewRecorder()
+	server.Handler().ServeHTTP(authorized, authorizedRequest)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d", authorized.Code)
+	}
+}
+
+func TestChatRejectsInvalidJSON(t *testing.T) {
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{invalid}`)),
+	)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400", recorder.Code)
+	}
+}
+
+func TestChatAcceptsXAPIKey(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"ok":true}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "secret")
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	request.Header.Set("x-api-key", "secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+}

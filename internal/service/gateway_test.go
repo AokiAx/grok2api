@@ -24,6 +24,7 @@ func (s *fakeStore) SaveAccount(_ context.Context, item account.Account) error {
 
 type fakeUpstream struct {
 	responses map[string][]*http.Response
+	err       error
 }
 
 func (u *fakeUpstream) Chat(
@@ -32,6 +33,9 @@ func (u *fakeUpstream) Chat(
 	_ []byte,
 	_ bool,
 ) (*http.Response, error) {
+	if u.err != nil {
+		return nil, u.err
+	}
 	queue := u.responses[item.ID]
 	response := queue[0]
 	u.responses[item.ID] = queue[1:]
@@ -143,4 +147,56 @@ func TestStreamingResponseKeepsLeaseUntilStreamCloses(t *testing.T) {
 		t.Fatalf("acquire after close: %v", err)
 	}
 	next.Release()
+}
+
+func TestOrdinaryRateLimitMovesAccountToCooldown(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"rate-limit"}`)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		upstream,
+		service.WithRateRetry(15*time.Second),
+	)
+
+	_, err := gateway.Chat(context.Background(), []byte(`{}`), false)
+	if _, ok := service.AsPoolUnavailable(err); !ok {
+		t.Fatalf("error = %v; want pool unavailable", err)
+	}
+	if len(store.saved) != 1 || store.saved[0].UnavailableReason != account.ReasonCooldown {
+		t.Fatalf("saved = %#v", store.saved)
+	}
+}
+
+func TestUpstreamNetworkErrorIsReturned(t *testing.T) {
+	want := context.DeadlineExceeded
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		&fakeStore{},
+		&fakeUpstream{err: want},
+	)
+	_, err := gateway.Chat(context.Background(), []byte(`{}`), false)
+	if err == nil {
+		t.Fatal("expected network error")
+	}
+}
+
+func TestBadRequestIsReturnedWithoutMovingAccount(t *testing.T) {
+	store := &fakeStore{}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		&fakeUpstream{responses: map[string][]*http.Response{
+			"a": {response(422, `{"error":"invalid request"}`)},
+		}},
+	)
+	result, err := gateway.Chat(context.Background(), []byte(`{}`), false)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if result.Status != 422 || len(store.saved) != 0 {
+		t.Fatalf("result = %d, saved=%d", result.Status, len(store.saved))
+	}
 }

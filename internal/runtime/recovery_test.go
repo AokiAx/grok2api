@@ -46,3 +46,17 @@ func TestRecoverDuePromotesQuotaButNotAuth(t *testing.T) {
 		t.Fatalf("saved = %#v; want quota", store.saved)
 	}
 }
+
+func TestRunRecoveryStopsWithContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runtime.RunRecovery(
+		ctx,
+		scheduler.New(nil),
+		&recoveryStore{},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("run recovery: %v", err)
+	}
+}

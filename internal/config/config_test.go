@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AokiAx/grok2api/internal/config"
 )
@@ -33,6 +34,33 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	}
 	if got.ProxyBaseURL != "https://example.test/v1" {
 		t.Fatalf("proxy URL = %q", got.ProxyBaseURL)
+	}
+}
+
+func TestConfigHelpers(t *testing.T) {
+	config := config.Config{Host: "0.0.0.0", Port: 8787, RequestTimeoutSec: 12}
+	if config.Address() != "0.0.0.0:8787" {
+		t.Fatalf("address = %q", config.Address())
+	}
+	if config.RequestTimeout() != 12*time.Second {
+		t.Fatalf("timeout = %s", config.RequestTimeout())
+	}
+}
+
+func TestLoadRejectsInvalidEnvironmentInteger(t *testing.T) {
+	t.Setenv("GROK2API_PORT", "not-a-number")
+	if _, err := config.Load(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Fatal("expected invalid environment integer error")
+	}
+}
+
+func TestLoadRejectsMalformedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{invalid}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected malformed config error")
 	}
 }
 
