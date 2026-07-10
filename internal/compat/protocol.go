@@ -19,7 +19,6 @@ const MaxUpstreamTools = 512
 //   - backend_search / web_search / supports_backend_search
 //   - web_search_options
 //   - tools: [{ "type": "web_search" }] (OpenAI-style)
-//
 // Call EnsureBackendSearch after conversion to default-on for catalog models that
 // advertise supports_backend_search.
 func ChatToResponses(payload []byte) ([]byte, bool, error) {
@@ -207,6 +206,14 @@ func NormalizeResponsesTools(raw any, maxTools int) []any {
 					cloned["type"] = "function"
 				} else {
 					continue
+				}
+			}
+			// Ensure top-level name for strict Responses backends.
+			if strings.TrimSpace(stringValue(cloned["name"])) == "" {
+				if fn, ok := cloned["function"].(map[string]any); ok {
+					if n := strings.TrimSpace(stringValue(fn["name"])); n != "" {
+						cloned["name"] = n
+					}
 				}
 			}
 			appendTool(cloned)
