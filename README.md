@@ -105,7 +105,7 @@ docker compose --profile flaresolverr up -d
 
 ## 导入账号
 
-在 `/panel` 中粘贴已授权凭证，先“预览”，再“导入”。
+在 `/panel` 中粘贴已授权凭证，或使用“从文件加载”选择 `auth.json` / `auth_from_*.json`，先“预览”，再“导入”。
 
 导入兼容：
 

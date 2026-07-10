@@ -660,10 +660,13 @@
         <div class="stack">
           <label for="input">账号 JSON</label>
           <textarea id="input" spellcheck="false" placeholder='[{"key":"...","refresh_token":"..."}] 或 auth.json map / access_token 也兼容'></textarea>
-          <div class="row">
+          <div class="row" style="align-items:center;gap:8px;flex-wrap:wrap">
+            <input id="importFile" type="file" accept=".json,.txt,application/json,text/plain" style="max-width:260px">
+            <button type="button" class="btn" id="loadFileButton">从文件加载</button>
             <button type="button" class="btn" id="previewButton">预览</button>
             <button type="button" class="btn primary" id="importButton">导入</button>
           </div>
+          <div class="meta" id="importFileMeta">可选择 auth.json / auth_from_*.json / 账号数组 JSON，再预览或导入</div>
         </div>
         <div class="stack" style="margin-top:12px">
           <label>输出</label>
@@ -1129,9 +1132,41 @@
       });
     }
 
+    async function loadImportFile() {
+      const input = byId('importFile');
+      const file = input.files && input.files[0];
+      if (!file) {
+        byId('importFileMeta').textContent = '请先选择 JSON 文件';
+        return;
+      }
+      try {
+        const text = await file.text();
+        // Validate/normalize early so user sees count before import.
+        const accounts = normalizeImportAccounts(text);
+        byId('input').value = text;
+        byId('importFileMeta').textContent =
+          `已加载 ${file.name} · ${accounts.length} 条 · ${(file.size / 1024).toFixed(1)} KB`;
+        byId('output').textContent = `文件已加载：${file.name}
+解析到 ${accounts.length} 条账号，可先预览再导入`;
+      } catch (error) {
+        byId('importFileMeta').textContent = `读取失败：${error.message || error}`;
+        byId('output').textContent = String(error.message || error);
+      }
+    }
+
     async function send(preview) {
       try {
-        const parsed = normalizeImportAccounts(byId('input').value);
+        const source = byId('input').value.trim();
+        if (!source) {
+          throw new Error('请粘贴 JSON，或先从文件加载');
+        }
+        const parsed = normalizeImportAccounts(source);
+        if (!parsed.length) {
+          throw new Error('未解析到可导入账号');
+        }
+        byId('output').textContent = preview
+          ? `预览中… ${parsed.length} 条`
+          : `导入中… ${parsed.length} 条`;
         const path = preview ? '/admin/api/accounts/import/preview' : '/admin/api/accounts/import';
         const response = await fetch(path, {
           method: 'POST',
@@ -1142,7 +1177,11 @@
           logout();
           return;
         }
-        byId('output').textContent = JSON.stringify(await response.json(), null, 2);
+        const data = await response.json();
+        byId('output').textContent = JSON.stringify(data, null, 2);
+        if (!preview) {
+          byId('importFile').value = '';
+        }
         await refresh();
       } catch (error) {
         byId('output').textContent = String(error.message || error);
@@ -1435,6 +1474,8 @@ async function stopRegister() {
     });
     byId('loginForm').addEventListener('submit', handleLogin);
     byId('logoutButton').onclick = logout;
+    byId('loadFileButton').onclick = () => loadImportFile();
+    byId('importFile').onchange = () => loadImportFile();
     byId('previewButton').onclick = () => send(true);
     byId('importButton').onclick = () => send(false);
     byId('search').oninput = renderAccounts;
