@@ -719,6 +719,7 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 			delete(payload, "user")
 			delete(payload, "tool_resources")
 			delete(payload, "web_search_options")
+			delete(payload, "external_web_access")
 			if encoded, err := json.Marshal(payload); err == nil {
 				body = encoded
 			}
