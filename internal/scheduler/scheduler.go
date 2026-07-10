@@ -104,6 +104,34 @@ func (s *Scheduler) EarliestRetry() time.Time {
 	return earliest
 }
 
+func (s *Scheduler) PromoteDue(now time.Time) []account.Account {
+	s.mu.Lock()
+	var promoted []account.Account
+	for _, item := range s.accounts {
+		if item.Pool != account.PoolUnavailable {
+			continue
+		}
+		if item.UnavailableReason != account.ReasonQuota && item.UnavailableReason != account.ReasonCooldown {
+			continue
+		}
+		if item.RetryAt.IsZero() || item.RetryAt.After(now) {
+			continue
+		}
+		item.Pool = account.PoolReady
+		item.UnavailableReason = ""
+		item.RetryAt = time.Time{}
+		item.LastErrorCode = ""
+		item.UpdatedAt = now.UTC()
+		s.ready = append(s.ready, item.ID)
+		promoted = append(promoted, *item)
+	}
+	s.mu.Unlock()
+	if len(promoted) > 0 {
+		s.signal()
+	}
+	return promoted
+}
+
 func (s *Scheduler) signal() {
 	select {
 	case s.notify <- struct{}{}:

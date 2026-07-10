@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -146,8 +147,9 @@ func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string) (int, error)
 	defer func() { _ = tx.Rollback() }()
 
 	count := 0
-	for _, legacy := range payload.Accounts {
-		item, ok := legacy.toAccount()
+	now := time.Now().UTC()
+	for index, legacy := range payload.Accounts {
+		item, ok := legacy.toAccount(now, index)
 		if !ok {
 			continue
 		}
@@ -162,7 +164,7 @@ func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string) (int, error)
 	return count, nil
 }
 
-func (a legacyAccount) toAccount() (account.Account, bool) {
+func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, bool) {
 	token := strings.TrimSpace(a.Key)
 	if token == "" {
 		token = strings.TrimSpace(a.AccessToken)
@@ -180,6 +182,7 @@ func (a legacyAccount) toAccount() (account.Account, bool) {
 
 	pool := account.PoolReady
 	reason := account.UnavailableReason("")
+	retryAt := time.Time{}
 	if a.Enabled != nil && !*a.Enabled {
 		pool = account.PoolUnavailable
 		switch {
@@ -187,11 +190,17 @@ func (a legacyAccount) toAccount() (account.Account, bool) {
 			reason = account.ReasonQuota
 		case strings.Contains(strings.ToLower(a.LastErrorCode), "token"), strings.Contains(strings.ToLower(a.LastErrorCode), "auth"):
 			reason = account.ReasonAuth
+		case a.FailCount >= 5 && !parseTime(a.ExpiresAt).IsZero() && parseTime(a.ExpiresAt).Before(now):
+			reason = account.ReasonAuth
+		case a.FailCount >= 5:
+			reason = account.ReasonQuota
 		default:
 			reason = account.ReasonDisabled
 		}
+		if reason == account.ReasonQuota {
+			retryAt = now.Add(30*time.Minute + time.Duration(index)*30*time.Second)
+		}
 	}
-	now := time.Now().UTC()
 	return account.Account{
 		ID:                  id,
 		AccessToken:         token,
@@ -203,6 +212,7 @@ func (a legacyAccount) toAccount() (account.Account, bool) {
 		UserID:              a.UserID,
 		Pool:                pool,
 		UnavailableReason:   reason,
+		RetryAt:             retryAt,
 		LastErrorCode:       a.LastErrorCode,
 		RequestCount:        a.RequestCount,
 		AuthenticationFails: a.FailCount,
@@ -210,6 +220,49 @@ func (a legacyAccount) toAccount() (account.Account, bool) {
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}, true
+}
+
+func (r *SQLite) SaveAccount(ctx context.Context, item account.Account) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save account: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	fromPool := ""
+	fromReason := ""
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT pool, unavailable_reason FROM accounts WHERE id=?`,
+		item.ID,
+	).Scan(&fromPool, &fromReason)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("load existing account state: %w", err)
+	}
+	if err := upsertAccount(ctx, tx, item); err != nil {
+		return err
+	}
+	if fromPool != string(item.Pool) || fromReason != string(item.UnavailableReason) {
+		_, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO account_state_events (
+				account_id, from_pool, to_pool, reason, error_code, created_at
+			) VALUES (?, ?, ?, ?, ?, ?)`,
+			item.ID,
+			fromPool,
+			item.Pool,
+			item.UnavailableReason,
+			item.LastErrorCode,
+			time.Now().UTC().Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return fmt.Errorf("record account state event: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit account save: %w", err)
+	}
+	return nil
 }
 
 func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error {

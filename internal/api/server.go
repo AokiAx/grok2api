@@ -96,6 +96,24 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 	writer.WriteHeader(result.Status)
+	if result.Stream != nil {
+		defer result.Stream.Close()
+		buffer := make([]byte, 32*1024)
+		for {
+			count, readErr := result.Stream.Read(buffer)
+			if count > 0 {
+				if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
+					return
+				}
+				if flusher, ok := writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}
 	_, _ = writer.Write(result.Body)
 }
 

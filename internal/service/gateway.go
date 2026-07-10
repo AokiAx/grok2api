@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
@@ -25,6 +26,7 @@ type ChatResult struct {
 	Status int
 	Header http.Header
 	Body   []byte
+	Stream io.ReadCloser
 }
 
 type Gateway struct {
@@ -89,6 +91,16 @@ func (g *Gateway) Chat(ctx context.Context, payload []byte, stream bool) (ChatRe
 			lease.Release()
 			return ChatResult{}, err
 		}
+		if stream && response.StatusCode < 400 {
+			return ChatResult{
+				Status: response.StatusCode,
+				Header: response.Header.Clone(),
+				Stream: &leaseReadCloser{
+					body:  response.Body,
+					lease: lease,
+				},
+			}, nil
+		}
 		body, readErr := io.ReadAll(response.Body)
 		closeErr := response.Body.Close()
 		if readErr != nil {
@@ -136,6 +148,29 @@ func (g *Gateway) Chat(ctx context.Context, payload []byte, stream bool) (ChatRe
 	}
 
 	return ChatResult{}, g.poolUnavailable()
+}
+
+type leaseReadCloser struct {
+	body  io.ReadCloser
+	lease *scheduler.Lease
+	once  sync.Once
+}
+
+func (r *leaseReadCloser) Read(buffer []byte) (int, error) {
+	count, err := r.body.Read(buffer)
+	if errors.Is(err, io.EOF) {
+		_ = r.Close()
+	}
+	return count, err
+}
+
+func (r *leaseReadCloser) Close() error {
+	var closeErr error
+	r.once.Do(func() {
+		closeErr = r.body.Close()
+		r.lease.Release()
+	})
+	return closeErr
 }
 
 type PoolUnavailableError struct {
