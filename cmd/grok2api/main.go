@@ -165,6 +165,7 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 			pool,
 			repo,
 			time.Minute,
+			runtimeworker.WithCredentialRecovery(repo, upstreamClient, upstreamClient),
 		)
 	}()
 	serverErrors := make(chan error, 1)

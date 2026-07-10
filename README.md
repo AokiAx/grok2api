@@ -85,6 +85,8 @@ go build -trimpath -o grok2api.exe ./cmd/grok2api
 
 管理面板支持删除账号和人工“恢复验证”。人工恢复同样先验证凭证，不会直接强制标记可用。
 
+对带有 `refresh_token + oidc_issuer + oidc_client_id` 的 `auth` 账号，后台恢复 worker 会执行 OIDC refresh、更新 access/refresh token，再调用 `/models` 验证；成功后自动回到 Ready。刷新失败会退避 30 分钟，不会每个请求重复撞认证端点。
+
 ## 额度耗尽后的流程
 
 1. 当前账号返回 rolling quota / `subscription:free-usage-exhausted`。
@@ -92,7 +94,7 @@ go build -trimpath -o grok2api.exe ./cmd/grok2api
 3. 当前请求继续尝试下一个 Ready 账号。
 4. 如果本轮所有账号都因额度耗尽失败，开启全池 quota 熔断并返回 `429 + Retry-After`。
 5. 号池发生变化（新账号导入、人工恢复、到期恢复）时，旧熔断自动失效，允许新一轮探测。
-6. `quota` / `cooldown` 到期后由恢复 worker 放回 Ready；`auth` 不会自动恢复，必须更新凭证或人工验证。
+6. `quota` / `cooldown` 到期后由恢复 worker 放回 Ready；`auth` 会优先尝试 OIDC refresh，缺少刷新字段或持续失败时才需要重新导入凭证或人工验证。
 
 不会回退读取单账号 `~/.grok/auth.json`，因此空池会返回结构化 429，而不是因缺失文件返回 503。
 
@@ -143,6 +145,7 @@ Go 服务首次打开数据库时会执行幂等迁移：
 - 当 v2 数据库为空时，兼容导入 `data/cli_accounts.json`。
 - Python 中已禁用且错误含 `usage-exhausted` 的账号迁移为 `unavailable(quota)`。
 - token/auth/401/403/refresh 错误迁移为 `unavailable(auth)`。
+- 已过期凭证即使旧文件仍标记 enabled，也先进入 `unavailable(auth)`，由后台 OIDC refresh 恢复，避免首批业务请求承担账号清洗。
 - quota 账号会设置错峰恢复时间，避免同时打穿上游。
 
 迁移前仍应备份整个 `data/` 目录。`migrate` 和 `status` 命令只输出状态，不启动 HTTP 服务。

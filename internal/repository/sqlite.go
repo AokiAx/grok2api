@@ -213,7 +213,11 @@ func (a pythonV1Account) toV2(now time.Time, index int) account.Account {
 	if a.cooldownUntil.Valid && a.cooldownUntil.Float64 > 0 {
 		cooldown = unixFloatTime(a.cooldownUntil.Float64)
 	}
-	if a.enabled && cooldown.After(now) {
+	expiresAt := parseTime(a.expiresAt.String)
+	if !expiresAt.IsZero() && !expiresAt.After(now) {
+		pool = account.PoolUnavailable
+		reason = account.ReasonAuth
+	} else if a.enabled && cooldown.After(now) {
 		pool = account.PoolUnavailable
 		reason = account.ReasonCooldown
 		retryAt = cooldown
@@ -238,7 +242,7 @@ func (a pythonV1Account) toV2(now time.Time, index int) account.Account {
 		ID:                  a.id,
 		AccessToken:         a.accessToken,
 		RefreshToken:        a.refreshToken.String,
-		ExpiresAt:           parseTime(a.expiresAt.String),
+		ExpiresAt:           expiresAt,
 		OIDCIssuer:          defaultString(a.oidcIssuer, "https://auth.x.ai"),
 		OIDCClientID:        a.oidcClientID,
 		Email:               strings.ToLower(strings.TrimSpace(a.email)),
@@ -387,7 +391,11 @@ func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, boo
 	pool := account.PoolReady
 	reason := account.UnavailableReason("")
 	retryAt := time.Time{}
-	if a.Enabled != nil && !*a.Enabled {
+	expiresAt := parseTime(a.ExpiresAt)
+	if !expiresAt.IsZero() && !expiresAt.After(now) {
+		pool = account.PoolUnavailable
+		reason = account.ReasonAuth
+	} else if a.Enabled != nil && !*a.Enabled {
 		pool = account.PoolUnavailable
 		switch {
 		case strings.Contains(strings.ToLower(a.LastErrorCode), "usage-exhausted"):
@@ -409,7 +417,7 @@ func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, boo
 		ID:                  id,
 		AccessToken:         token,
 		RefreshToken:        a.RefreshToken,
-		ExpiresAt:           parseTime(a.ExpiresAt),
+		ExpiresAt:           expiresAt,
 		OIDCIssuer:          defaultString(a.OIDCIssuer, "https://auth.x.ai"),
 		OIDCClientID:        a.OIDCClientID,
 		Email:               strings.ToLower(strings.TrimSpace(a.Email)),
