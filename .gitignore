@@ -13,6 +13,22 @@ venv/
 *.log
 .DS_Store
 
+# Go build / coverage artifacts
+*.exe
+grok2api
+grok2api-linux
+grok2api-hotfix
+coverage
+coverage.out
+coverage_funcs.txt
+*.out
+*.test
+
+# Local debug dumps (never commit)
+tmp_*.jsonl
+tmp_*.json
+*.ipynb
+
 # Secrets & runtime data (never push)
 .env
 config.json
@@ -34,6 +50,7 @@ auth.json
 register/output/
 auth_from_tokens.json
 tokens-*.json
+tokens-*.txt
 **/grok_tokens/
 auth_from_sso_*.json
 grok_sso_*.txt
