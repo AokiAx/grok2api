@@ -11,6 +11,13 @@ import (
 // Only fields accepted by the Grok /responses API are forwarded. OpenAI-specific
 // fields like tools, tool_choice, metadata, user, tool_resources are stripped
 // because the upstream Rust backend rejects unknown fields (serde untagged enum).
+//
+// Native Grok WebSearch is server-side "backend search". Clients can enable it via:
+//   - backend_search / web_search / supports_backend_search
+//   - web_search_options
+//   - tools: [{ "type": "web_search" }] (OpenAI-style)
+// Call EnsureBackendSearch after conversion to default-on for catalog models that
+// advertise supports_backend_search.
 func ChatToResponses(payload []byte) ([]byte, bool, error) {
 	var input map[string]any
 	if err := json.Unmarshal(payload, &input); err != nil {
@@ -44,6 +51,12 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 			output["backend_search"] = true
 		}
 	}
+	// OpenAI Responses-style built-in web_search tool.
+	if hasWebSearchTool(input["tools"]) {
+		if _, exists := output["backend_search"]; !exists {
+			output["backend_search"] = true
+		}
+	}
 
 	if effort := extractReasoningEffort(input); effort != "" {
 		output["reasoning_effort"] = effort
@@ -54,6 +67,72 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("encode responses request: %w", err)
 	}
 	return encoded, stream, nil
+}
+
+// EnsureBackendSearch sets backend_search when the model supports native search
+// and the client has not already provided an explicit value.
+//
+// Respects client-provided backend_search / web_search (including false).
+func EnsureBackendSearch(payload []byte, enabled bool) ([]byte, error) {
+	if !enabled {
+		return payload, nil
+	}
+	var input map[string]any
+	if err := json.Unmarshal(payload, &input); err != nil {
+		return nil, fmt.Errorf("decode responses request: %w", err)
+	}
+	if _, exists := input["backend_search"]; exists {
+		return payload, nil
+	}
+	if _, exists := input["web_search"]; exists {
+		// Mirror explicit web_search into backend_search for CLI-compatible backends.
+		input["backend_search"] = truthy(input["web_search"])
+	} else {
+		input["backend_search"] = true
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode responses request: %w", err)
+	}
+	return encoded, nil
+}
+
+func hasWebSearchTool(raw any) bool {
+	tools, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range tools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(stringValue(tool["type"]))) {
+		case "web_search", "web_search_preview", "websearch":
+			return true
+		}
+	}
+	return false
+}
+
+func truthy(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	default:
+		return value != nil
+	}
 }
 
 // sanitizeMessages strips OpenAI-specific fields from messages that the Grok

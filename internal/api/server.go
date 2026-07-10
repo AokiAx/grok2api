@@ -493,9 +493,78 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	body, _, clientStream, err := compat.NormalizeChatRequest(body, s.defaultModel)
+	body, model, clientStream, err := compat.NormalizeChatRequest(body, s.defaultModel)
 	if err != nil {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+
+	// Prefer /responses for catalog models so free-quota headers, prompt-cache,
+	// and native backend_search (WebSearch) stay aligned with the Grok CLI path.
+	if s.preferResponses && s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
+		responsesBody, _, convertErr := compat.ChatToResponses(body)
+		if convertErr != nil {
+			writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
+			return
+		}
+		if info, ok := s.modelCatalog.Get(model); ok {
+			if ensured, ensureErr := compat.EnsureBackendSearch(responsesBody, info.SupportsBackendSearch); ensureErr == nil {
+				responsesBody = ensured
+			}
+		}
+		result, reqErr := s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
+		if reqErr != nil {
+			s.writeGatewayError(writer, reqErr)
+			return
+		}
+		if result.Status >= http.StatusBadRequest {
+			if result.Stream != nil {
+				data, readErr := io.ReadAll(result.Stream)
+				_ = result.Stream.Close()
+				if readErr == nil {
+					result.Body = data
+					result.Stream = nil
+				}
+			}
+			s.writeResult(writer, result)
+			return
+		}
+		if clientStream {
+			if result.Stream == nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Upstream stream missing")
+				return
+			}
+			result.Stream = compat.NewResponsesToChatStream(result.Stream, model)
+			if result.Header == nil {
+				result.Header = make(http.Header)
+			}
+			result.Header.Del("Content-Length")
+			result.Header.Set("Content-Type", "text/event-stream")
+			s.writeResult(writer, result)
+			return
+		}
+		if result.Stream != nil {
+			aggregated, aggErr := compat.AggregateResponsesStream(result.Stream, model)
+			if aggErr != nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
+				return
+			}
+			result.Body = aggregated
+			result.Stream = nil
+		} else {
+			converted, convErr := compat.ResponsesToChat(result.Body)
+			if convErr != nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
+				return
+			}
+			result.Body = converted
+		}
+		if result.Header == nil {
+			result.Header = make(http.Header)
+		}
+		result.Header.Del("Content-Length")
+		result.Header.Set("Content-Type", "application/json")
+		s.writeResult(writer, result)
 		return
 	}
 
@@ -641,13 +710,28 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 				}
 				delete(payload, "max_tokens")
 			}
+			// Strip OpenAI-only fields that the Responses backend rejects.
+			delete(payload, "tools")
+			delete(payload, "tool_choice")
+			delete(payload, "metadata")
+			delete(payload, "user")
+			delete(payload, "tool_resources")
+			delete(payload, "web_search_options")
 			if encoded, err := json.Marshal(payload); err == nil {
 				body = encoded
 			}
 		}
 	}
+	// Default-on native WebSearch for models that advertise it.
+	model := requestModel(body, s.defaultModel)
+	if s.modelCatalog != nil {
+		if info, ok := s.modelCatalog.Get(model); ok {
+			if ensured, ensureErr := compat.EnsureBackendSearch(body, info.SupportsBackendSearch); ensureErr == nil {
+				body = ensured
+			}
+		}
+	}
 	if !stream {
-		model := requestModel(body, s.defaultModel)
 		if s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
 			result, err := s.gateway.Request(request.Context(), http.MethodPost, "/responses", body, true)
 			if err != nil {
@@ -742,7 +826,7 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	// Prefer the same responses backend as OpenAI chat for catalog models so
-	// free-quota headers / prompt-cache behavior stay consistent.
+	// free-quota headers / prompt-cache / native backend_search stay consistent.
 	model := requestModel(openAIRequest, s.defaultModel)
 	var result service.ChatResult
 	if s.preferResponses && s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
@@ -750,6 +834,11 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		if convertErr != nil {
 			writeOpenAIError(writer, http.StatusBadRequest, "Invalid Anthropic request")
 			return
+		}
+		if info, ok := s.modelCatalog.Get(model); ok {
+			if ensured, ensureErr := compat.EnsureBackendSearch(responsesBody, info.SupportsBackendSearch); ensureErr == nil {
+				responsesBody = ensured
+			}
 		}
 		result, err = s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
 		if err != nil {

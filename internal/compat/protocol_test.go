@@ -95,6 +95,60 @@ func TestChatToResponsesPassesBackendSearch(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesMapsWebSearchTool(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["backend_search"] != true {
+		t.Fatalf("backend_search = %#v", payload["backend_search"])
+	}
+	if _, ok := payload["tools"]; ok {
+		t.Fatalf("tools should be stripped: %s", out)
+	}
+}
+
+func TestEnsureBackendSearchDefaultsOnAndRespectsExplicit(t *testing.T) {
+	enabled, err := compat.EnsureBackendSearch([]byte(`{"model":"grok-4.5","input":[]}`), true)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(enabled, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["backend_search"] != true {
+		t.Fatalf("default backend_search = %#v", payload["backend_search"])
+	}
+
+	kept, err := compat.EnsureBackendSearch([]byte(`{"model":"grok-4.5","backend_search":false}`), true)
+	if err != nil {
+		t.Fatalf("ensure explicit: %v", err)
+	}
+	if err := json.Unmarshal(kept, &payload); err != nil {
+		t.Fatalf("decode explicit: %v", err)
+	}
+	if payload["backend_search"] != false {
+		t.Fatalf("explicit false overwritten: %#v", payload["backend_search"])
+	}
+
+	mirrored, err := compat.EnsureBackendSearch([]byte(`{"model":"grok-4.5","web_search":true}`), true)
+	if err != nil {
+		t.Fatalf("ensure web_search: %v", err)
+	}
+	if err := json.Unmarshal(mirrored, &payload); err != nil {
+		t.Fatalf("decode web_search: %v", err)
+	}
+	if payload["backend_search"] != true {
+		t.Fatalf("web_search mirror = %#v", payload["backend_search"])
+	}
+}
+
 func TestChatToResponsesStripsOpenAIToolFields(t *testing.T) {
 	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"foo"}}],"tool_choice":"auto","metadata":{"a":1},"user":"u1","tool_resources":{}}`)
 	out, _, err := compat.ChatToResponses(body)

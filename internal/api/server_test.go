@@ -78,7 +78,7 @@ func TestHealthReturnsTwoPoolSummary(t *testing.T) {
 }
 
 func TestChatReturns429WithRetryAfterWhenReadyPoolEmpty(t *testing.T) {
-	gateway := &fakeGateway{err: &service.PoolUnavailableError{
+	gateway := &fakeGateway{requestErr: &service.PoolUnavailableError{
 		Status:     http.StatusTooManyRequests,
 		RetryAfter: 30 * time.Minute,
 	}}
@@ -101,10 +101,17 @@ func TestChatReturns429WithRetryAfterWhenReadyPoolEmpty(t *testing.T) {
 }
 
 func TestChatStreamsSSEAndFlushesContent(t *testing.T) {
-	gateway := &fakeGateway{result: service.ChatResult{
+	sse := `event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hello"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5","output_text":"hello"}}
+
+`
+	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
 		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
-		Stream: io.NopCloser(strings.NewReader("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"grok-4.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")),
+		Stream: io.NopCloser(strings.NewReader(sse)),
 	}}
 	server := api.NewServer(gateway, fakeStatus{}, "")
 	request := httptest.NewRequest(
@@ -128,11 +135,115 @@ func TestChatStreamsSSEAndFlushesContent(t *testing.T) {
 	}
 }
 
+func TestChatRoutesResponsesBackendAndEnablesSearch(t *testing.T) {
+	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"searched\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Stream: io.NopCloser(strings.NewReader(sse)),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/chat/completions",
+			strings.NewReader(`{"model":"grok-4.5","messages":[{"role":"user","content":"latest news"}],"stream":false}`),
+		),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if gateway.method != http.MethodPost || gateway.path != "/responses" || !gateway.stream {
+		t.Fatalf("upstream = %s %s stream=%v", gateway.method, gateway.path, gateway.stream)
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode forwarded: %v", err)
+	}
+	if forwarded["backend_search"] != true {
+		t.Fatalf("backend_search missing/false: %#v", forwarded)
+	}
+	if _, ok := forwarded["input"]; !ok {
+		t.Fatalf("expected responses input: %#v", forwarded)
+	}
+	if !strings.Contains(recorder.Body.String(), "searched") {
+		t.Fatalf("body=%s", recorder.Body.String())
+	}
+}
+
+func TestChatStreamsConvertedResponsesSSE(t *testing.T) {
+	sse := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_s\",\"model\":\"grok-4.5\",\"output_text\":\"hello\"}}\n\n"
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Stream: io.NopCloser(strings.NewReader(sse)),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/chat/completions",
+			strings.NewReader(`{"model":"grok-4.5","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+		),
+	)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status=%d content-type=%q body=%s", recorder.Code, recorder.Header().Get("Content-Type"), body)
+	}
+	if !strings.Contains(body, `"content":"hello"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("body=%s", body)
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if forwarded["backend_search"] != true {
+		t.Fatalf("backend_search = %#v", forwarded["backend_search"])
+	}
+}
+
+func TestChatRespectsExplicitBackendSearchFalse(t *testing.T) {
+	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"ok\"}}\n\n"
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Stream: io.NopCloser(strings.NewReader(sse)),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/chat/completions",
+			strings.NewReader(`{"model":"grok-4.5","backend_search":false,"messages":[{"role":"user","content":"hi"}]}`),
+		),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if forwarded["backend_search"] != false {
+		t.Fatalf("backend_search = %#v", forwarded["backend_search"])
+	}
+}
+
 func TestChatAddsConfiguredDefaultModel(t *testing.T) {
-	gateway := &fakeGateway{result: service.ChatResult{
+	sse := `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-default","output_text":"ok"}}
+
+`
+	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
 		Header: make(http.Header),
-		Stream: io.NopCloser(strings.NewReader("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-default\",\"output_text\":\"ok\"}}\n\n")),
+		Stream: io.NopCloser(strings.NewReader(sse)),
 	}}
 	server := api.NewServer(
 		gateway,
@@ -162,10 +273,13 @@ func TestChatAddsConfiguredDefaultModel(t *testing.T) {
 }
 
 func TestChatRequiresConfiguredAPIKey(t *testing.T) {
-	gateway := &fakeGateway{result: service.ChatResult{
+	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
 		Header: make(http.Header),
-		Stream: io.NopCloser(strings.NewReader("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"ok\"}}\n\n")),
+		Stream: io.NopCloser(strings.NewReader(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5","output_text":"ok"}}
+
+`)),
 	}}
 	server := api.NewServer(gateway, fakeStatus{}, "secret")
 
@@ -204,10 +318,13 @@ func TestChatRejectsInvalidJSON(t *testing.T) {
 }
 
 func TestChatAcceptsXAPIKey(t *testing.T) {
-	gateway := &fakeGateway{result: service.ChatResult{
+	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
 		Header: make(http.Header),
-		Stream: io.NopCloser(strings.NewReader("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"ok\"}}\n\n")),
+		Stream: io.NopCloser(strings.NewReader(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5","output_text":"ok"}}
+
+`)),
 	}}
 	server := api.NewServer(gateway, fakeStatus{}, "secret")
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
@@ -329,6 +446,9 @@ func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
 	}
 	if _, ok := forwarded["input"]; !ok {
 		t.Fatalf("forwarded missing input: %#v", forwarded)
+	}
+	if forwarded["backend_search"] != true {
+		t.Fatalf("backend_search missing on anthropic path: %#v", forwarded)
 	}
 	var response map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
