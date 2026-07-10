@@ -123,7 +123,7 @@ jobs:
           docker logs --tail 100 grok2api-go || true
           docker rm -f grok2api-go 2>/dev/null || true
 
-          # Rollback to Python container or the previous Go image.
+          # Rollback to previous Go image; legacy Python container only if still present.
           if [ -n "$previous" ]; then
             run_go "$previous"
           elif [ "$python_was_running" = true ]; then

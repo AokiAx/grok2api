@@ -35,3 +35,5 @@ register/output/
 auth_from_tokens.json
 tokens-*.json
 **/grok_tokens/
+auth_from_sso_*.json
+grok_sso_*.txt

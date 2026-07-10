@@ -95,7 +95,7 @@ func TestDeployWorkflowIsManualAndPinsDigest(t *testing.T) {
 		"RepoDigests",
 		"8788",
 		"Verify promoted service",
-		"Rollback to Python container",
+		"Rollback to previous Go image",
 		"docker start grok2api-cli",
 	)
 }

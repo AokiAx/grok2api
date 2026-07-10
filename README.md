@@ -252,10 +252,10 @@ GitHub `production` environment 需要：
 go test ./...
 go test -race ./...
 go vet ./...
-pytest -q
+go build ./cmd/grok2api
 ```
 
-CI 对 `internal/...` 执行 80% 覆盖率门禁，并保留 Python 旧实现回归测试，直到迁移完全结束。
+CI 对核心 `internal/...` 包执行 80% 覆盖率门禁。运行时以 Go 服务为准。
 
 ## 说明
 
