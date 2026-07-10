@@ -36,7 +36,7 @@ func requireContains(t *testing.T, content string, values ...string) {
 }
 
 func TestDockerfileBuildsStaticNonRootGoImage(t *testing.T) {
-	dockerfile := readFile(t, "Dockerfile.go")
+	dockerfile := readFile(t, "Dockerfile.golang")
 	requireContains(
 		t,
 		dockerfile,
