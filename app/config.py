@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from .unified_config import load_unified_config
 
@@ -43,6 +48,19 @@ def _file_defaults() -> dict[str, Any]:
     return out
 
 
+class UnifiedConfigSettingsSource(PydanticBaseSettingsSource):
+    def get_field_value(
+        self,
+        field: FieldInfo,
+        field_name: str,
+    ) -> tuple[Any, str, bool]:
+        value = _file_defaults().get(field_name)
+        return value, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return _file_defaults()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GROK2API_",
@@ -77,6 +95,8 @@ class Settings(BaseSettings):
     cli_pool_max_concurrent: int = 1
     # Seconds to wait for an account with free concurrency slot
     cli_pool_acquire_timeout: float = 60.0
+    cli_pool_flush_interval: float = 30.0
+    cli_pool_selection_strategy: str = "balanced"
     sso_max_fails: int = 5
 
     force_upstream_stream: bool = False
@@ -86,10 +106,22 @@ class Settings(BaseSettings):
     normalize_content: bool = True
     usage_log_enabled: bool = True
 
-    def __init__(self, **kwargs: Any) -> None:
-        # file defaults < explicit kwargs < env (pydantic env applied after)
-        merged = {**_file_defaults(), **kwargs}
-        super().__init__(**merged)
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            UnifiedConfigSettingsSource(settings_cls),
+            file_secret_settings,
+        )
 
     @property
     def resolved_auth_file(self) -> Path:
