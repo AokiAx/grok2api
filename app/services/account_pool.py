@@ -299,14 +299,21 @@ class CliAccountPool:
             account = self._accounts.get(account_id)
             if account is None:
                 return
+            recovered = bool(
+                account.fail_count
+                or account.consecutive_failures
+                or account.cooldown_until is not None
+                or account.disabled_reason == "consecutive_failures"
+            )
             account.fail_count = 0
             account.consecutive_failures = 0
             account.cooldown_until = None
             if account.disabled_reason == "consecutive_failures":
                 account.enabled = True
                 account.disabled_reason = ""
-            self.repository.upsert(account)
-            self._dirty_runtime.discard(account_id)
+            if recovered:
+                self.repository.upsert(account)
+                self._dirty_runtime.discard(account_id)
             self._slot_cv.notify_all()
 
     def report_failure(

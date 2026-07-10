@@ -83,6 +83,12 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        try:
+            from .cli_pool import cli_pool
+
+            cli_pool.close()
+        except Exception:
+            log.exception("CLI pool shutdown flush failed")
         await upstream.aclose()
 
 

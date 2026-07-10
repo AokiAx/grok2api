@@ -224,13 +224,33 @@ class SQLiteAccountRepository:
         except (OSError, ValueError, json.JSONDecodeError) as error:
             log.warning("legacy CLI account sync skipped: %s", error)
             return 0
-        accounts = [
+        incoming_accounts = [
             account
             for item in items
             if (account := self._legacy_account(item)) is not None
         ]
-        self.upsert_many(accounts)
-        return len(accounts)
+        with self._lock, self._connection() as connection:
+            for incoming in incoming_accounts:
+                row = connection.execute(
+                    "SELECT * FROM cli_accounts WHERE identity_key=?",
+                    (incoming.identity_key,),
+                ).fetchone()
+                if row:
+                    existing = self._from_row(row)
+                    incoming = incoming.copy(
+                        id=existing.id,
+                        enabled=existing.enabled,
+                        request_count=existing.request_count,
+                        fail_count=existing.fail_count,
+                        consecutive_failures=existing.consecutive_failures,
+                        last_used_at=existing.last_used_at,
+                        cooldown_until=existing.cooldown_until,
+                        created_at=existing.created_at,
+                        priority=existing.priority,
+                        disabled_reason=existing.disabled_reason,
+                    )
+                self._upsert_connection(connection, incoming)
+        return len(incoming_accounts)
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> CliAccount:
