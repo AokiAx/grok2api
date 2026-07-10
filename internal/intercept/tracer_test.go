@@ -88,7 +88,7 @@ func TestMiddlewareDisabledIsNoop(t *testing.T) {
 
 func TestBodyPreviewRedactsSecrets(t *testing.T) {
 	tracer := intercept.New(intercept.Options{Enabled: true, MaxBody: 1024})
-	raw := []byte(`{"api_key":"secret","messages":[{"role":"user","content":"hi"}],"authorization":"Bearer x"}`)
+	raw := []byte(`{"api_key":"secret","messages":[{"role":"user","content":"hi"}],"authorization":"Bearer x","max_tokens":32,"max_completion_tokens":16}`)
 	preview := tracer.BodyPreview(raw)
 	body, _ := preview["body"].(map[string]any)
 	if body["api_key"] != "***" {
@@ -96,5 +96,11 @@ func TestBodyPreviewRedactsSecrets(t *testing.T) {
 	}
 	if body["authorization"] != "***" {
 		t.Fatalf("authorization not redacted: %#v", body)
+	}
+	if body["max_tokens"] != float64(32) {
+		t.Fatalf("max_tokens should not be redacted: %#v", body["max_tokens"])
+	}
+	if body["max_completion_tokens"] != float64(16) {
+		t.Fatalf("max_completion_tokens should not be redacted: %#v", body["max_completion_tokens"])
 	}
 }

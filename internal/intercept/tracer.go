@@ -225,13 +225,7 @@ func redact(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
-			lower := strings.ToLower(key)
-			if strings.Contains(lower, "authorization") ||
-				strings.Contains(lower, "api_key") ||
-				strings.Contains(lower, "token") ||
-				strings.Contains(lower, "password") ||
-				strings.Contains(lower, "secret") ||
-				lower == "sso" {
+			if isSecretKey(key) {
 				out[key] = "***"
 				continue
 			}
@@ -246,6 +240,25 @@ func redact(value any) any {
 		return out
 	default:
 		return value
+	}
+}
+
+func isSecretKey(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	switch lower {
+	case "authorization", "api_key", "app_key", "panel_password", "password",
+		"secret", "access_token", "refresh_token", "id_token", "sso", "sso_cookie",
+		"cookie", "set-cookie", "x-api-key", "admin_password", "capmonster_api_key":
+		return true
+	default:
+		// Avoid matching max_tokens / max_completion_tokens / total_tokens.
+		if strings.HasSuffix(lower, "_api_key") ||
+			strings.HasSuffix(lower, "_password") ||
+			strings.HasSuffix(lower, "_secret") ||
+			strings.HasSuffix(lower, "_token") && !strings.Contains(lower, "max_") && !strings.Contains(lower, "total_") && !strings.Contains(lower, "completion_") && !strings.Contains(lower, "prompt_") && !strings.Contains(lower, "input_") && !strings.Contains(lower, "output_") {
+			return true
+		}
+		return false
 	}
 }
 
