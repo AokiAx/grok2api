@@ -39,6 +39,10 @@ func New(accounts []account.Account) *Scheduler {
 func (s *Scheduler) Acquire(ctx context.Context) (*Lease, error) {
 	for {
 		s.mu.Lock()
+		if len(s.ready) == 0 {
+			s.mu.Unlock()
+			return nil, ErrNoReadyAccount
+		}
 		for range len(s.ready) {
 			id := s.ready[0]
 			s.ready = append(s.ready[1:], id)
@@ -60,6 +64,44 @@ func (s *Scheduler) Acquire(ctx context.Context) (*Lease, error) {
 		case <-s.notify:
 		}
 	}
+}
+
+func (s *Scheduler) ReadyCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.ready)
+}
+
+func (s *Scheduler) Status() (int, int, map[account.UnavailableReason]int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reasons := make(map[account.UnavailableReason]int)
+	ready := 0
+	unavailable := 0
+	for _, item := range s.accounts {
+		if item.Pool == account.PoolReady {
+			ready++
+			continue
+		}
+		unavailable++
+		reasons[item.UnavailableReason]++
+	}
+	return ready, unavailable, reasons
+}
+
+func (s *Scheduler) EarliestRetry() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var earliest time.Time
+	for _, item := range s.accounts {
+		if item.Pool != account.PoolUnavailable || item.RetryAt.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || item.RetryAt.Before(earliest) {
+			earliest = item.RetryAt
+		}
+	}
+	return earliest
 }
 
 func (s *Scheduler) signal() {
