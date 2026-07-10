@@ -84,6 +84,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sqlite: %w", err)
 		}
 	}
+	if err := r.migratePythonV1(ctx); err != nil {
+		return err
+	}
 	_, err := r.db.ExecContext(
 		ctx,
 		`INSERT INTO app_meta(key, value) VALUES('schema_version', ?)
@@ -94,6 +97,199 @@ func (r *SQLite) migrate(ctx context.Context) error {
 		return fmt.Errorf("record schema version: %w", err)
 	}
 	return nil
+}
+
+type pythonV1Account struct {
+	id             string
+	accessToken    string
+	refreshToken   sql.NullString
+	expiresAt      sql.NullString
+	oidcIssuer     string
+	oidcClientID   string
+	email          string
+	userID         string
+	enabled        bool
+	requestCount   int64
+	failCount      int
+	cooldownUntil  sql.NullFloat64
+	createdAt      float64
+	updatedAt      float64
+	disabledReason string
+}
+
+func (r *SQLite) migratePythonV1(ctx context.Context) error {
+	var tableExists int
+	if err := r.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cli_accounts'`,
+	).Scan(&tableExists); err != nil {
+		return fmt.Errorf("inspect Python v1 schema: %w", err)
+	}
+	if tableExists == 0 {
+		return nil
+	}
+	var accountCount int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&accountCount); err != nil {
+		return fmt.Errorf("count Go v2 accounts before migration: %w", err)
+	}
+	if accountCount > 0 {
+		return nil
+	}
+
+	rows, err := r.db.QueryContext(
+		ctx,
+		`SELECT id, key, refresh_token, expires_at, oidc_issuer, oidc_client_id,
+			email, user_id, enabled, request_count, fail_count, cooldown_until,
+			created_at, updated_at, disabled_reason
+		 FROM cli_accounts ORDER BY created_at, id`,
+	)
+	if err != nil {
+		return fmt.Errorf("read Python v1 accounts: %w", err)
+	}
+	legacy := make([]pythonV1Account, 0)
+	for rows.Next() {
+		var item pythonV1Account
+		if err := rows.Scan(
+			&item.id,
+			&item.accessToken,
+			&item.refreshToken,
+			&item.expiresAt,
+			&item.oidcIssuer,
+			&item.oidcClientID,
+			&item.email,
+			&item.userID,
+			&item.enabled,
+			&item.requestCount,
+			&item.failCount,
+			&item.cooldownUntil,
+			&item.createdAt,
+			&item.updatedAt,
+			&item.disabledReason,
+		); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan Python v1 account: %w", err)
+		}
+		legacy = append(legacy, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate Python v1 accounts: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close Python v1 account rows: %w", err)
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin Python v1 migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	for index, legacyItem := range legacy {
+		item := legacyItem.toV2(now, index)
+		if err := upsertAccount(ctx, tx, item); err != nil {
+			return fmt.Errorf("migrate Python v1 account %s: %w", item.ID, err)
+		}
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO app_meta(key, value) VALUES('python_v1_migrated', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		fmt.Sprintf("%d", len(legacy)),
+	); err != nil {
+		return fmt.Errorf("record Python v1 migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit Python v1 migration: %w", err)
+	}
+	return nil
+}
+
+func (a pythonV1Account) toV2(now time.Time, index int) account.Account {
+	pool := account.PoolReady
+	reason := account.UnavailableReason("")
+	retryAt := time.Time{}
+	cooldown := time.Time{}
+	if a.cooldownUntil.Valid && a.cooldownUntil.Float64 > 0 {
+		cooldown = unixFloatTime(a.cooldownUntil.Float64)
+	}
+	if a.enabled && cooldown.After(now) {
+		pool = account.PoolUnavailable
+		reason = account.ReasonCooldown
+		retryAt = cooldown
+	} else if !a.enabled {
+		pool = account.PoolUnavailable
+		reason = classifyLegacyDisabledReason(a.disabledReason, a.expiresAt.String, a.failCount, now)
+		if reason == account.ReasonQuota {
+			retryAt = now.Add(30*time.Minute + time.Duration(index)*30*time.Second)
+		} else if reason == account.ReasonCooldown && cooldown.After(now) {
+			retryAt = cooldown
+		}
+	}
+	createdAt := unixFloatTime(a.createdAt)
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := unixFloatTime(a.updatedAt)
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	return account.Account{
+		ID:                  a.id,
+		AccessToken:         a.accessToken,
+		RefreshToken:        a.refreshToken.String,
+		ExpiresAt:           parseTime(a.expiresAt.String),
+		OIDCIssuer:          defaultString(a.oidcIssuer, "https://auth.x.ai"),
+		OIDCClientID:        a.oidcClientID,
+		Email:               strings.ToLower(strings.TrimSpace(a.email)),
+		UserID:              a.userID,
+		Pool:                pool,
+		UnavailableReason:   reason,
+		RetryAt:             retryAt,
+		LastErrorCode:       a.disabledReason,
+		RequestCount:        a.requestCount,
+		AuthenticationFails: a.failCount,
+		MaxActive:           1,
+		CreatedAt:           createdAt,
+		UpdatedAt:           updatedAt,
+	}
+}
+
+func classifyLegacyDisabledReason(
+	disabledReason string,
+	expiresAt string,
+	failCount int,
+	now time.Time,
+) account.UnavailableReason {
+	message := strings.ToLower(disabledReason)
+	switch {
+	case strings.Contains(message, "usage-exhausted"),
+		strings.Contains(message, "quota"):
+		return account.ReasonQuota
+	case strings.Contains(message, "token"),
+		strings.Contains(message, "auth"),
+		strings.Contains(message, "401"),
+		strings.Contains(message, "403"),
+		strings.Contains(message, "refresh"):
+		return account.ReasonAuth
+	case strings.Contains(message, "cooldown"), strings.Contains(message, "rate-limit"):
+		return account.ReasonCooldown
+	case failCount >= 5 && !parseTime(expiresAt).IsZero() && parseTime(expiresAt).Before(now):
+		return account.ReasonAuth
+	case failCount >= 5:
+		return account.ReasonQuota
+	default:
+		return account.ReasonDisabled
+	}
+}
+
+func unixFloatTime(value float64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	seconds := int64(value)
+	nanoseconds := int64((value - float64(seconds)) * float64(time.Second))
+	return time.Unix(seconds, nanoseconds).UTC()
 }
 
 func (r *SQLite) SchemaVersion(ctx context.Context) int {
