@@ -108,8 +108,9 @@ func TestChatToResponsesMapsWebSearchTool(t *testing.T) {
 	if payload["backend_search"] != true {
 		t.Fatalf("backend_search = %#v", payload["backend_search"])
 	}
-	if _, ok := payload["tools"]; ok {
-		t.Fatalf("tools should be stripped: %s", out)
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools should be preserved: %s", out)
 	}
 }
 
@@ -149,7 +150,46 @@ func TestEnsureBackendSearchDefaultsOnAndRespectsExplicit(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesStripsOpenAIToolFields(t *testing.T) {
+func TestChatToResponsesExpandsNamespaceTools(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"namespace","name":"demo","description":"Demo tools","tools":[{"type":"function","name":"inner","description":"x","strict":false,"parameters":{"type":"object"}}]},{"type":"function","name":"outer","parameters":{"type":"object"}}]}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools = %#v", payload["tools"])
+	}
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		if tool["type"] == "namespace" {
+			t.Fatalf("namespace should be expanded: %#v", tool)
+		}
+		if tool["type"] != "function" {
+			t.Fatalf("tool type = %#v", tool["type"])
+		}
+	}
+}
+
+func TestNormalizeResponsesToolsDedupsExpandedNames(t *testing.T) {
+	raw := []any{
+		map[string]any{"type": "namespace", "name": "ns", "tools": []any{
+			map[string]any{"type": "function", "name": "a", "parameters": map[string]any{"type": "object"}},
+			map[string]any{"type": "function", "name": "b", "parameters": map[string]any{"type": "object"}},
+		}},
+		map[string]any{"type": "function", "name": "a", "parameters": map[string]any{"type": "object"}},
+	}
+	out := compat.NormalizeResponsesTools(raw, 10)
+	if len(out) != 2 {
+		t.Fatalf("len=%d want 2 (expanded+dedup): %#v", len(out), out)
+	}
+}
+
+func TestChatToResponsesPreservesToolsAndStripsUnsafeFields(t *testing.T) {
 	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"foo"}}],"tool_choice":"auto","metadata":{"a":1},"user":"u1","tool_resources":{}}`)
 	out, _, err := compat.ChatToResponses(body)
 	if err != nil {
@@ -159,7 +199,13 @@ func TestChatToResponsesStripsOpenAIToolFields(t *testing.T) {
 	if err := json.Unmarshal(out, &payload); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, key := range []string{"tools", "tool_choice", "metadata", "user", "tool_resources"} {
+	if _, ok := payload["tools"]; !ok {
+		t.Fatalf("tools should be preserved: %s", out)
+	}
+	if payload["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %#v", payload["tool_choice"])
+	}
+	for _, key := range []string{"metadata", "user", "tool_resources"} {
 		if _, ok := payload[key]; ok {
 			t.Fatalf("field %q should be stripped but was present in: %s", key, out)
 		}
@@ -185,18 +231,16 @@ func TestChatToResponsesSanitizesToolMessages(t *testing.T) {
 	if !ok {
 		t.Fatalf("input is not array: %#v", payload["input"])
 	}
-	// assistant with nil content should still be present (but no tool_calls)
 	if len(input) != 4 {
 		t.Fatalf("expected 4 messages, got %d: %#v", len(input), input)
 	}
-	for i, raw := range input {
-		msg := raw.(map[string]any)
-		if _, has := msg["tool_calls"]; has {
-			t.Fatalf("message[%d] still has tool_calls", i)
-		}
-		if _, has := msg["tool_call_id"]; has {
-			t.Fatalf("message[%d] still has tool_call_id", i)
-		}
+	assistant := input[2].(map[string]any)
+	if _, has := assistant["tool_calls"]; !has {
+		t.Fatalf("assistant tool_calls should be preserved: %#v", assistant)
+	}
+	toolMsg := input[3].(map[string]any)
+	if toolMsg["tool_call_id"] != "call_1" {
+		t.Fatalf("tool_call_id = %#v", toolMsg["tool_call_id"])
 	}
 }
 
@@ -269,5 +313,44 @@ func TestOpenAIToAnthropicFromAggregatedResponses(t *testing.T) {
 	}
 	if !strings.Contains(string(anth), "pong") {
 		t.Fatalf("anth=%s", anth)
+	}
+}
+
+func TestNormalizeResponsesToolsHandlesEmptyAndMissingType(t *testing.T) {
+	if out := compat.NormalizeResponsesTools(nil, 10); out != nil {
+		t.Fatalf("nil tools => %#v", out)
+	}
+	raw := []any{
+		map[string]any{"function": map[string]any{"name": "implicit", "parameters": map[string]any{"type": "object"}}},
+		map[string]any{"type": "mcp", "name": "browser"},
+		"bad",
+	}
+	out := compat.NormalizeResponsesTools(raw, 10)
+	if len(out) != 2 {
+		t.Fatalf("len=%d want 2: %#v", len(out), out)
+	}
+	first := out[0].(map[string]any)
+	if first["type"] != "function" {
+		t.Fatalf("implicit function type = %#v", first["type"])
+	}
+}
+
+func TestNormalizeResponsesToolsSoftCapAndNestedFunctionName(t *testing.T) {
+	raw := []any{
+		map[string]any{"type": "namespace", "name": "ns", "tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "nested_only", "parameters": map[string]any{"type": "object"}}},
+			map[string]any{"type": "function", "name": "keep_me", "parameters": map[string]any{"type": "object"}},
+			map[string]any{"type": "web_search"},
+		}},
+		map[string]any{"type": "function", "name": "extra1", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "function", "name": "extra2", "parameters": map[string]any{"type": "object"}},
+	}
+	out := compat.NormalizeResponsesTools(raw, 2)
+	if len(out) != 2 {
+		t.Fatalf("soft cap len=%d want 2: %#v", len(out), out)
+	}
+	first := out[0].(map[string]any)
+	if first["type"] != "function" || first["name"] != "nested_only" {
+		t.Fatalf("first=%#v", first)
 	}
 }

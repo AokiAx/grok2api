@@ -6,16 +6,20 @@ import (
 	"strings"
 )
 
+// MaxUpstreamTools soft-caps pathological agent payloads after namespace expansion.
+const MaxUpstreamTools = 512
+
 // ChatToResponses converts an OpenAI Chat Completions body into a Responses body.
 //
-// Only fields accepted by the Grok /responses API are forwarded. OpenAI-specific
-// fields like tools, tool_choice, metadata, user, tool_resources are stripped
-// because the upstream Rust backend rejects unknown fields (serde untagged enum).
+// Tools are kept. Codex-style {type:"namespace"} groups are expanded into nested
+// function tools so strict Responses backends do not 422 on unknown variant
+// "namespace". Tool capability is preserved; only the grouping shell is flattened.
 //
 // Native Grok WebSearch is server-side "backend search". Clients can enable it via:
 //   - backend_search / web_search / supports_backend_search
 //   - web_search_options
 //   - tools: [{ "type": "web_search" }] (OpenAI-style)
+//
 // Call EnsureBackendSearch after conversion to default-on for catalog models that
 // advertise supports_backend_search.
 func ChatToResponses(payload []byte) ([]byte, bool, error) {
@@ -37,13 +41,20 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 	if maxTokens := firstNumber(input, "max_tokens", "max_completion_tokens"); maxTokens != nil {
 		output["max_output_tokens"] = maxTokens
 	}
-	// Only forward fields the Grok Responses API actually accepts.
+	// Core sampling fields.
 	copyFields(output, input, "temperature", "top_p")
 	// Backend search / tool flags used by CLI-backed models.
 	for _, key := range []string{"backend_search", "supports_backend_search", "web_search", "include", "instructions"} {
 		if value, ok := input[key]; ok {
 			output[key] = value
 		}
+	}
+	// Keep tools for agent clients; expand Codex namespaces for strict backends.
+	if tools := NormalizeResponsesTools(input["tools"], MaxUpstreamTools); len(tools) > 0 {
+		output["tools"] = tools
+	}
+	if choice, ok := input["tool_choice"]; ok && choice != nil {
+		output["tool_choice"] = choice
 	}
 	// OpenAI-style web_search_options -> backend_search enablement signal.
 	if _, ok := input["web_search_options"]; ok {
@@ -115,6 +126,101 @@ func hasWebSearchTool(raw any) bool {
 	return false
 }
 
+// NormalizeResponsesTools adapts client tool lists for strict Responses backends.
+//
+// Policy:
+//  1. Expand Codex {type:"namespace", tools:[function...]} into flat function tools
+//  2. Keep function/web_search/mcp/shell and other known types
+//  3. Soft-cap count when maxTools > 0
+//
+// This preserves tool capability while avoiding 422 "unknown variant namespace".
+func NormalizeResponsesTools(raw any, maxTools int) []any {
+	tools, ok := raw.([]any)
+	if !ok || len(tools) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(tools))
+	seen := map[string]struct{}{}
+	appendTool := func(tool map[string]any) {
+		if maxTools > 0 && len(out) >= maxTools {
+			return
+		}
+		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		name := strings.TrimSpace(stringValue(tool["name"]))
+		if name == "" {
+			if fn, ok := tool["function"].(map[string]any); ok {
+				name = strings.TrimSpace(stringValue(fn["name"]))
+			}
+		}
+		if name != "" {
+			key := typeName + "\x00" + name
+			if _, exists := seen[key]; exists {
+				return
+			}
+			seen[key] = struct{}{}
+		}
+		out = append(out, tool)
+	}
+
+	for _, item := range tools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		switch typeName {
+		case "namespace":
+			nested, _ := tool["tools"].([]any)
+			for _, child := range nested {
+				fnTool, ok := child.(map[string]any)
+				if !ok {
+					continue
+				}
+				childType := strings.ToLower(strings.TrimSpace(stringValue(fnTool["type"])))
+				if childType == "" {
+					childType = "function"
+				}
+				if childType != "function" {
+					continue
+				}
+				flat := map[string]any{}
+				for k, v := range fnTool {
+					flat[k] = v
+				}
+				flat["type"] = "function"
+				if strings.TrimSpace(stringValue(flat["name"])) == "" {
+					if fn, ok := flat["function"].(map[string]any); ok {
+						if n := strings.TrimSpace(stringValue(fn["name"])); n != "" {
+							flat["name"] = n
+						}
+					}
+				}
+				appendTool(flat)
+			}
+		case "", "function":
+			cloned := map[string]any{}
+			for k, v := range tool {
+				cloned[k] = v
+			}
+			if typeName == "" {
+				if _, hasFn := cloned["function"]; hasFn || strings.TrimSpace(stringValue(cloned["name"])) != "" {
+					cloned["type"] = "function"
+				} else {
+					continue
+				}
+			}
+			appendTool(cloned)
+		default:
+			// Keep known and unknown non-namespace tools as-is.
+			appendTool(tool)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func truthy(value any) bool {
 	switch typed := value.(type) {
 	case bool:
@@ -135,9 +241,10 @@ func truthy(value any) bool {
 	}
 }
 
-// sanitizeMessages strips OpenAI-specific fields from messages that the Grok
-// Responses API does not understand (tool_calls, tool_call_id, name, function).
+// sanitizeMessages normalizes messages for the Responses input array.
 // Multimodal content arrays are flattened to plain text.
+// Tool-loop fields (tool_calls, tool_call_id, name) are preserved so agent
+// clients like Cursor can continue multi-turn tool use.
 func sanitizeMessages(messages []any) []any {
 	out := make([]any, 0, len(messages))
 	for _, raw := range messages {
@@ -158,6 +265,12 @@ func sanitizeMessages(messages []any) []any {
 			// assistant messages with tool_calls may have nil content
 		default:
 			clean["content"] = fmt.Sprint(content)
+		}
+		// Preserve tool-calling fields for agent multi-turn.
+		for _, key := range []string{"tool_calls", "tool_call_id", "name", "function_call"} {
+			if value, ok := msg[key]; ok && value != nil {
+				clean[key] = value
+			}
 		}
 		out = append(out, clean)
 	}

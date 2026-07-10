@@ -710,9 +710,11 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 				}
 				delete(payload, "max_tokens")
 			}
-			// Strip OpenAI-only fields that the Responses backend rejects.
-			delete(payload, "tools")
-			delete(payload, "tool_choice")
+			// Expand Codex namespace tools; keep function tools for agent clients.
+			if tools := compat.NormalizeResponsesTools(payload["tools"], compat.MaxUpstreamTools); len(tools) > 0 {
+				payload["tools"] = tools
+			}
+			// Drop a few non-tool OpenAI-only fields that are commonly rejected.
 			delete(payload, "metadata")
 			delete(payload, "user")
 			delete(payload, "tool_resources")

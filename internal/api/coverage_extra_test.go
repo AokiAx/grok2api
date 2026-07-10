@@ -121,3 +121,25 @@ func TestResponsesUpstreamErrorPassthrough(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestResponsesExpandsNamespaceTools(t *testing.T) {
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"id":"resp_1","object":"response"}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	rec := httptest.NewRecorder()
+	body := `{"model":"grok-4.5","input":[{"role":"user","content":"hi"}],"tools":[{"type":"namespace","name":"demo","tools":[{"type":"function","name":"inner","parameters":{"type":"object"}}]}],"stream":true}`
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	forwarded := string(gateway.payload)
+	if strings.Contains(forwarded, `"type":"namespace"`) {
+		t.Fatalf("namespace should be expanded: %s", forwarded)
+	}
+	if !strings.Contains(forwarded, `"type":"function"`) || !strings.Contains(forwarded, `"name":"inner"`) {
+		t.Fatalf("expected expanded function tool: %s", forwarded)
+	}
+}
