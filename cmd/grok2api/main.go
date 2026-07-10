@@ -142,16 +142,12 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 	)
 	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
-	adminKey := settings.PanelPassword
-	if adminKey == "" {
-		adminKey = settings.APIKey
-	}
 	handler := api.NewServer(
 		gateway,
 		poolStatusProvider{scheduler: pool},
 		settings.APIKey,
 		api.WithDefaultModel(settings.DefaultModel),
-		api.WithAdmin(adminService, adminKey),
+		api.WithAdmin(adminService, settings.AdminKey()),
 	).Handler()
 	server := &http.Server{
 		Addr:              settings.Address(),

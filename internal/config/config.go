@@ -14,6 +14,7 @@ type Config struct {
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
 	APIKey            string `json:"api_key"`
+	AppKey            string `json:"app_key"`
 	PanelPassword     string `json:"panel_password"`
 	ProxyBaseURL      string `json:"proxy_base_url"`
 	ClientVersion     string `json:"client_version"`
@@ -62,6 +63,7 @@ func applyEnvironment(config *Config) error {
 	stringValues := map[string]*string{
 		"GROK2API_HOST":           &config.Host,
 		"GROK2API_API_KEY":        &config.APIKey,
+		"GROK2API_APP_KEY":        &config.AppKey,
 		"GROK2API_PANEL_PASSWORD": &config.PanelPassword,
 		"GROK2API_PROXY_BASE_URL": &config.ProxyBaseURL,
 		"GROK2API_CLIENT_VERSION": &config.ClientVersion,
@@ -102,4 +104,13 @@ func (c Config) Address() string {
 
 func (c Config) RequestTimeout() time.Duration {
 	return time.Duration(c.RequestTimeoutSec) * time.Second
+}
+
+func (c Config) AdminKey() string {
+	for _, key := range []string{c.PanelPassword, c.AppKey, c.APIKey} {
+		if key = strings.TrimSpace(key); key != "" {
+			return key
+		}
+	}
+	return ""
 }
