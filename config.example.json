@@ -8,6 +8,7 @@
   "_help_keys": "管理密钥优先级：panel_password -> app_key -> api_key。",
   "proxy_base_url": "https://cli-chat-proxy.grok.com/v1",
   "client_version": "0.2.93",
+  "_help_client_version": "未设置 GROK2API_CLIENT_VERSION 时，启动会尝试读取 ~/.grok/version.json。",
   "default_model": "grok-4.5",
   "data_dir": "data",
   "cli_pool_max_concurrent": 1,

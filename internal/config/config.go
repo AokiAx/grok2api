@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +106,7 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	normalize(&config)
+	maybeDetectClientVersion(&config)
 	return config, nil
 }
 
@@ -270,4 +272,32 @@ func (c Config) TurnstileTimeout() time.Duration {
 
 func (c Config) EmailCodeTimeout() time.Duration {
 	return time.Duration(c.EmailCodeTimeoutSec) * time.Second
+}
+
+func maybeDetectClientVersion(config *Config) {
+	if strings.TrimSpace(config.ClientVersion) == "" {
+		config.ClientVersion = Defaults().ClientVersion
+	}
+	if _, set := os.LookupEnv("GROK2API_CLIENT_VERSION"); set {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".grok", "version.json"))
+	if err != nil {
+		return
+	}
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(data, &payload) != nil {
+		return
+	}
+	version := strings.TrimSpace(payload.Version)
+	if version == "" {
+		return
+	}
+	config.ClientVersion = version
 }

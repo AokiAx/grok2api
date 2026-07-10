@@ -156,9 +156,9 @@ docker compose --profile flaresolverr up -d
 |---|---|---|
 | GET | `/health` | 两池数量、原因统计和 quota 熔断状态 |
 | GET | `/panel`、`/manager` | Go 管理面板 |
-| GET | `/v1/models` | 模型列表；上游不可达时返回静态兼容列表 |
+| GET | `/v1/models` | 模型列表；补充 api_backend / context_window / reasoning 等 CLI 元数据；上游不可达时返回静态兼容列表 |
 | GET | `/v1/billing` | 上游额度信息 |
-| POST | `/v1/chat/completions` | OpenAI Chat Completions，支持 SSE |
+| POST | `/v1/chat/completions` | OpenAI Chat Completions；对 CLI responses 模型会自动转 `/responses` 上游，支持 reasoning_effort，非 stream 会聚合 |
 | POST | `/chat/completions` | Chat Completions 别名 |
 | POST | `/v1/responses` | OpenAI Responses 透传，支持 SSE |
 | POST | `/v1/messages` | Anthropic Messages 转换，支持工具和 SSE |

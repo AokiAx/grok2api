@@ -19,6 +19,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/register"
 	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/service"
+	"github.com/AokiAx/grok2api/internal/upstream"
 )
 
 //go:embed panel.html
@@ -44,6 +45,8 @@ type Server struct {
 	status           StatusProvider
 	apiKey           string
 	defaultModel     string
+	modelCatalog     *upstream.Catalog
+	preferResponses  bool
 	admin            AdminService
 	adminKey         string
 	registerJobs     RegisterJobService
@@ -56,6 +59,20 @@ type Option func(*Server)
 func WithDefaultModel(model string) Option {
 	return func(server *Server) {
 		server.defaultModel = model
+	}
+}
+
+func WithModelCatalog(catalog *upstream.Catalog) Option {
+	return func(server *Server) {
+		if catalog != nil {
+			server.modelCatalog = catalog
+		}
+	}
+}
+
+func WithPreferResponses(enabled bool) Option {
+	return func(server *Server) {
+		server.preferResponses = enabled
 	}
 }
 
@@ -100,10 +117,12 @@ func WithRegisterSettings(service RegisterSettingsService) Option {
 
 func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ...Option) *Server {
 	server := &Server{
-		gateway:      gateway,
-		status:       status,
-		apiKey:       apiKey,
-		defaultModel: "grok-4.5",
+		gateway:         gateway,
+		status:          status,
+		apiKey:          apiKey,
+		defaultModel:    "grok-4.5",
+		modelCatalog:    upstream.NewDefaultCatalog(),
+		preferResponses: true,
 	}
 	for _, option := range options {
 		option(server)
@@ -437,21 +456,94 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	body, model, clientStream, err := compat.NormalizeChatRequest(body, s.defaultModel)
+	if err != nil {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
-	if model, ok := payload["model"].(string); !ok || model == "" {
-		payload["model"] = s.defaultModel
+
+	backend := upstream.BackendChatCompletions
+	if s.preferResponses {
+		backend = s.modelCatalog.Backend(model)
 	}
-	stream, _ := payload["stream"].(bool)
-	body, err = json.Marshal(payload)
-	if err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request payload")
+
+	var result service.ChatResult
+	if backend == upstream.BackendResponses {
+		responsesBody, _, convertErr := compat.ChatToResponses(body)
+		if convertErr != nil {
+			writeOpenAIError(writer, http.StatusBadRequest, "Invalid chat payload")
+			return
+		}
+		// Upstream prefers streaming for Responses-backed models.
+		result, err = s.gateway.Request(
+			request.Context(),
+			http.MethodPost,
+			"/responses",
+			responsesBody,
+			true,
+		)
+		if err != nil {
+			s.writeGatewayError(writer, err)
+			return
+		}
+		if result.Status >= http.StatusBadRequest {
+			if result.Stream != nil {
+				data, readErr := io.ReadAll(result.Stream)
+				_ = result.Stream.Close()
+				if readErr == nil {
+					result.Body = data
+					result.Stream = nil
+				}
+			}
+			s.writeResult(writer, result)
+			return
+		}
+		if clientStream {
+			if result.Stream == nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Upstream stream missing")
+				return
+			}
+			result.Stream = compat.NewResponsesToChatStream(result.Stream, model)
+			if result.Header == nil {
+				result.Header = make(http.Header)
+			}
+			result.Header.Del("Content-Length")
+			result.Header.Set("Content-Type", "text/event-stream")
+			s.writeResult(writer, result)
+			return
+		}
+		if result.Stream != nil {
+			aggregated, aggErr := compat.AggregateResponsesStream(result.Stream, model)
+			if aggErr != nil {
+				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
+				return
+			}
+			result.Body = aggregated
+			result.Stream = nil
+			if result.Header == nil {
+				result.Header = make(http.Header)
+			}
+			result.Header.Del("Content-Length")
+			result.Header.Set("Content-Type", "application/json")
+			s.writeResult(writer, result)
+			return
+		}
+		converted, convErr := compat.ResponsesToChat(result.Body)
+		if convErr != nil {
+			writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
+			return
+		}
+		result.Body = converted
+		if result.Header == nil {
+			result.Header = make(http.Header)
+		}
+		result.Header.Del("Content-Length")
+		result.Header.Set("Content-Type", "application/json")
+		s.writeResult(writer, result)
 		return
 	}
-	result, err := s.gateway.Chat(request.Context(), body, stream)
+
+	result, err = s.gateway.Chat(request.Context(), body, clientStream)
 	if err != nil {
 		s.writeGatewayError(writer, err)
 		return
@@ -486,7 +578,7 @@ func (s *Server) models(writer http.ResponseWriter, request *http.Request) {
 		if !ok {
 			continue
 		}
-		normalized := make(map[string]any, len(item)+4)
+		normalized := make(map[string]any, len(item)+8)
 		for key, value := range item {
 			normalized[key] = value
 		}
@@ -500,6 +592,9 @@ func (s *Server) models(writer http.ResponseWriter, request *http.Request) {
 		if owner, _ := normalized["owned_by"].(string); owner == "" {
 			normalized["owned_by"] = "xai"
 		}
+		if s.modelCatalog != nil {
+			normalized = s.modelCatalog.EnrichModelMap(normalized)
+		}
 		models = append(models, normalized)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"object": "list", "data": models})
@@ -507,13 +602,50 @@ func (s *Server) models(writer http.ResponseWriter, request *http.Request) {
 
 func fallbackModels(defaultModel string) map[string]any {
 	now := time.Now().Unix()
-	return map[string]any{
-		"object": "list",
-		"data": []map[string]any{
-			{"id": defaultModel, "object": "model", "created": now, "owned_by": "xai"},
-			{"id": "grok-composer-2.5-fast", "object": "model", "created": now, "owned_by": "xai"},
-		},
+	catalog := upstream.NewDefaultCatalog()
+	data := make([]map[string]any, 0, 4)
+	seen := map[string]struct{}{}
+	for _, item := range catalog.List() {
+		entry := map[string]any{
+			"id":          item.ID,
+			"object":      "model",
+			"created":     now,
+			"owned_by":    firstNonEmpty(item.OwnedBy, "xai"),
+			"name":        item.Name,
+			"api_backend": item.APIBackend,
+		}
+		if item.ContextWindow > 0 {
+			entry["context_window"] = item.ContextWindow
+		}
+		if item.SupportsReasoningEffort {
+			entry["supports_reasoning_effort"] = true
+			entry["reasoning_efforts"] = item.ReasoningEfforts
+		}
+		if item.SupportsBackendSearch {
+			entry["supports_backend_search"] = true
+		}
+		data = append(data, entry)
+		seen[item.ID] = struct{}{}
 	}
+	if _, ok := seen[defaultModel]; !ok && defaultModel != "" {
+		data = append([]map[string]any{{
+			"id":          defaultModel,
+			"object":      "model",
+			"created":     now,
+			"owned_by":    "xai",
+			"api_backend": catalog.Backend(defaultModel),
+		}}, data...)
+	}
+	return map[string]any{"object": "list", "data": data}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) billing(writer http.ResponseWriter, request *http.Request) {
@@ -538,6 +670,61 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
+	if normalized, _, _, err := compat.NormalizeChatRequest(body, s.defaultModel); err == nil {
+		var payload map[string]any
+		if json.Unmarshal(normalized, &payload) == nil {
+			if _, hasInput := payload["input"]; !hasInput {
+				if messages, ok := payload["messages"]; ok {
+					payload["input"] = messages
+					delete(payload, "messages")
+				}
+			}
+			if maxTokens, ok := payload["max_tokens"]; ok {
+				if _, exists := payload["max_output_tokens"]; !exists {
+					payload["max_output_tokens"] = maxTokens
+				}
+				delete(payload, "max_tokens")
+			}
+			if encoded, err := json.Marshal(payload); err == nil {
+				body = encoded
+			}
+		}
+	}
+	if !stream {
+		model := requestModel(body, s.defaultModel)
+		if s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
+			result, err := s.gateway.Request(request.Context(), http.MethodPost, "/responses", body, true)
+			if err != nil {
+				s.writeGatewayError(writer, err)
+				return
+			}
+			if result.Status >= 400 {
+				s.writeResult(writer, result)
+				return
+			}
+			if result.Stream != nil {
+				data, err := io.ReadAll(result.Stream)
+				_ = result.Stream.Close()
+				if err != nil {
+					writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
+					return
+				}
+				if completed := extractCompletedResponse(data); len(completed) > 0 {
+					result.Body = completed
+				} else {
+					result.Body = data
+				}
+				result.Stream = nil
+				if result.Header == nil {
+					result.Header = make(http.Header)
+				}
+				result.Header.Del("Content-Length")
+				result.Header.Set("Content-Type", "application/json")
+			}
+			s.writeResult(writer, result)
+			return
+		}
+	}
 	result, err := s.gateway.Request(
 		request.Context(),
 		http.MethodPost,
@@ -550,6 +737,37 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	s.writeResult(writer, result)
+}
+
+func extractCompletedResponse(sseOrJSON []byte) []byte {
+	text := string(sseOrJSON)
+	if !strings.Contains(text, "event:") && json.Valid(sseOrJSON) {
+		return sseOrJSON
+	}
+	var last []byte
+	for _, block := range strings.Split(text, "\n\n") {
+		for _, line := range strings.Split(block, "\n") {
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "" || data == "[DONE]" {
+				continue
+			}
+			var payload map[string]any
+			if json.Unmarshal([]byte(data), &payload) != nil {
+				continue
+			}
+			if payload["type"] == "response.completed" {
+				if response, ok := payload["response"].(map[string]any); ok {
+					if encoded, err := json.Marshal(response); err == nil {
+						last = encoded
+					}
+				}
+			}
+		}
+	}
+	return last
 }
 
 func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
