@@ -346,3 +346,108 @@ func TestRecoverQuotaUsesValidatorWhenProberNil(t *testing.T) {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
+
+func TestRecoverCredentialsMarksRevokedRefreshAsUnrecoverable(t *testing.T) {
+	now := time.Now().UTC()
+	expired := account.Account{
+		ID: "expired", RefreshToken: "dead", Pool: account.PoolUnavailable,
+		UnavailableReason: account.ReasonAuth,
+	}
+	store := &recoveryStore{accounts: []account.Account{expired}}
+	result, err := runtime.RecoverCredentials(
+		context.Background(), scheduler.New([]account.Account{expired}), store,
+		credentialRefresher{err: &permanentRefreshError{msg: "invalid_grant: Refresh token has been revoked"}}, credentialValidator{}, now,
+	)
+	if err != nil {
+		t.Fatalf("recover credentials: %v", err)
+	}
+	if result.Revoked != 1 || result.Failed != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(store.saved) != 1 || store.saved[0].LastErrorCode != "refresh-revoked" {
+		t.Fatalf("saved=%#v", store.saved)
+	}
+	if !store.saved[0].RetryAt.After(now.Add(24 * time.Hour)) {
+		t.Fatalf("retry_at should be far future: %v", store.saved[0].RetryAt)
+	}
+}
+
+func TestRecoverCredentialsSkipsAlreadyRevokedCodes(t *testing.T) {
+	now := time.Now().UTC()
+	revoked := account.Account{
+		ID: "revoked", RefreshToken: "dead", Pool: account.PoolUnavailable,
+		UnavailableReason: account.ReasonAuth, LastErrorCode: "refresh-revoked",
+	}
+	store := &recoveryStore{accounts: []account.Account{revoked}}
+	refresher := countingRefresher{}
+	result, err := runtime.RecoverCredentials(
+		context.Background(), scheduler.New([]account.Account{revoked}), store,
+		&refresher, credentialValidator{}, now,
+	)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if result.Skipped != 1 || refresher.calls != 0 {
+		t.Fatalf("result=%#v calls=%d", result, refresher.calls)
+	}
+}
+
+func TestRefreshExpiringRotatesReadyTokensNearExpiry(t *testing.T) {
+	now := time.Now().UTC()
+	item := account.Account{
+		ID: "ready", AccessToken: "old", RefreshToken: "refresh",
+		OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client",
+		Pool: account.PoolReady, ExpiresAt: now.Add(10 * time.Minute), MaxActive: 1,
+	}
+	refreshed := item
+	refreshed.AccessToken = "new"
+	refreshed.ExpiresAt = now.Add(6 * time.Hour)
+	store := &recoveryStore{accounts: []account.Account{item}}
+	pool := scheduler.New([]account.Account{item})
+	result, err := runtime.RefreshExpiring(
+		context.Background(), pool, store,
+		credentialRefresher{item: refreshed}, now, 45*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("refresh expiring: %v", err)
+	}
+	if result.Refreshed != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(store.saved) != 1 || store.saved[0].AccessToken != "new" || store.saved[0].Pool != account.PoolReady {
+		t.Fatalf("saved=%#v", store.saved)
+	}
+}
+
+func TestRefreshExpiringSkipsFarExpiry(t *testing.T) {
+	now := time.Now().UTC()
+	item := account.Account{
+		ID: "ready", AccessToken: "old", RefreshToken: "refresh",
+		OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client",
+		Pool: account.PoolReady, ExpiresAt: now.Add(3 * time.Hour), MaxActive: 1,
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	refresher := countingRefresher{}
+	result, err := runtime.RefreshExpiring(
+		context.Background(), scheduler.New([]account.Account{item}), store,
+		&refresher, now, 45*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("refresh expiring: %v", err)
+	}
+	if result.Refreshed != 0 || refresher.calls != 0 {
+		t.Fatalf("result=%#v calls=%d", result, refresher.calls)
+	}
+}
+
+type permanentRefreshError struct{ msg string }
+
+func (e *permanentRefreshError) Error() string   { return e.msg }
+func (e *permanentRefreshError) Permanent() bool { return true }
+
+type countingRefresher struct{ calls int }
+
+func (r *countingRefresher) Refresh(context.Context, account.Account) (account.Account, error) {
+	r.calls++
+	return account.Account{}, nil
+}

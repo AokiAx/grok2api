@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
@@ -42,6 +44,8 @@ type CredentialRecoveryResult struct {
 	Recovered int
 	Failed    int
 	Skipped   int
+	Refreshed int // proactive ready refreshes
+	Revoked   int // permanent invalid_grant / revoked refresh
 }
 
 type QuotaRecoveryResult struct {
@@ -51,7 +55,12 @@ type QuotaRecoveryResult struct {
 	Skipped   int
 }
 
-const maxQuotaProbesPerTick = 8
+const (
+	maxQuotaProbesPerTick        = 8
+	maxAuthRefreshesPerTick      = 16
+	maxProactiveRefreshesPerTick = 8
+	proactiveRefreshLead         = 45 * time.Minute
+)
 
 func RecoverCredentials(
 	ctx context.Context,
@@ -66,6 +75,7 @@ func RecoverCredentials(
 		return CredentialRecoveryResult{}, fmt.Errorf("list accounts for credential recovery: %w", err)
 	}
 	result := CredentialRecoveryResult{}
+	refreshedCount := 0
 	for _, item := range accounts {
 		if item.Pool != account.PoolUnavailable ||
 			item.UnavailableReason != account.ReasonAuth ||
@@ -74,18 +84,27 @@ func RecoverCredentials(
 			result.Skipped++
 			continue
 		}
+		// Permanent failures (revoked refresh) are not worth retrying forever.
+		if isUnrecoverableAuthCode(item.LastErrorCode) {
+			result.Skipped++
+			continue
+		}
+		if refreshedCount >= maxAuthRefreshesPerTick {
+			result.Skipped++
+			continue
+		}
+		refreshedCount++
 		refreshed, refreshErr := refresher.Refresh(ctx, item)
 		if refreshErr != nil {
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = account.ReasonAuth
-			item.RetryAt = now.Add(30 * time.Minute)
-			item.LastErrorCode = "refresh-failed"
-			item.UpdatedAt = now.UTC()
+			applyRefreshFailure(&item, refreshErr, now)
+			if isUnrecoverableAuthCode(item.LastErrorCode) {
+				result.Revoked++
+			} else {
+				result.Failed++
+			}
 			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
 				result.Failed++
-				continue
 			}
-			result.Failed++
 			continue
 		}
 		reason, errorCode, validateErr := validator.Validate(ctx, refreshed)
@@ -116,6 +135,114 @@ func RecoverCredentials(
 		}
 	}
 	return result, nil
+}
+
+// RefreshExpiring proactively refreshes ready accounts whose access tokens are
+// near expiry, so live traffic does not have to wait for a 401 first.
+func RefreshExpiring(
+	ctx context.Context,
+	pool *scheduler.Scheduler,
+	store CredentialStore,
+	refresher CredentialRefresher,
+	now time.Time,
+	lead time.Duration,
+) (CredentialRecoveryResult, error) {
+	if store == nil || refresher == nil {
+		return CredentialRecoveryResult{}, nil
+	}
+	if lead <= 0 {
+		lead = proactiveRefreshLead
+	}
+	accounts, err := store.ListAccounts(ctx)
+	if err != nil {
+		return CredentialRecoveryResult{}, fmt.Errorf("list accounts for proactive refresh: %w", err)
+	}
+	result := CredentialRecoveryResult{}
+	refreshedCount := 0
+	deadline := now.Add(lead)
+	for _, item := range accounts {
+		if item.Pool != account.PoolReady {
+			result.Skipped++
+			continue
+		}
+		if item.RefreshToken == "" || item.OIDCIssuer == "" || item.OIDCClientID == "" {
+			result.Skipped++
+			continue
+		}
+		// Unknown expiry: leave alone. Known and still far out: skip.
+		if item.ExpiresAt.IsZero() || item.ExpiresAt.After(deadline) {
+			result.Skipped++
+			continue
+		}
+		if refreshedCount >= maxProactiveRefreshesPerTick {
+			result.Skipped++
+			continue
+		}
+		refreshedCount++
+		refreshed, refreshErr := refresher.Refresh(ctx, item)
+		if refreshErr != nil {
+			applyRefreshFailure(&item, refreshErr, now)
+			if isUnrecoverableAuthCode(item.LastErrorCode) {
+				result.Revoked++
+			} else {
+				result.Failed++
+			}
+			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+				result.Failed++
+			}
+			continue
+		}
+		// Keep ready; only rotate credentials.
+		refreshed.Pool = account.PoolReady
+		refreshed.UnavailableReason = ""
+		refreshed.RetryAt = time.Time{}
+		refreshed.LastErrorCode = ""
+		refreshed.UpdatedAt = now.UTC()
+		if err := saveAccountBestEffort(ctx, store, pool, refreshed); err != nil {
+			result.Failed++
+			continue
+		}
+		result.Refreshed++
+	}
+	return result, nil
+}
+
+func applyRefreshFailure(item *account.Account, refreshErr error, now time.Time) {
+	item.Pool = account.PoolUnavailable
+	item.UnavailableReason = account.ReasonAuth
+	item.UpdatedAt = now.UTC()
+	item.AuthenticationFails++
+	if isPermanentRefresh(refreshErr) {
+		item.LastErrorCode = "refresh-revoked"
+		// Far-future retry_at: skip automatic retries; operator must re-import.
+		item.RetryAt = now.Add(365 * 24 * time.Hour)
+		return
+	}
+	item.LastErrorCode = "refresh-failed"
+	item.RetryAt = now.Add(30 * time.Minute)
+}
+
+func isPermanentRefresh(err error) bool {
+	if err == nil {
+		return false
+	}
+	var marker interface{ Permanent() bool }
+	if errors.As(err, &marker) && marker.Permanent() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "revoked") ||
+		strings.Contains(msg, "refresh token has been")
+}
+
+func isUnrecoverableAuthCode(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "refresh-revoked", "invalid_grant":
+		return true
+	default:
+		return false
+	}
 }
 
 func credentialRetryAt(reason account.UnavailableReason, now time.Time) time.Time {
@@ -358,6 +485,18 @@ func RunRecovery(
 				config.quotaRetry,
 			); err != nil {
 				slog.Error("recovery quota tick failed", "error", err)
+			}
+		}
+		if config.credentialStore != nil && config.refresher != nil {
+			if _, err := RefreshExpiring(
+				ctx,
+				pool,
+				config.credentialStore,
+				config.refresher,
+				now,
+				proactiveRefreshLead,
+			); err != nil {
+				slog.Error("recovery proactive refresh tick failed", "error", err)
 			}
 		}
 		if config.credentialStore != nil && config.refresher != nil && config.validator != nil {

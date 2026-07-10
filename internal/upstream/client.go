@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,6 +255,35 @@ func (c *Client) setAuthHeaders(request *http.Request, item account.Account, mod
 	}
 }
 
+// PermanentRefreshError means the refresh token is dead and should not be retried.
+type PermanentRefreshError struct {
+	Code    string
+	Message string
+}
+
+func (e *PermanentRefreshError) Error() string {
+	if e == nil {
+		return "permanent refresh error"
+	}
+	if e.Code != "" && e.Message != "" {
+		return e.Code + ": " + e.Message
+	}
+	if e.Code != "" {
+		return e.Code
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	return "permanent refresh error"
+}
+
+func (e *PermanentRefreshError) Permanent() bool { return true }
+
+func IsPermanentRefreshError(err error) bool {
+	var target *PermanentRefreshError
+	return errors.As(err, &target)
+}
+
 func (c *Client) Refresh(ctx context.Context, item account.Account) (account.Account, error) {
 	issuer := strings.TrimRight(strings.TrimSpace(item.OIDCIssuer), "/")
 	clientID := strings.TrimSpace(item.OIDCClientID)
@@ -295,15 +325,19 @@ func (c *Client) Refresh(ctx context.Context, item account.Account) (account.Acc
 		return account.Account{}, fmt.Errorf("refresh OIDC credential: %w", err)
 	}
 	defer tokenResponse.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(tokenResponse.Body, 1<<20))
+	if err != nil {
+		return account.Account{}, fmt.Errorf("read OIDC refresh response: %w", err)
+	}
 	if tokenResponse.StatusCode >= http.StatusBadRequest {
-		return account.Account{}, fmt.Errorf("OIDC refresh returned %d", tokenResponse.StatusCode)
+		return account.Account{}, classifyRefreshFailure(tokenResponse.StatusCode, body)
 	}
 	var tokens struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    any    `json:"expires_in"`
 	}
-	if err := json.NewDecoder(io.LimitReader(tokenResponse.Body, 1<<20)).Decode(&tokens); err != nil {
+	if err := json.Unmarshal(body, &tokens); err != nil {
 		return account.Account{}, fmt.Errorf("decode OIDC refresh response: %w", err)
 	}
 	if strings.TrimSpace(tokens.AccessToken) == "" {
@@ -318,6 +352,34 @@ func (c *Client) Refresh(ctx context.Context, item account.Account) (account.Acc
 	item.ExpiresAt = now.Add(expiresIn)
 	item.UpdatedAt = now
 	return item, nil
+}
+
+func classifyRefreshFailure(status int, body []byte) error {
+	var payload struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	_ = json.Unmarshal(body, &payload)
+	code := strings.ToLower(strings.TrimSpace(payload.Error))
+	desc := strings.ToLower(strings.TrimSpace(payload.ErrorDescription))
+	// invalid_grant / revoked / expired refresh tokens are permanent for this credential.
+	if code == "invalid_grant" ||
+		strings.Contains(desc, "revoked") ||
+		strings.Contains(desc, "expired") ||
+		strings.Contains(desc, "invalid refresh") {
+		msg := firstNonEmpty(payload.ErrorDescription, payload.Error, fmt.Sprintf("OIDC refresh returned %d", status))
+		return &PermanentRefreshError{Code: firstNonEmpty(payload.Error, "invalid_grant"), Message: msg}
+	}
+	return fmt.Errorf("OIDC refresh returned %d", status)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (c *Client) discoverTokenEndpoint(ctx context.Context, issuer string) (string, error) {

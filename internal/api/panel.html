@@ -848,6 +848,12 @@
       validating: '等待验证',
       disabled: '人工禁用'
     };
+    const errorCodeNames = {
+      'refresh-revoked': 'refresh 已吊销',
+      'refresh-failed': '刷新失败',
+      'validation-failed': '校验失败',
+      'invalid_grant': 'refresh 已吊销'
+    };
 
     const auth = () => {
       const value = byId('key').value.trim();
@@ -1007,7 +1013,7 @@
         badge.className = `badge ${account.pool}`;
         badge.textContent = account.pool === 'ready' ? 'Ready' : 'Unavailable';
         status.appendChild(badge);
-        cell(row, [reasonNames[account.unavailable_reason] || account.unavailable_reason, account.last_error_code].filter(Boolean).join(' · ') || '—');
+        cell(row, [reasonNames[account.unavailable_reason] || account.unavailable_reason, errorCodeNames[account.last_error_code] || account.last_error_code].filter(Boolean).join(' · ') || '—');
         cell(row, number.format(account.request_count || 0), 'mono');
         cell(row, `${account.active || 0} / ${account.max_active || 1}`, 'mono');
         const quotaCell = cell(row, quotaText(account.quota_actual || 0, account.quota_limit || 0), 'mono');

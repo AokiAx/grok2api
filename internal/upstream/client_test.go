@@ -219,3 +219,48 @@ func TestValidateResponsesProbeAuthFailure(t *testing.T) {
 		t.Fatalf("err=%v reason=%q", err, reason)
 	}
 }
+
+func TestRefreshMarksInvalidGrantAsPermanent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "openid-configuration") {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"token_endpoint": "http://" + r.Host + "/oauth2/token",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Refresh token has been revoked"}`))
+	}))
+	defer server.Close()
+
+	client := upstream.NewClient("https://example.invalid", "0.2.93", server.Client())
+	// Point issuer at test server so discovery + token hit httptest.
+	item := account.Account{
+		ID: "a1", RefreshToken: "dead", OIDCIssuer: server.URL, OIDCClientID: "client",
+	}
+	_, err := client.Refresh(context.Background(), item)
+	if !upstream.IsPermanentRefreshError(err) {
+		t.Fatalf("expected permanent refresh error, got %v", err)
+	}
+}
+
+func TestRefreshTransientStatusIsNotPermanent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "openid-configuration") {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"token_endpoint": "http://" + r.Host + "/oauth2/token",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("temporary"))
+	}))
+	defer server.Close()
+	client := upstream.NewClient("https://example.invalid", "0.2.93", server.Client())
+	_, err := client.Refresh(context.Background(), account.Account{
+		ID: "a1", RefreshToken: "x", OIDCIssuer: server.URL, OIDCClientID: "client",
+	})
+	if err == nil || upstream.IsPermanentRefreshError(err) {
+		t.Fatalf("expected transient error, got %v", err)
+	}
+}
