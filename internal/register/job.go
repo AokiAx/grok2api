@@ -41,7 +41,7 @@ type JobStatus struct {
 
 type JobManager struct {
 	mu       sync.Mutex
-	settings config.Config
+	settings SettingsSource
 	pipeline *Pipeline
 	status   JobStatus
 	cancel   context.CancelFunc
@@ -49,6 +49,10 @@ type JobManager struct {
 }
 
 func NewJobManager(settings config.Config, pipeline *Pipeline) *JobManager {
+	return NewJobManagerFromSource(staticSettings{cfg: settings}, pipeline)
+}
+
+func NewJobManagerFromSource(settings SettingsSource, pipeline *Pipeline) *JobManager {
 	return &JobManager{
 		settings: settings,
 		pipeline: pipeline,
@@ -146,24 +150,34 @@ type HealthReport struct {
 }
 
 func (m *JobManager) Health(ctx context.Context) HealthReport {
+	settings := config.Defaults()
+	if m.settings != nil {
+		settings = m.settings.Get()
+	}
 	report := HealthReport{
 		Turnstile:    "unconfigured",
 		Email:        "unconfigured",
 		Proxy:        "direct",
 		FlareSolverr: "disabled",
 	}
-	if m.settings.Proxy != "" || len(m.settings.ProxyPool) > 0 {
+	if settings.Proxy != "" || len(settings.ProxyPool) > 0 {
 		report.Proxy = "configured"
 	}
-	if m.settings.FlareSolverrEnabled && m.settings.FlareSolverrURL != "" {
+	if settings.FlareSolverrEnabled && settings.FlareSolverrURL != "" {
 		report.FlareSolverr = "configured"
 	}
-	// Lightweight config presence checks; deep probes happen at run time.
-	if m.settings.TurnstileSolverURL != "" || m.settings.CapMonsterAPIKey != "" {
-		report.Turnstile = m.settings.TurnstileSolver
+	if settings.TurnstileSolverURL != "" || settings.CapMonsterAPIKey != "" {
+		report.Turnstile = settings.TurnstileSolver
 	}
-	if len(m.settings.CfmailAccounts) > 0 || m.settings.EmailProvider == "mailtm" {
-		report.Email = m.settings.EmailProvider
+	if len(settings.CfmailAccounts) > 0 || settings.EmailProvider == "mailtm" {
+		report.Email = settings.EmailProvider
 	}
 	return report
+}
+
+func (m *JobManager) Settings() config.Config {
+	if m.settings == nil {
+		return config.Defaults()
+	}
+	return m.settings.Get()
 }

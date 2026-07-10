@@ -28,3 +28,24 @@ func TestNewPrefersPrimaryThenPool(t *testing.T) {
 		t.Fatal("expected secondary next")
 	}
 }
+
+func TestStaticEmptyAndAll(t *testing.T) {
+	s := proxy.Static{}
+	if s.Next() != "" || s.All() != nil {
+		t.Fatalf("empty static = %q %#v", s.Next(), s.All())
+	}
+	s = proxy.Static{URL: " http://x "}
+	if s.Next() != "http://x" {
+		t.Fatalf("trim = %q", s.Next())
+	}
+	if len(s.All()) != 1 {
+		t.Fatalf("all=%#v", s.All())
+	}
+}
+
+func TestNewDirectWhenEmpty(t *testing.T) {
+	provider := proxy.New("", nil)
+	if provider.Next() != "" {
+		t.Fatalf("expected direct empty, got %q", provider.Next())
+	}
+}

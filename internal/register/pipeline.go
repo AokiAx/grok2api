@@ -44,20 +44,37 @@ type RunSummary struct {
 	Accounts  []AccountOutcome `json:"accounts"`
 }
 
+type SettingsSource interface {
+	Get() config.Config
+}
+
+type staticSettings struct{ cfg config.Config }
+
+func (s staticSettings) Get() config.Config { return s.cfg }
+
 type Pipeline struct {
-	settings config.Config
+	settings SettingsSource
 	importer Importer
-	proxies  regproxy.Provider
 	now      func() time.Time
 }
 
 func NewPipeline(settings config.Config, importer Importer) *Pipeline {
+	return NewPipelineFromSource(staticSettings{cfg: settings}, importer)
+}
+
+func NewPipelineFromSource(settings SettingsSource, importer Importer) *Pipeline {
 	return &Pipeline{
 		settings: settings,
 		importer: importer,
-		proxies:  regproxy.New(settings.Proxy, settings.ProxyPool),
 		now:      time.Now,
 	}
+}
+
+func (p *Pipeline) current() config.Config {
+	if p.settings == nil {
+		return config.Defaults()
+	}
+	return p.settings.Get()
 }
 
 func (p *Pipeline) Run(ctx context.Context, cfg RunConfig, onEvent func(string)) (RunSummary, error) {
@@ -66,14 +83,14 @@ func (p *Pipeline) Run(ctx context.Context, cfg RunConfig, onEvent func(string))
 	}
 	count := cfg.Count
 	if count <= 0 {
-		count = p.settings.TotalAccounts
+		count = p.current().TotalAccounts
 	}
 	if count <= 0 {
 		count = 1
 	}
 	workers := cfg.Workers
 	if workers <= 0 {
-		workers = p.settings.MaxWorkers
+		workers = p.current().MaxWorkers
 	}
 	if workers <= 0 {
 		workers = 1
@@ -130,32 +147,33 @@ func (p *Pipeline) Run(ctx context.Context, cfg RunConfig, onEvent func(string))
 
 func (p *Pipeline) registerOne(ctx context.Context, index int, cfg RunConfig, onEvent func(string)) AccountOutcome {
 	onEvent(fmt.Sprintf("[%d] starting", index))
+	settings := p.current()
 	proxyURL := strings.TrimSpace(cfg.ProxyURL)
 	if proxyURL == "" {
-		proxyURL = p.proxies.Next()
+		proxyURL = regproxy.New(settings.Proxy, settings.ProxyPool).Next()
 	}
 	httpClient := &http.Client{Timeout: 45 * time.Second}
-	mailProvider, err := mail.NewProvider(p.settings, httpClient)
+	mailProvider, err := mail.NewProvider(settings, httpClient)
 	if err != nil {
 		return AccountOutcome{Index: index, Error: err.Error()}
 	}
 	solver, err := turnstile.NewFromMode(
-		p.settings.TurnstileSolver,
-		p.settings.TurnstileSolverURL,
-		p.settings.CapMonsterAPIBase,
-		p.settings.CapMonsterAPIKey,
-		p.settings.TurnstileTimeout(),
+		settings.TurnstileSolver,
+		settings.TurnstileSolverURL,
+		settings.CapMonsterAPIBase,
+		settings.CapMonsterAPIKey,
+		settings.TurnstileTimeout(),
 		httpClient,
 	)
 	if err != nil {
 		return AccountOutcome{Index: index, Error: err.Error()}
 	}
 	registrar, err := NewRegistrar(RegistrarConfig{
-		AccountsBase:     p.settings.AccountsBase,
-		TurnstileSitekey: p.settings.TurnstileSitekey,
+		AccountsBase:     settings.AccountsBase,
+		TurnstileSitekey: settings.TurnstileSitekey,
 		ProxyURL:         proxyURL,
 		Solver:           solver,
-		TurnstileTimeout: p.settings.TurnstileTimeout(),
+		TurnstileTimeout: settings.TurnstileTimeout(),
 	})
 	if err != nil {
 		return AccountOutcome{Index: index, Error: err.Error()}
@@ -171,7 +189,7 @@ func (p *Pipeline) registerOne(ctx context.Context, index int, cfg RunConfig, on
 	onEvent(fmt.Sprintf("[%d] mailbox ready %s", index, maskEmail(email)))
 
 	wait := func(waitCtx context.Context, mailToken, mailEmail string) (string, error) {
-		codeCtx, cancel := context.WithTimeout(waitCtx, p.settings.EmailCodeTimeout())
+		codeCtx, cancel := context.WithTimeout(waitCtx, settings.EmailCodeTimeout())
 		defer cancel()
 		return mailProvider.WaitCode(codeCtx, mailToken, mailEmail)
 	}

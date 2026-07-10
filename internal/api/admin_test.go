@@ -11,6 +11,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/api"
+	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/register"
 )
 
@@ -204,6 +205,9 @@ func (f *fakeRegisterJobs) Status() register.JobStatus {
 func (f *fakeRegisterJobs) Health(context.Context) register.HealthReport {
 	return register.HealthReport{Turnstile: "auto", Email: "cfmail", Proxy: "direct"}
 }
+func (f *fakeRegisterJobs) Settings() config.Config {
+	return config.Defaults()
+}
 
 func TestRegisterJobRoutes(t *testing.T) {
 	jobs := &fakeRegisterJobs{}
@@ -232,5 +236,46 @@ func TestRegisterJobRoutes(t *testing.T) {
 	server.Handler().ServeHTTP(stopRec, stop)
 	if stopRec.Code != http.StatusOK || !jobs.stopped {
 		t.Fatalf("stop status=%d stopped=%v", stopRec.Code, jobs.stopped)
+	}
+}
+
+type fakeRegisterSettings struct {
+	cfg config.Config
+}
+
+func (f *fakeRegisterSettings) Get() config.Config { return f.cfg }
+func (f *fakeRegisterSettings) Update(patch config.Config) (config.Config, error) {
+	if patch.EmailProvider != "" {
+		f.cfg.EmailProvider = patch.EmailProvider
+	}
+	if patch.MaxWorkers > 0 {
+		f.cfg.MaxWorkers = patch.MaxWorkers
+	}
+	return f.cfg, nil
+}
+
+func TestRegisterSettingsRoutes(t *testing.T) {
+	store := &fakeRegisterSettings{cfg: config.Defaults()}
+	store.cfg.EmailProvider = "cfmail"
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(&fakeAdmin{}, "secret"), api.WithRegisterSettings(store))
+
+	getReq := httptest.NewRequest(http.MethodGet, "/admin/api/register/settings", nil)
+	getReq.Header.Set("Authorization", "Bearer secret")
+	getRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), "email_provider") {
+		t.Fatalf("get status=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/admin/api/register/settings", strings.NewReader(`{"email_provider":"mailtm","max_workers":4}`))
+	putReq.Header.Set("Authorization", "Bearer secret")
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put status=%d body=%s", putRec.Code, putRec.Body.String())
+	}
+	if store.cfg.EmailProvider != "mailtm" || store.cfg.MaxWorkers != 4 {
+		t.Fatalf("store after put = %#v", store.cfg)
 	}
 }

@@ -15,7 +15,9 @@ import (
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/compat"
+	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/register"
+	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/service"
 )
 
@@ -38,14 +40,15 @@ type StatusProvider interface {
 }
 
 type Server struct {
-	gateway      Gateway
-	status       StatusProvider
-	apiKey       string
-	defaultModel string
-	admin        AdminService
-	adminKey     string
-	registerJobs RegisterJobService
-	handler      http.Handler
+	gateway          Gateway
+	status           StatusProvider
+	apiKey           string
+	defaultModel     string
+	admin            AdminService
+	adminKey         string
+	registerJobs     RegisterJobService
+	registerSettings RegisterSettingsService
+	handler          http.Handler
 }
 
 type Option func(*Server)
@@ -75,11 +78,23 @@ type RegisterJobService interface {
 	Stop() error
 	Status() register.JobStatus
 	Health(context.Context) register.HealthReport
+	Settings() config.Config
+}
+
+type RegisterSettingsService interface {
+	Get() config.Config
+	Update(config.Config) (config.Config, error)
 }
 
 func WithRegisterJobs(service RegisterJobService) Option {
 	return func(server *Server) {
 		server.registerJobs = service
+	}
+}
+
+func WithRegisterSettings(service RegisterSettingsService) Option {
+	return func(server *Server) {
+		server.registerSettings = service
 	}
 }
 
@@ -116,6 +131,10 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		mux.HandleFunc("POST /admin/api/register/start", server.registerStart)
 		mux.HandleFunc("POST /admin/api/register/stop", server.registerStop)
 		mux.HandleFunc("GET /admin/api/register/health", server.registerHealth)
+	}
+	if server.registerSettings != nil {
+		mux.HandleFunc("GET /admin/api/register/settings", server.registerSettingsGet)
+		mux.HandleFunc("PUT /admin/api/register/settings", server.registerSettingsPut)
 	}
 	server.handler = mux
 	return server
@@ -349,6 +368,44 @@ func (s *Server) registerStop(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"stopped": true})
+}
+
+func (s *Server) registerSettingsGet(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	if s.registerSettings == nil {
+		writeOpenAIError(writer, http.StatusNotFound, "register settings unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, regsettings.EditorView(s.registerSettings.Get()))
+}
+
+func (s *Server) registerSettingsPut(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	if s.registerSettings == nil {
+		writeOpenAIError(writer, http.StatusNotFound, "register settings unavailable")
+		return
+	}
+	var patch config.Config
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 2<<20)).Decode(&patch); err != nil {
+		writeOpenAIError(writer, http.StatusBadRequest, "Invalid settings payload")
+		return
+	}
+	updated, err := s.registerSettings.Update(patch)
+	if err != nil {
+		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"saved":    true,
+		"settings": regsettings.EditorView(updated),
+		"summary":  regsettings.PublicView(updated),
+	})
 }
 
 func (s *Server) Handler() http.Handler {

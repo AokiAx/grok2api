@@ -444,6 +444,7 @@
       <button type="button" data-view="accounts">账号</button>
       <button type="button" data-view="register">注册</button>
       <button type="button" data-view="import">导入</button>
+      <button type="button" data-view="settings">设置</button>
     </nav>
 
     <section class="view active" id="view-overview">
@@ -598,6 +599,83 @@
         </div>
       </div>
     </section>
+
+    <section class="view" id="view-settings">
+      <div class="card">
+        <div class="toolbar">
+          <div>
+            <h2 style="margin:0;color:var(--text);font-size:14px">注册配置</h2>
+            <div class="meta">邮箱 / 过盾 / 代理 · 保存到 data/register_settings.json</div>
+          </div>
+          <div class="row">
+            <button type="button" class="btn" id="settingsReloadButton">重新加载</button>
+            <button type="button" class="btn primary" id="settingsSaveButton">保存</button>
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="stack">
+            <label for="setEmailProvider">邮箱 Provider</label>
+            <select id="setEmailProvider">
+              <option value="cfmail">cfmail</option>
+              <option value="mailtm">mailtm</option>
+            </select>
+            <label for="setCfmailProfile">cfmail profile</label>
+            <input id="setCfmailProfile" placeholder="auto">
+            <label for="setMailtmBase">mailtm API</label>
+            <input id="setMailtmBase" placeholder="https://api.mail.tm">
+            <label for="setMailtmDomain">mailtm domain</label>
+            <input id="setMailtmDomain" placeholder="可空">
+            <label for="setTotal">默认注册数量</label>
+            <input id="setTotal" type="number" min="1" value="1">
+            <label for="setWorkers">默认并发</label>
+            <input id="setWorkers" type="number" min="1" value="1">
+          </div>
+          <div class="stack">
+            <label for="setSolver">Turnstile solver</label>
+            <select id="setSolver">
+              <option value="auto">auto</option>
+              <option value="local">local</option>
+              <option value="capmonster">capmonster</option>
+            </select>
+            <label for="setSolverURL">本地 solver URL</label>
+            <input id="setSolverURL" placeholder="http://127.0.0.1:5072">
+            <label for="setSitekey">Turnstile sitekey</label>
+            <input id="setSitekey">
+            <label for="setCapBase">CapMonster API base</label>
+            <input id="setCapBase">
+            <label for="setCapKey">CapMonster API key</label>
+            <input id="setCapKey" type="password" placeholder="留空=不修改；输入空格=清空">
+            <label for="setTsTimeout">Turnstile 超时(秒)</label>
+            <input id="setTsTimeout" type="number" min="30" value="120">
+            <label for="setMailTimeout">邮箱验证码超时(秒)</label>
+            <input id="setMailTimeout" type="number" min="30" value="120">
+          </div>
+        </div>
+        <div class="form-grid" style="margin-top:14px">
+          <div class="stack">
+            <label for="setProxy">代理</label>
+            <input id="setProxy" placeholder="http://127.0.0.1:8118">
+            <label for="setProxyPool">代理池（每行一个）</label>
+            <textarea id="setProxyPool" style="min-height:100px"></textarea>
+            <label for="setProxyRotate">代理轮换</label>
+            <input id="setProxyRotate" placeholder="per_account">
+            <label class="check"><input id="setFlareEnabled" type="checkbox"> 启用 FlareSolverr</label>
+            <label for="setFlareURL">FlareSolverr URL</label>
+            <input id="setFlareURL" placeholder="http://127.0.0.1:8191">
+          </div>
+          <div class="stack">
+            <label for="setCfmailJSON">cfmail_accounts JSON</label>
+            <textarea id="setCfmailJSON" style="min-height:220px"></textarea>
+            <div class="meta">保存后立即对后续注册任务生效，无需重启服务。</div>
+          </div>
+        </div>
+        <div class="stack" style="margin-top:12px">
+          <label>设置输出</label>
+          <pre id="settingsOutput">尚未加载</pre>
+        </div>
+      </div>
+    </section>
+
   </div>
 
   <script>
@@ -797,6 +875,7 @@
         await refresh();
       }
       await refreshRegister();
+      await loadSettings();
     }
 
     async function handleLogin(event) {
@@ -951,6 +1030,95 @@
       }
     }
 
+    
+    function fillSettings(s){
+      byId('setEmailProvider').value = s.email_provider || 'cfmail';
+      byId('setCfmailProfile').value = s.cfmail_profile || 'auto';
+      byId('setMailtmBase').value = s.mailtm_api_base || '';
+      byId('setMailtmDomain').value = s.mailtm_domain || '';
+      byId('setTotal').value = s.total_accounts || 1;
+      byId('setWorkers').value = s.max_workers || 1;
+      byId('setSolver').value = s.turnstile_solver || 'auto';
+      byId('setSolverURL').value = s.turnstile_solver_url || '';
+      byId('setSitekey').value = s.turnstile_sitekey || '';
+      byId('setCapBase').value = s.capmonster_api_base || '';
+      byId('setCapKey').value = s.capmonster_api_key || '';
+      byId('setTsTimeout').value = s.turnstile_timeout || 120;
+      byId('setMailTimeout').value = s.email_code_timeout || 120;
+      byId('setProxy').value = s.proxy || '';
+      byId('setProxyPool').value = Array.isArray(s.proxy_pool) ? s.proxy_pool.join('\n') : '';
+      byId('setProxyRotate').value = s.proxy_rotate || 'per_account';
+      byId('setFlareEnabled').checked = Boolean(s.flaresolverr_enabled);
+      byId('setFlareURL').value = s.flaresolverr_url || '';
+      byId('setCfmailJSON').value = JSON.stringify(s.cfmail_accounts || [], null, 2);
+    }
+    async function loadSettings(){
+      if(!state.authed) return;
+      try{
+        const resp=await fetch('/admin/api/register/settings',{headers:auth()});
+        if(resp.status===401){ logout(); return; }
+        if(!resp.ok) throw new Error('settings '+resp.status);
+        const data=await resp.json();
+        fillSettings(data);
+        byId('settingsOutput').textContent='已加载';
+      }catch(error){
+        byId('settingsOutput').textContent=String(error.message||error);
+      }
+    }
+    async function saveSettings(){
+      if(!state.authed) return;
+      let cfmail=[];
+      try{
+        const raw=byId('setCfmailJSON').value.trim();
+        cfmail = raw ? JSON.parse(raw) : [];
+        if(!Array.isArray(cfmail)) throw new Error('cfmail_accounts 必须是数组');
+      }catch(error){
+        byId('settingsOutput').textContent='cfmail JSON 无效: '+(error.message||error);
+        return;
+      }
+      const proxyPool=byId('setProxyPool').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      const payload={
+        email_provider: byId('setEmailProvider').value,
+        cfmail_profile: byId('setCfmailProfile').value,
+        mailtm_api_base: byId('setMailtmBase').value,
+        mailtm_domain: byId('setMailtmDomain').value,
+        total_accounts: Number(byId('setTotal').value||1),
+        max_workers: Number(byId('setWorkers').value||1),
+        turnstile_solver: byId('setSolver').value,
+        turnstile_solver_url: byId('setSolverURL').value,
+        turnstile_sitekey: byId('setSitekey').value,
+        capmonster_api_base: byId('setCapBase').value,
+        capmonster_api_key: byId('setCapKey').value,
+        turnstile_timeout: Number(byId('setTsTimeout').value||120),
+        email_code_timeout: Number(byId('setMailTimeout').value||120),
+        proxy: byId('setProxy').value,
+        proxy_pool: proxyPool,
+        proxy_rotate: byId('setProxyRotate').value,
+        flaresolverr_enabled: byId('setFlareEnabled').checked,
+        flaresolverr_url: byId('setFlareURL').value,
+        cfmail_accounts: cfmail
+      };
+      const btn=byId('settingsSaveButton');
+      btn.disabled=true;
+      try{
+        const resp=await fetch('/admin/api/register/settings',{
+          method:'PUT',
+          headers:{...auth(),'Content-Type':'application/json'},
+          body:JSON.stringify(payload)
+        });
+        if(resp.status===401){ logout(); return; }
+        const data=await resp.json();
+        if(!resp.ok) throw new Error((data.error&&data.error.message)||('save '+resp.status));
+        if(data.settings) fillSettings(data.settings);
+        byId('settingsOutput').textContent=JSON.stringify(data,null,2);
+        await refreshRegister();
+      }catch(error){
+        byId('settingsOutput').textContent=String(error.message||error);
+      }finally{
+        btn.disabled=false;
+      }
+    }
+
     async function stopRegister() {
       const response = await fetch('/admin/api/register/stop', {
         method: 'POST',
@@ -1007,6 +1175,8 @@
     byId('registerStartButton').onclick = startRegister;
     byId('registerStopButton').onclick = stopRegister;
     byId('registerRefreshButton').onclick = refreshRegister;
+    byId('settingsReloadButton').onclick = () => loadSettings();
+    byId('settingsSaveButton').onclick = saveSettings;
 
     bootstrap();
     setInterval(refresh,15000);

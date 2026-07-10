@@ -21,6 +21,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/api"
 	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/register"
+	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/repository"
 	runtimeworker "github.com/AokiAx/grok2api/internal/runtime"
 	"github.com/AokiAx/grok2api/internal/scheduler"
@@ -154,8 +155,12 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 	)
 	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
-	registerPipeline := register.NewPipeline(settings, adminService)
-	registerJobs := register.NewJobManager(settings, registerPipeline)
+	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
+	if err != nil {
+		return err
+	}
+	registerPipeline := register.NewPipelineFromSource(registerStore, adminService)
+	registerJobs := register.NewJobManagerFromSource(registerStore, registerPipeline)
 	handler := api.NewServer(
 		gateway,
 		poolStatusProvider{scheduler: pool},
@@ -163,6 +168,7 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		api.WithDefaultModel(settings.DefaultModel),
 		api.WithAdmin(adminService, settings.AdminKey()),
 		api.WithRegisterJobs(registerJobs),
+		api.WithRegisterSettings(registerStore),
 	).Handler()
 	server := &http.Server{
 		Addr:              settings.Address(),
@@ -236,7 +242,11 @@ func runRegister(
 	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
 	upstreamClient := upstream.NewClient(settings.ProxyBaseURL, settings.ClientVersion, httpClient)
 	adminService := admin.NewService(repo, upstreamClient)
-	pipeline := register.NewPipeline(settings, adminService)
+	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
+	if err != nil {
+		return err
+	}
+	pipeline := register.NewPipelineFromSource(registerStore, adminService)
 	summary, err := pipeline.Run(ctx, register.RunConfig{
 		Count:    count,
 		Workers:  workers,
@@ -271,7 +281,11 @@ func runMint(
 	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
 	upstreamClient := upstream.NewClient(settings.ProxyBaseURL, settings.ClientVersion, httpClient)
 	adminService := admin.NewService(repo, upstreamClient)
-	pipeline := register.NewPipeline(settings, adminService)
+	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
+	if err != nil {
+		return err
+	}
+	pipeline := register.NewPipelineFromSource(registerStore, adminService)
 	outcome, err := pipeline.MintSSO(ctx, ssoCookie, email, dryRun)
 	if encodeErr := json.NewEncoder(output).Encode(outcome); encodeErr != nil {
 		return encodeErr
