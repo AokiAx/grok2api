@@ -69,6 +69,7 @@ type ImportAccount struct {
 	OIDCIssuer   string `json:"oidc_issuer"`
 	OIDCClientID string `json:"oidc_client_id"`
 	UserID       string `json:"user_id"`
+	TeamID       string `json:"team_id"`
 }
 
 type ImportRequest struct {
@@ -140,6 +141,7 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 		item.RefreshToken = firstNonEmpty(input.RefreshToken, previous.RefreshToken)
 		item.Email = firstNonEmpty(email, previous.Email)
 		item.UserID = firstNonEmpty(input.UserID, previous.UserID)
+		item.TeamID = firstNonEmpty(input.TeamID, previous.TeamID)
 		item.OIDCIssuer = firstNonEmpty(input.OIDCIssuer, previous.OIDCIssuer, "https://auth.x.ai")
 		item.OIDCClientID = firstNonEmpty(input.OIDCClientID, previous.OIDCClientID)
 		if input.ExpiresIn > 0 {

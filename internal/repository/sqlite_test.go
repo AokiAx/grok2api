@@ -22,8 +22,8 @@ func TestSQLiteMigrationCreatesTwoPoolSchema(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	if got := repo.SchemaVersion(ctx); got != 2 {
-		t.Fatalf("schema version = %d; want 2", got)
+	if got := repo.SchemaVersion(ctx); got != 3 {
+		t.Fatalf("schema version = %d; want 3", got)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestLegacyDisabledAccountsMigrateByFailureReason(t *testing.T) {
 		t.Fatalf("list accounts: %v", err)
 	}
 	if len(accounts) != 2 {
-		t.Fatalf("account count = %d; want 2", len(accounts))
+		t.Fatalf("account count = %d; want 3", len(accounts))
 	}
 	byID := map[string]account.Account{}
 	for _, item := range accounts {
@@ -332,7 +332,7 @@ func TestOpenSQLiteMigratesPythonV1AccountTable(t *testing.T) {
 	if byID["cooldown"].UnavailableReason != account.ReasonCooldown || byID["cooldown"].RetryAt.IsZero() {
 		t.Fatalf("cooldown = %#v", byID["cooldown"])
 	}
-	if repo.SchemaVersion(ctx) != 2 {
+	if repo.SchemaVersion(ctx) != 3 {
 		t.Fatalf("schema version = %d", repo.SchemaVersion(ctx))
 	}
 }
@@ -413,5 +413,35 @@ func TestSaveAccountPersistsQuotaAndLastSuccess(t *testing.T) {
 	}
 	if got.LastSuccessAt.IsZero() {
 		t.Fatal("last_success_at not persisted")
+	}
+}
+
+func TestSaveAccountPersistsTeamID(t *testing.T) {
+	ctx := context.Background()
+	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "team.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	item := account.Account{
+		ID:          "team-acc",
+		AccessToken: "token",
+		Email:       "a@example.com",
+		UserID:      "user-1",
+		TeamID:      "team-9",
+		Pool:        account.PoolReady,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		MaxActive:   1,
+	}
+	if err := repo.SaveAccount(ctx, item); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].TeamID != "team-9" {
+		t.Fatalf("accounts = %#v", accounts)
 	}
 }

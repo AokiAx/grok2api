@@ -113,7 +113,9 @@ func (s *Scheduler) PromoteDue(now time.Time) []account.Account {
 		if item.Pool != account.PoolUnavailable {
 			continue
 		}
-		if item.UnavailableReason != account.ReasonQuota && item.UnavailableReason != account.ReasonCooldown {
+		// Quota accounts require a real probe before re-entry; only cooldown
+		// is safe to promote purely by retry_at.
+		if item.UnavailableReason != account.ReasonCooldown {
 			continue
 		}
 		if item.RetryAt.IsZero() || item.RetryAt.After(now) {

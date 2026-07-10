@@ -187,6 +187,8 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 			repo,
 			time.Minute,
 			runtimeworker.WithCredentialRecovery(repo, upstreamClient, upstreamClient),
+			runtimeworker.WithQuotaProber(upstreamClient),
+			runtimeworker.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
 		)
 	}()
 	serverErrors := make(chan error, 1)

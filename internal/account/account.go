@@ -28,6 +28,7 @@ type Account struct {
 	OIDCClientID        string
 	Email               string
 	UserID              string
+	TeamID              string
 	Pool                Pool
 	UnavailableReason   UnavailableReason
 	RetryAt             time.Time

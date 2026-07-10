@@ -45,6 +45,39 @@ func (c *Client) Chat(
 	return c.Request(ctx, item, http.MethodPost, "/chat/completions", payload, stream)
 }
 
+// ProbeFreeQuota checks whether a free account still has usable capacity.
+// Free tier has no reliable billing query, so this issues a minimal chat and
+// inspects either free-usage errors or x-ratelimit remaining headers.
+func (c *Client) ProbeFreeQuota(
+	ctx context.Context,
+	item account.Account,
+) (account.UnavailableReason, string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	payload := []byte(`{"model":"grok-4.5","stream":false,"max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`)
+	response, err := c.Request(probeCtx, item, http.MethodPost, "/chat/completions", payload, false)
+	if err != nil {
+		return "", "", fmt.Errorf("probe free quota: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return "", "", fmt.Errorf("read free quota probe: %w", err)
+	}
+	usage := ParseRateLimitHeaders(response.Header)
+	if response.StatusCode < 400 {
+		if usage.Present() && usage.Exhausted() {
+			return account.ReasonQuota, "subscription:free-usage-exhausted", nil
+		}
+		return "", "", nil
+	}
+	failure := ClassifyFailure(response.StatusCode, body)
+	if failure.Reason == "" {
+		return account.ReasonValidating, failure.Code, nil
+	}
+	return failure.Reason, failure.Code, nil
+}
+
 func (c *Client) Request(
 	ctx context.Context,
 	item account.Account,
@@ -99,6 +132,26 @@ func (c *Client) Validate(
 	ctx context.Context,
 	item account.Account,
 ) (account.UnavailableReason, string, error) {
+	// Stage 1: lightweight /models auth/quota probe.
+	reason, code, err := c.validateModels(ctx, item)
+	if err != nil || reason != "" {
+		return reason, code, err
+	}
+	// Stage 2: optional short responses stream probe when models succeeds.
+	// This catches tokens that can list models but fail inference auth/quota.
+	if probeReason, probeCode, probeErr := c.validateResponsesProbe(ctx, item); probeErr != nil {
+		// Infrastructure/probe transport errors should not mark account bad.
+		return "", "", nil
+	} else if probeReason != "" {
+		return probeReason, probeCode, nil
+	}
+	return "", "", nil
+}
+
+func (c *Client) validateModels(
+	ctx context.Context,
+	item account.Account,
+) (account.UnavailableReason, string, error) {
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -108,10 +161,7 @@ func (c *Client) Validate(
 	if err != nil {
 		return "", "", fmt.Errorf("create validation request: %w", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+item.AccessToken)
-	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
-	request.Header.Set("x-grok-client-version", c.clientVersion)
-	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
+	c.setAuthHeaders(request, item, "")
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return "", "", fmt.Errorf("validate account: %w", err)
@@ -129,6 +179,56 @@ func (c *Client) Validate(
 		return account.ReasonValidating, failure.Code, nil
 	}
 	return failure.Reason, failure.Code, nil
+}
+
+func (c *Client) validateResponsesProbe(
+	ctx context.Context,
+	item account.Account,
+) (account.UnavailableReason, string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	payload := []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"ping"}],"stream":true,"max_output_tokens":16}`)
+	request, err := http.NewRequestWithContext(
+		probeCtx,
+		http.MethodPost,
+		c.baseURL+"/responses",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("create probe request: %w", err)
+	}
+	c.setAuthHeaders(request, item, "grok-4.5")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return "", "", fmt.Errorf("probe account: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 400 {
+		// Drain a tiny bit then cancel/close; success means account can infer.
+		_, _ = io.CopyN(io.Discard, response.Body, 256)
+		return "", "", nil
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return "", "", fmt.Errorf("read probe response: %w", err)
+	}
+	failure := ClassifyFailure(response.StatusCode, body)
+	if failure.Reason == "" {
+		return account.ReasonValidating, failure.Code, nil
+	}
+	return failure.Reason, failure.Code, nil
+}
+
+func (c *Client) setAuthHeaders(request *http.Request, item account.Account, model string) {
+	request.Header.Set("Authorization", "Bearer "+item.AccessToken)
+	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	request.Header.Set("x-grok-client-version", c.clientVersion)
+	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
+	if model != "" {
+		request.Header.Set("x-grok-model-override", model)
+	}
 }
 
 func (c *Client) Refresh(ctx context.Context, item account.Account) (account.Account, error) {

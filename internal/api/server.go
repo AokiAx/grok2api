@@ -238,6 +238,8 @@ func publicAccount(item account.Account) map[string]any {
 	return map[string]any{
 		"id":                 item.ID,
 		"email":              item.Email,
+		"user_id":            item.UserID,
+		"team_id":            item.TeamID,
 		"pool":               item.Pool,
 		"unavailable_reason": item.UnavailableReason,
 		"retry_at":           item.RetryAt,

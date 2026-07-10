@@ -79,3 +79,18 @@ func TestAggregateResponsesStreamBuildsChatCompletion(t *testing.T) {
 		t.Fatalf("content = %#v payload=%s", content, string(out))
 	}
 }
+
+func TestChatToResponsesPassesBackendSearch(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"web_search_options":{"search_context_size":"medium"}}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["backend_search"] != true {
+		t.Fatalf("backend_search = %#v", payload["backend_search"])
+	}
+}

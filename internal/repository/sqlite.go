@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type SQLite struct {
 	db *sql.DB
@@ -55,6 +55,7 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			oidc_client_id TEXT NOT NULL DEFAULT '',
 			email TEXT NOT NULL DEFAULT '',
 			user_id TEXT NOT NULL DEFAULT '',
+			team_id TEXT NOT NULL DEFAULT '',
 			pool TEXT NOT NULL CHECK(pool IN ('ready','unavailable')),
 			unavailable_reason TEXT NOT NULL DEFAULT '',
 			retry_at TEXT NOT NULL DEFAULT '',
@@ -83,6 +84,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 		if _, err := r.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate sqlite: %w", err)
 		}
+	}
+	if err := r.ensureAccountColumns(ctx); err != nil {
+		return err
 	}
 	if err := r.migratePythonV1(ctx); err != nil {
 		return err
@@ -328,6 +332,7 @@ type legacyAccount struct {
 	OIDCClientID  string `json:"oidc_client_id"`
 	Email         string `json:"email"`
 	UserID        string `json:"user_id"`
+	TeamID        string `json:"team_id"`
 	Enabled       *bool  `json:"enabled"`
 	RequestCount  int64  `json:"request_count"`
 	FailCount     int    `json:"fail_count"`
@@ -517,10 +522,10 @@ func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error 
 		ctx,
 		`INSERT INTO accounts (
 			id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
-			email, user_id, pool, unavailable_reason, retry_at, last_error_code,
+			email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
 			last_success_at, quota_actual, quota_limit, request_count,
 			authentication_fails, max_active, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			access_token=excluded.access_token,
 			refresh_token=excluded.refresh_token,
@@ -529,6 +534,7 @@ func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error 
 			oidc_client_id=excluded.oidc_client_id,
 			email=excluded.email,
 			user_id=excluded.user_id,
+			team_id=excluded.team_id,
 			pool=excluded.pool,
 			unavailable_reason=excluded.unavailable_reason,
 			retry_at=excluded.retry_at,
@@ -548,6 +554,7 @@ func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error 
 		item.OIDCClientID,
 		item.Email,
 		item.UserID,
+		item.TeamID,
 		item.Pool,
 		item.UnavailableReason,
 		formatTime(item.RetryAt),
@@ -571,7 +578,7 @@ func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 	rows, err := r.db.QueryContext(
 		ctx,
 		`SELECT id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
-			email, user_id, pool, unavailable_reason, retry_at, last_error_code,
+			email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
 			last_success_at, quota_actual, quota_limit, request_count,
 			authentication_fails, max_active, created_at, updated_at
 		 FROM accounts ORDER BY created_at, id`,
@@ -594,6 +601,7 @@ func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 			&item.OIDCClientID,
 			&item.Email,
 			&item.UserID,
+			&item.TeamID,
 			&item.Pool,
 			&item.UnavailableReason,
 			&retryAt,
@@ -631,6 +639,31 @@ func parseTime(value string) time.Time {
 		return time.Time{}
 	}
 	return parsed
+}
+
+func (r *SQLite) ensureAccountColumns(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(accounts)`)
+	if err != nil {
+		return fmt.Errorf("inspect accounts columns: %w", err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan accounts column: %w", err)
+		}
+		columns[name] = true
+	}
+	if !columns["team_id"] {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE accounts ADD COLUMN team_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add team_id column: %w", err)
+		}
+	}
+	return nil
 }
 
 func formatTime(value time.Time) string {

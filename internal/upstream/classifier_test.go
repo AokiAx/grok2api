@@ -120,3 +120,17 @@ func TestParseRateLimitHeadersIgnoresMissing(t *testing.T) {
 		t.Fatalf("empty headers should not present: %#v", usage)
 	}
 }
+
+func TestClassifyFailureAuthMessageWithout401(t *testing.T) {
+	failure := upstream.ClassifyFailure(400, []byte(`{"error":"Invalid or expired credentials (no auth context)"}`))
+	if failure.Kind != upstream.FailureAuth || failure.Reason != account.ReasonAuth {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func TestClassifyFailureQuotaTextOn403(t *testing.T) {
+	failure := upstream.ClassifyFailure(403, []byte(`{"error":"free usage exhausted for rolling 24-hour window"}`))
+	if failure.Kind != upstream.FailureQuota || failure.Reason != account.ReasonQuota {
+		t.Fatalf("failure = %#v", failure)
+	}
+}

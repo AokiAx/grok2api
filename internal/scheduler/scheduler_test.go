@@ -112,6 +112,13 @@ func TestPromoteDueMovesRecoverableAccountsBackToReady(t *testing.T) {
 			MaxActive:         1,
 		},
 		{
+			ID:                "cooldown-due",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonCooldown,
+			RetryAt:           now.Add(-time.Minute),
+			MaxActive:         1,
+		},
+		{
 			ID:                "auth",
 			Pool:              account.PoolUnavailable,
 			UnavailableReason: account.ReasonAuth,
@@ -122,15 +129,15 @@ func TestPromoteDueMovesRecoverableAccountsBackToReady(t *testing.T) {
 
 	promoted := s.PromoteDue(now)
 
-	if len(promoted) != 1 || promoted[0].ID != "quota-due" {
-		t.Fatalf("promoted = %#v; want quota-due", promoted)
+	if len(promoted) != 1 || promoted[0].ID != "cooldown-due" {
+		t.Fatalf("promoted = %#v; want only cooldown-due", promoted)
 	}
 	lease, err := s.Acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire promoted: %v", err)
 	}
 	defer lease.Release()
-	if lease.Account().ID != "quota-due" {
+	if lease.Account().ID != "cooldown-due" {
 		t.Fatalf("selected %q", lease.Account().ID)
 	}
 }
@@ -202,9 +209,9 @@ func TestUpsertAndPromotionAdvanceRevision(t *testing.T) {
 	}
 	afterUpsert := s.Revision()
 	s.Upsert(account.Account{
-		ID:                "quota",
+		ID:                "cooldown",
 		Pool:              account.PoolUnavailable,
-		UnavailableReason: account.ReasonQuota,
+		UnavailableReason: account.ReasonCooldown,
 		RetryAt:           now.Add(-time.Second),
 	})
 	s.PromoteDue(now)

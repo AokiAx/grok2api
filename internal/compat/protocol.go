@@ -26,7 +26,19 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 	if maxTokens := firstNumber(input, "max_tokens", "max_completion_tokens"); maxTokens != nil {
 		output["max_output_tokens"] = maxTokens
 	}
-	copyFields(output, input, "temperature", "top_p", "tools", "tool_choice", "metadata", "user")
+	copyFields(output, input, "temperature", "top_p", "tools", "tool_choice", "metadata", "user", "tool_resources")
+	// Backend search / tool flags used by CLI-backed models.
+	for _, key := range []string{"backend_search", "supports_backend_search", "web_search", "include", "instructions"} {
+		if value, ok := input[key]; ok {
+			output[key] = value
+		}
+	}
+	// OpenAI-style web_search_options -> backend_search enablement signal.
+	if _, ok := input["web_search_options"]; ok {
+		if _, exists := output["backend_search"]; !exists {
+			output["backend_search"] = true
+		}
+	}
 
 	if effort := extractReasoningEffort(input); effort != "" {
 		output["reasoning_effort"] = effort

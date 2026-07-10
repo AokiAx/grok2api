@@ -17,6 +17,14 @@ type recoveryStore struct {
 
 func (s *recoveryStore) SaveAccount(_ context.Context, item account.Account) error {
 	s.saved = append(s.saved, item)
+	// keep list in sync for subsequent recover loops in same test
+	for index := range s.accounts {
+		if s.accounts[index].ID == item.ID {
+			s.accounts[index] = item
+			return nil
+		}
+	}
+	s.accounts = append(s.accounts, item)
 	return nil
 }
 
@@ -36,19 +44,39 @@ func (r credentialRefresher) Refresh(context.Context, account.Account) (account.
 type credentialValidator struct {
 	reason account.UnavailableReason
 	code   string
+	err    error
 }
 
 func (v credentialValidator) Validate(context.Context, account.Account) (account.UnavailableReason, string, error) {
-	return v.reason, v.code, nil
+	return v.reason, v.code, v.err
 }
 
-func TestRecoverDuePromotesQuotaButNotAuth(t *testing.T) {
+type quotaProber struct {
+	reason account.UnavailableReason
+	code   string
+	err    error
+	calls  int
+}
+
+func (p *quotaProber) ProbeFreeQuota(context.Context, account.Account) (account.UnavailableReason, string, error) {
+	p.calls++
+	return p.reason, p.code, p.err
+}
+
+func TestRecoverDuePromotesCooldownButNotQuota(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
 	s := scheduler.New([]account.Account{
 		{
 			ID:                "quota",
 			Pool:              account.PoolUnavailable,
 			UnavailableReason: account.ReasonQuota,
+			RetryAt:           now.Add(-time.Minute),
+			MaxActive:         1,
+		},
+		{
+			ID:                "cooldown",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonCooldown,
 			RetryAt:           now.Add(-time.Minute),
 			MaxActive:         1,
 		},
@@ -65,8 +93,132 @@ func TestRecoverDuePromotesQuotaButNotAuth(t *testing.T) {
 	if err := runtime.RecoverDue(context.Background(), s, store, now); err != nil {
 		t.Fatalf("recover due: %v", err)
 	}
-	if len(store.saved) != 1 || store.saved[0].ID != "quota" {
-		t.Fatalf("saved = %#v; want quota", store.saved)
+	if len(store.saved) != 1 || store.saved[0].ID != "cooldown" {
+		t.Fatalf("saved = %#v; want only cooldown", store.saved)
+	}
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if lease.Account().ID != "cooldown" {
+		t.Fatalf("selected %q; want cooldown", lease.Account().ID)
+	}
+	lease.Release()
+}
+
+func TestRecoverQuotaPromotesOnlyAfterSuccessfulProbe(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	item := account.Account{
+		ID:                "quota",
+		AccessToken:       "token",
+		Pool:              account.PoolUnavailable,
+		UnavailableReason: account.ReasonQuota,
+		RetryAt:           now.Add(-time.Minute),
+		MaxActive:         1,
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	pool := scheduler.New([]account.Account{item})
+	prober := &quotaProber{}
+
+	result, err := runtime.RecoverQuota(
+		context.Background(),
+		pool,
+		store,
+		prober,
+		nil,
+		now,
+		30*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("recover quota: %v", err)
+	}
+	if result.Recovered != 1 || prober.calls != 1 {
+		t.Fatalf("result=%#v calls=%d", result, prober.calls)
+	}
+	if len(store.saved) != 1 || store.saved[0].Pool != account.PoolReady {
+		t.Fatalf("saved = %#v", store.saved)
+	}
+	lease, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire recovered: %v", err)
+	}
+	if lease.Account().ID != "quota" {
+		t.Fatalf("selected %q", lease.Account().ID)
+	}
+	lease.Release()
+}
+
+func TestRecoverQuotaDefersWhenProbeStillExhausted(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	item := account.Account{
+		ID:                "quota",
+		AccessToken:       "token",
+		Pool:              account.PoolUnavailable,
+		UnavailableReason: account.ReasonQuota,
+		RetryAt:           now.Add(-time.Minute),
+		MaxActive:         1,
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	pool := scheduler.New([]account.Account{item})
+	prober := &quotaProber{reason: account.ReasonQuota, code: "subscription:free-usage-exhausted"}
+
+	result, err := runtime.RecoverQuota(
+		context.Background(),
+		pool,
+		store,
+		prober,
+		nil,
+		now,
+		45*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("recover quota: %v", err)
+	}
+	if result.Deferred != 1 || result.Recovered != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved = %#v", store.saved)
+	}
+	got := store.saved[0]
+	if got.Pool != account.PoolUnavailable || got.UnavailableReason != account.ReasonQuota {
+		t.Fatalf("saved state = %#v", got)
+	}
+	if !got.RetryAt.Equal(now.Add(45 * time.Minute)) {
+		t.Fatalf("retry_at = %s; want +45m", got.RetryAt)
+	}
+	if pool.ReadyCount() != 0 {
+		t.Fatalf("ready count = %d; want 0", pool.ReadyCount())
+	}
+}
+
+func TestRecoverQuotaSkipsFutureRetryAt(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	item := account.Account{
+		ID:                "quota",
+		Pool:              account.PoolUnavailable,
+		UnavailableReason: account.ReasonQuota,
+		RetryAt:           now.Add(10 * time.Minute),
+		MaxActive:         1,
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	pool := scheduler.New([]account.Account{item})
+	prober := &quotaProber{}
+
+	result, err := runtime.RecoverQuota(
+		context.Background(),
+		pool,
+		store,
+		prober,
+		nil,
+		now,
+		30*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("recover quota: %v", err)
+	}
+	if result.Skipped != 1 || prober.calls != 0 || len(store.saved) != 0 {
+		t.Fatalf("result=%#v calls=%d saved=%d", result, prober.calls, len(store.saved))
 	}
 }
 

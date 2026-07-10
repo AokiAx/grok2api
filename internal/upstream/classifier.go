@@ -105,9 +105,12 @@ func ClassifyFailure(status int, body []byte) Failure {
 	lowerMessage := strings.ToLower(message)
 
 	switch {
-	case status == 429 && (lowerCode == "subscription:free-usage-exhausted" || strings.Contains(lowerMessage, "free usage") || strings.Contains(lowerMessage, "rolling 24-hour")):
+	case isQuotaFailure(status, lowerCode, lowerMessage):
 		failure.Kind = FailureQuota
 		failure.Reason = account.ReasonQuota
+		if failure.Code == "" {
+			failure.Code = "subscription:free-usage-exhausted"
+		}
 		if matches := quotaPattern.FindStringSubmatch(message); len(matches) == 3 {
 			failure.QuotaActual, _ = strconv.ParseInt(matches[1], 10, 64)
 			failure.QuotaLimit, _ = strconv.ParseInt(matches[2], 10, 64)
@@ -115,9 +118,15 @@ func ClassifyFailure(status int, body []byte) Failure {
 	case status == 429:
 		failure.Kind = FailureRateLimit
 		failure.Reason = account.ReasonCooldown
-	case status == 401 || status == 403:
+		if failure.Code == "" {
+			failure.Code = "rate_limit"
+		}
+	case isAuthFailure(status, lowerCode, lowerMessage):
 		failure.Kind = FailureAuth
 		failure.Reason = account.ReasonAuth
+		if failure.Code == "" {
+			failure.Code = "auth_failed"
+		}
 	case status >= 500:
 		failure.Kind = FailureUpstream
 	case status >= 400:
@@ -179,4 +188,61 @@ func headerInt64(header http.Header, key string) (int64, bool) {
 		return 0, false
 	}
 	return value, true
+}
+
+func isQuotaFailure(status int, code, message string) bool {
+	if status != 429 && status != 403 {
+		// Some free-tier exhaustion responses arrive as 403/400-ish text payloads.
+		if status < 400 {
+			return false
+		}
+	}
+	if code == "subscription:free-usage-exhausted" || strings.Contains(code, "usage-exhausted") {
+		return true
+	}
+	markers := []string{
+		"free usage",
+		"free-usage",
+		"usage exhausted",
+		"usage-exhausted",
+		"rolling 24-hour",
+		"quota exceeded",
+		"quota_exceeded",
+		"insufficient_quota",
+	}
+	for _, marker := range markers {
+		if strings.Contains(message, marker) || strings.Contains(code, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAuthFailure(status int, code, message string) bool {
+	if status == 401 || status == 403 {
+		// Prefer quota classification when the body clearly says usage exhausted.
+		if isQuotaFailure(status, code, message) {
+			return false
+		}
+		return true
+	}
+	markers := []string{
+		"invalid or expired credentials",
+		"invalid_token",
+		"invalid token",
+		"expired credentials",
+		"no auth context",
+		"unauthorized",
+		"permissiondenied",
+		"permission denied",
+		"token has expired",
+		"refresh_token",
+	}
+	combined := code + " " + message
+	for _, marker := range markers {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
 }
