@@ -57,3 +57,40 @@ func TestClientSendsGrokCLIHeaders(t *testing.T) {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
 }
+
+func TestValidateClassifiesAuthenticationFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"invalid-token"}`))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL+"/v1", "0.2.93", server.Client())
+
+	reason, code, err := client.Validate(
+		context.Background(),
+		account.Account{AccessToken: "bad-token"},
+	)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if reason != account.ReasonAuth || code != "invalid-token" {
+		t.Fatalf("validation = %q %q", reason, code)
+	}
+}
+
+func TestValidateAcceptsUsableAccount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL+"/v1", "0.2.93", server.Client())
+
+	reason, code, err := client.Validate(
+		context.Background(),
+		account.Account{AccessToken: "valid-token"},
+	)
+	if err != nil || reason != "" || code != "" {
+		t.Fatalf("validation = %q %q %v", reason, code, err)
+	}
+}

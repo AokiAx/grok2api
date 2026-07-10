@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>grok2api Go</title>
+  <style>
+    body{font:14px system-ui;background:#0b1020;color:#e8edf7;margin:0}main{max-width:1100px;margin:auto;padding:24px}
+    h1{font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#141c30;border:1px solid #2a3653;border-radius:12px;padding:16px}
+    .value{font-size:30px;font-weight:700}.muted{color:#91a0bd}textarea,input,button{box-sizing:border-box;background:#0e1628;color:#fff;border:1px solid #34415f;border-radius:8px;padding:10px}textarea{width:100%;min-height:150px}button{cursor:pointer;margin-right:8px}pre{white-space:pre-wrap;overflow:auto}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #28344f;text-align:left}
+  </style>
+</head>
+<body><main>
+  <h1>grok2api Go</h1><p class="muted">Ready Pool / Unavailable Pool</p>
+  <div class="grid"><div class="card"><div class="muted">Ready Pool</div><div class="value" id="ready">-</div></div><div class="card"><div class="muted">Unavailable Pool</div><div class="value" id="unavailable">-</div></div></div>
+  <div class="card" style="margin-top:12px"><h2>账号</h2><table><thead><tr><th>账号</th><th>Pool</th><th>原因</th><th>重试时间</th></tr></thead><tbody id="accounts"></tbody></table></div>
+  <div class="card" style="margin-top:12px"><h2>导入授权凭证</h2><input id="key" type="password" placeholder="面板密码" style="width:100%;margin-bottom:8px"><textarea id="input" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea><p><button onclick="send(true)">预览</button><button onclick="send(false)">导入</button></p><pre id="output"></pre></div>
+  <script>
+    const auth=()=>{const v=document.getElementById('key').value;return v?{'Authorization':'Bearer '+v}:{} };
+    async function refresh(){const h=await fetch('/health').then(r=>r.json());ready.textContent=h.account_pool.ready;unavailable.textContent=h.account_pool.unavailable;const r=await fetch('/admin/api/cli-accounts',{headers:auth()});if(!r.ok)return;const d=await r.json();accounts.innerHTML=d.accounts.map(a=>`<tr><td>${a.email||a.id}</td><td>${a.pool}</td><td>${a.unavailable_reason||''}</td><td>${a.retry_at||''}</td></tr>`).join('')}
+    async function send(preview){let parsed=JSON.parse(input.value);if(!Array.isArray(parsed))parsed=parsed.accounts||[parsed];const path=preview?'/admin/api/accounts/import/preview':'/admin/api/accounts/import';const r=await fetch(path,{method:'POST',headers:{...auth(),'Content-Type':'application/json'},body:JSON.stringify({accounts:parsed})});output.textContent=JSON.stringify(await r.json(),null,2);await refresh()}
+    refresh();
+  </script>
+</main></body></html>

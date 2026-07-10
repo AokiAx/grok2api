@@ -14,6 +14,14 @@ type memoryRepository struct {
 	saves    int
 }
 
+type memorySink struct {
+	items []account.Account
+}
+
+func (s *memorySink) Upsert(item account.Account) {
+	s.items = append(s.items, item)
+}
+
 func (r *memoryRepository) ListAccounts(context.Context) ([]account.Account, error) {
 	result := make([]account.Account, 0, len(r.accounts))
 	for _, item := range r.accounts {
@@ -113,5 +121,52 @@ func TestImportValidatorInfrastructureErrorStopsImport(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected validator error")
+	}
+}
+
+func TestImportUpdatesExistingEmailAndAddsToScheduler(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"existing": {
+			ID:           "existing",
+			AccessToken:  "old-token",
+			RefreshToken: "old-refresh",
+			Email:        "user@example.com",
+			Pool:         account.PoolUnavailable,
+		},
+	}}
+	sink := &memorySink{}
+	service := admin.NewService(repository, validator{}, admin.WithSink(sink))
+
+	result, err := service.Import(context.Background(), admin.ImportRequest{
+		Accounts: []admin.ImportAccount{{
+			AccessToken: "new-token",
+			Email:       "USER@example.com",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Updated != 1 || result.Added != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	if repository.accounts["existing"].AccessToken != "new-token" {
+		t.Fatalf("account = %#v", repository.accounts["existing"])
+	}
+	if len(sink.items) != 1 || sink.items[0].Pool != account.PoolReady {
+		t.Fatalf("sink = %#v", sink.items)
+	}
+}
+
+func TestImportRejectsMissingAccessToken(t *testing.T) {
+	repository := &memoryRepository{}
+	service := admin.NewService(repository, validator{})
+	result, err := service.Import(context.Background(), admin.ImportRequest{
+		Accounts: []admin.ImportAccount{{Email: "user@example.com"}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Invalid != 1 || repository.saves != 0 {
+		t.Fatalf("result = %#v saves=%d", result, repository.saves)
 	}
 }

@@ -3,14 +3,20 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/AokiAx/grok2api/internal/account"
+	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/service"
 )
+
+//go:embed panel.html
+var panelHTML []byte
 
 type ChatGateway interface {
 	Chat(context.Context, []byte, bool) (service.ChatResult, error)
@@ -31,6 +37,8 @@ type Server struct {
 	status       StatusProvider
 	apiKey       string
 	defaultModel string
+	admin        AdminService
+	adminKey     string
 	handler      http.Handler
 }
 
@@ -39,6 +47,18 @@ type Option func(*Server)
 func WithDefaultModel(model string) Option {
 	return func(server *Server) {
 		server.defaultModel = model
+	}
+}
+
+type AdminService interface {
+	List(context.Context) ([]account.Account, error)
+	Import(context.Context, admin.ImportRequest) (admin.ImportResult, error)
+}
+
+func WithAdmin(service AdminService, key string) Option {
+	return func(server *Server) {
+		server.admin = service
+		server.adminKey = key
 	}
 }
 
@@ -56,8 +76,89 @@ func NewServer(gateway ChatGateway, status StatusProvider, apiKey string, option
 	mux.HandleFunc("GET /health", server.health)
 	mux.HandleFunc("POST /v1/chat/completions", server.chat)
 	mux.HandleFunc("POST /chat/completions", server.chat)
+	mux.HandleFunc("GET /panel", server.panel)
+	mux.HandleFunc("GET /manager", server.panel)
+	mux.HandleFunc("GET /admin/api/panel-meta", server.panelMeta)
+	if server.admin != nil {
+		mux.HandleFunc("GET /admin/api/cli-accounts", server.adminList)
+		mux.HandleFunc("POST /admin/api/accounts/import/preview", server.adminImportPreview)
+		mux.HandleFunc("POST /admin/api/accounts/import", server.adminImport)
+	}
 	server.handler = mux
 	return server
+}
+
+func (s *Server) panel(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(panelHTML)
+}
+
+func (s *Server) panelMeta(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"auth_required": s.adminKey != "",
+		"version":       "1.0.0-go",
+	})
+}
+
+func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	accounts, err := s.admin.List(request.Context())
+	if err != nil {
+		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
+		return
+	}
+	public := make([]map[string]any, 0, len(accounts))
+	for _, item := range accounts {
+		public = append(public, map[string]any{
+			"id":                 item.ID,
+			"email":              item.Email,
+			"pool":               item.Pool,
+			"unavailable_reason": item.UnavailableReason,
+			"retry_at":           item.RetryAt,
+			"last_error_code":    item.LastErrorCode,
+			"quota_actual":       item.QuotaActual,
+			"quota_limit":        item.QuotaLimit,
+			"request_count":      item.RequestCount,
+			"active":             item.Active,
+			"max_active":         item.MaxActive,
+			"has_refresh_token":  item.RefreshToken != "",
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"count":    len(accounts),
+		"accounts": public,
+	})
+}
+
+func (s *Server) adminImportPreview(writer http.ResponseWriter, request *http.Request) {
+	s.handleAdminImport(writer, request, true)
+}
+
+func (s *Server) adminImport(writer http.ResponseWriter, request *http.Request) {
+	s.handleAdminImport(writer, request, false)
+}
+
+func (s *Server) handleAdminImport(writer http.ResponseWriter, request *http.Request, dryRun bool) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	var payload admin.ImportRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 32<<20)).Decode(&payload); err != nil {
+		writeOpenAIError(writer, http.StatusBadRequest, "Invalid import payload")
+		return
+	}
+	payload.DryRun = dryRun
+	result, err := s.admin.Import(request.Context(), payload)
+	if err != nil {
+		writeOpenAIError(writer, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -138,7 +239,11 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) authorized(request *http.Request) bool {
-	if s.apiKey == "" {
+	return authorizedWithKey(request, s.apiKey)
+}
+
+func authorizedWithKey(request *http.Request, key string) bool {
+	if key == "" {
 		return true
 	}
 	token := request.Header.Get("Authorization")
@@ -148,7 +253,7 @@ func (s *Server) authorized(request *http.Request) bool {
 	} else {
 		token = request.Header.Get("x-api-key")
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) == 1
+	return subtle.ConstantTimeCompare([]byte(token), []byte(key)) == 1
 }
 
 func writeOpenAIError(writer http.ResponseWriter, status int, message string) {

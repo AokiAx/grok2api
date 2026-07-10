@@ -132,6 +132,21 @@ func (s *Scheduler) PromoteDue(now time.Time) []account.Account {
 	return promoted
 }
 
+func (s *Scheduler) Upsert(item account.Account) {
+	if item.MaxActive <= 0 {
+		item.MaxActive = 1
+	}
+	s.mu.Lock()
+	s.removeReadyLocked(item.ID)
+	copy := item
+	s.accounts[item.ID] = &copy
+	if item.Pool == account.PoolReady {
+		s.ready = append(s.ready, item.ID)
+	}
+	s.mu.Unlock()
+	s.signal()
+}
+
 func (s *Scheduler) signal() {
 	select {
 	case s.notify <- struct{}{}:

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
+	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/api"
 	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/repository"
@@ -140,11 +141,17 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		service.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 	)
+	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
+	adminKey := settings.PanelPassword
+	if adminKey == "" {
+		adminKey = settings.APIKey
+	}
 	handler := api.NewServer(
 		gateway,
 		poolStatusProvider{scheduler: pool},
 		settings.APIKey,
 		api.WithDefaultModel(settings.DefaultModel),
+		api.WithAdmin(adminService, adminKey),
 	).Handler()
 	server := &http.Server{
 		Addr:              settings.Address(),

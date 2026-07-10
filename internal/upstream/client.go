@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -67,4 +68,40 @@ func (c *Client) Chat(
 		return nil, fmt.Errorf("send upstream chat request: %w", err)
 	}
 	return response, nil
+}
+
+func (c *Client) Validate(
+	ctx context.Context,
+	item account.Account,
+) (account.UnavailableReason, string, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/models",
+		nil,
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("create validation request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+item.AccessToken)
+	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	request.Header.Set("x-grok-client-version", c.clientVersion)
+	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return "", "", fmt.Errorf("validate account: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("read validation response: %w", err)
+	}
+	if response.StatusCode < 400 {
+		return "", "", nil
+	}
+	failure := ClassifyFailure(response.StatusCode, body)
+	if failure.Reason == "" {
+		return account.ReasonValidating, failure.Code, nil
+	}
+	return failure.Reason, failure.Code, nil
 }
