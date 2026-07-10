@@ -28,7 +28,7 @@ func NewStore(dataDir string, seed config.Config) (*Store, error) {
 		path: filepath.Join(dataDir, fileName),
 		cur:  seedRegister(seed),
 	}
-	if err := store.loadOrSeed(); err != nil {
+	if err := store.loadOrSeed(seed); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -62,7 +62,7 @@ func seedRegister(seed config.Config) config.Config {
 	return normalizeRegister(out)
 }
 
-func (s *Store) loadOrSeed() error {
+func (s *Store) loadOrSeed(seed config.Config) error {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -74,8 +74,100 @@ func (s *Store) loadOrSeed() error {
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		return fmt.Errorf("parse register settings: %w", err)
 	}
-	s.cur = seedRegister(loaded)
-	return nil
+	merged := mergeRegisterSettings(seed, loaded)
+	s.cur = normalizeRegister(merged)
+	// Rewrite so panel immediately reflects recovered operational defaults.
+	return s.persistLocked()
+}
+
+// mergeRegisterSettings prefers non-empty values from the on-disk file, but
+// falls back to process seed (config.json / env) when the file left proxy or
+// FlareSolverr empty. This avoids the common split-brain where compose side
+// cars are configured in config.json while the panel still shows blank fields.
+func mergeRegisterSettings(seed, loaded config.Config) config.Config {
+	merged := seedRegister(seed)
+	fileCfg := seedRegister(loaded)
+
+	// File wins for explicit non-empty operational fields.
+	if strings.TrimSpace(fileCfg.Proxy) != "" {
+		merged.Proxy = fileCfg.Proxy
+	}
+	if len(fileCfg.ProxyPool) > 0 {
+		merged.ProxyPool = append([]string(nil), fileCfg.ProxyPool...)
+	}
+	if strings.TrimSpace(fileCfg.ProxyRotate) != "" {
+		merged.ProxyRotate = fileCfg.ProxyRotate
+	}
+	if strings.TrimSpace(fileCfg.FlareSolverrURL) != "" {
+		merged.FlareSolverrURL = fileCfg.FlareSolverrURL
+		merged.FlareSolverrEnabled = fileCfg.FlareSolverrEnabled
+	} else if loaded.FlareSolverrEnabled {
+		// Explicit enable without URL: keep seed URL if present.
+		merged.FlareSolverrEnabled = true
+	}
+
+	if strings.TrimSpace(fileCfg.EmailProvider) != "" {
+		merged.EmailProvider = fileCfg.EmailProvider
+	}
+	if strings.TrimSpace(fileCfg.CfmailProfile) != "" {
+		merged.CfmailProfile = fileCfg.CfmailProfile
+	}
+	if len(fileCfg.CfmailAccounts) > 0 {
+		merged.CfmailAccounts = append([]config.CfmailAccount(nil), fileCfg.CfmailAccounts...)
+	}
+	if strings.TrimSpace(fileCfg.MailtmAPIBase) != "" {
+		merged.MailtmAPIBase = fileCfg.MailtmAPIBase
+	}
+	if strings.TrimSpace(fileCfg.MailtmDomain) != "" {
+		merged.MailtmDomain = fileCfg.MailtmDomain
+	}
+	if strings.TrimSpace(fileCfg.TurnstileSolver) != "" {
+		merged.TurnstileSolver = fileCfg.TurnstileSolver
+	}
+	if strings.TrimSpace(fileCfg.TurnstileSolverURL) != "" {
+		merged.TurnstileSolverURL = fileCfg.TurnstileSolverURL
+	}
+	if strings.TrimSpace(fileCfg.TurnstileSitekey) != "" {
+		merged.TurnstileSitekey = fileCfg.TurnstileSitekey
+	}
+	if strings.TrimSpace(fileCfg.CapMonsterAPIBase) != "" {
+		merged.CapMonsterAPIBase = fileCfg.CapMonsterAPIBase
+	}
+	if strings.TrimSpace(fileCfg.CapMonsterAPIKey) != "" {
+		merged.CapMonsterAPIKey = fileCfg.CapMonsterAPIKey
+	}
+	if fileCfg.TurnstileTimeoutSec > 0 {
+		merged.TurnstileTimeoutSec = fileCfg.TurnstileTimeoutSec
+	}
+	if fileCfg.EmailCodeTimeoutSec > 0 {
+		merged.EmailCodeTimeoutSec = fileCfg.EmailCodeTimeoutSec
+	}
+	if fileCfg.TotalAccounts > 0 {
+		merged.TotalAccounts = fileCfg.TotalAccounts
+	}
+	if fileCfg.MaxWorkers > 0 {
+		merged.MaxWorkers = fileCfg.MaxWorkers
+	}
+	if strings.TrimSpace(fileCfg.ImpersonateBrowser) != "" {
+		merged.ImpersonateBrowser = fileCfg.ImpersonateBrowser
+	}
+	if strings.TrimSpace(fileCfg.TokenJSONDir) != "" {
+		merged.TokenJSONDir = fileCfg.TokenJSONDir
+	}
+	if strings.TrimSpace(fileCfg.AccountsBase) != "" {
+		merged.AccountsBase = fileCfg.AccountsBase
+	}
+	merged.RegisterBackupTokens = loaded.RegisterBackupTokens
+
+	// Empty legacy shell: recover proxy/flare from seed.
+	if strings.TrimSpace(loaded.Proxy) == "" && strings.TrimSpace(seed.Proxy) != "" {
+		merged.Proxy = seed.Proxy
+	}
+	if strings.TrimSpace(loaded.FlareSolverrURL) == "" && strings.TrimSpace(seed.FlareSolverrURL) != "" {
+		merged.FlareSolverrURL = seed.FlareSolverrURL
+		merged.FlareSolverrEnabled = seed.FlareSolverrEnabled
+	}
+	return merged
 }
 
 func (s *Store) Get() config.Config {

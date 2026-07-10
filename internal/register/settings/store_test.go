@@ -1,6 +1,7 @@
 package settings_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,5 +74,89 @@ func TestEditorViewIncludesSensitivePlaceholders(t *testing.T) {
 	view := settings.EditorView(cfg)
 	if view == nil {
 		t.Fatal("nil view")
+	}
+}
+
+func TestStoreFillsEmptyProxyAndFlareFromSeed(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate a stale panel save that wiped proxy/flare while leaving other fields.
+	stale := map[string]any{
+		"email_provider":       "cfmail",
+		"proxy":                "",
+		"flaresolverr_url":     "",
+		"flaresolverr_enabled": false,
+		"total_accounts":       2,
+		"max_workers":          2,
+	}
+	raw, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "register_settings.json"), append(raw, '\n'), 0o600); err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+
+	seed := config.Defaults()
+	seed.Proxy = "http://privoxy:8118"
+	seed.FlareSolverrURL = "http://flaresolverr:8191"
+	seed.FlareSolverrEnabled = true
+	seed.EmailProvider = "mailtm" // should not override non-empty file email_provider
+
+	store, err := settings.NewStore(dir, seed)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	got := store.Get()
+	if got.Proxy != "http://privoxy:8118" {
+		t.Fatalf("proxy = %q; want seed proxy", got.Proxy)
+	}
+	if got.FlareSolverrURL != "http://flaresolverr:8191" || !got.FlareSolverrEnabled {
+		t.Fatalf("flare = %q enabled=%v", got.FlareSolverrURL, got.FlareSolverrEnabled)
+	}
+	if got.EmailProvider != "cfmail" {
+		t.Fatalf("email_provider = %q; file should win", got.EmailProvider)
+	}
+	if got.TotalAccounts != 2 || got.MaxWorkers != 2 {
+		t.Fatalf("counts = %d/%d", got.TotalAccounts, got.MaxWorkers)
+	}
+
+	// Persisted file should now reflect recovered defaults for the panel.
+	data, err := os.ReadFile(filepath.Join(dir, "register_settings.json"))
+	if err != nil {
+		t.Fatalf("read rewritten: %v", err)
+	}
+	var rewritten config.Config
+	if err := json.Unmarshal(data, &rewritten); err != nil {
+		t.Fatalf("parse rewritten: %v", err)
+	}
+	if rewritten.Proxy != "http://privoxy:8118" || rewritten.FlareSolverrURL != "http://flaresolverr:8191" {
+		t.Fatalf("rewritten file = proxy=%q flare=%q", rewritten.Proxy, rewritten.FlareSolverrURL)
+	}
+}
+
+func TestStoreKeepsExplicitFileProxyOverSeed(t *testing.T) {
+	dir := t.TempDir()
+	stale := map[string]any{
+		"proxy":                "http://custom:9999",
+		"flaresolverr_url":     "http://custom-flare:8191",
+		"flaresolverr_enabled": true,
+	}
+	raw, _ := json.Marshal(stale)
+	_ = os.WriteFile(filepath.Join(dir, "register_settings.json"), append(raw, '\n'), 0o600)
+
+	seed := config.Defaults()
+	seed.Proxy = "http://privoxy:8118"
+	seed.FlareSolverrURL = "http://flaresolverr:8191"
+
+	store, err := settings.NewStore(dir, seed)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	got := store.Get()
+	if got.Proxy != "http://custom:9999" {
+		t.Fatalf("proxy = %q; want file value", got.Proxy)
+	}
+	if got.FlareSolverrURL != "http://custom-flare:8191" {
+		t.Fatalf("flare = %q; want file value", got.FlareSolverrURL)
 	}
 }
