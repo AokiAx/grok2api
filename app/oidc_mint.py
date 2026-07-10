@@ -23,7 +23,8 @@ import logging
 import secrets
 import time
 import urllib.parse
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -215,7 +216,7 @@ def mint_cli_tokens_with_session(
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
     # fixed high port — public native clients allow any loopback port
-    redirect_uri = f"http://127.0.0.1:19787/callback"
+    redirect_uri = "http://127.0.0.1:19787/callback"
 
     params: dict[str, str] = {
         "response_type": "code",
@@ -262,7 +263,7 @@ def mint_cli_tokens_with_session(
                         if "127.0.0.1" in token or "localhost" in token:
                             c, err, st = _extract_oauth_code_from_location(token)
                             if err:
-                                raise RuntimeError(f"OIDC error: {err}")
+                                raise RuntimeError(f"OIDC error: {err}") from e
                             if c:
                                 code = c
                                 break
@@ -788,5 +789,4 @@ def mint_cli_after_register(
     except Exception as e:
         errors.append(f"pathB: {e}")
         raise RuntimeError("CLI mint failed: " + " | ".join(errors)) from e
-
 

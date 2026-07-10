@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -33,14 +33,14 @@ def parse_expires_at(value: Any) -> float | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed.timestamp()
 
 
 def iso_z(timestamp: float | None = None) -> str:
     value = time.time() if timestamp is None else timestamp
     return (
-        datetime.fromtimestamp(value, tz=timezone.utc)
+        datetime.fromtimestamp(value, tz=UTC)
         .isoformat()
         .replace("+00:00", "Z")
     )

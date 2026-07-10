@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,7 @@ def _parse_expires_at(value: str | None) -> float | None:
             raw = f"{head}.{frac}{tz}"
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt.timestamp()
     except ValueError:
         log.warning("unparseable expires_at: %s", value)
@@ -148,9 +148,9 @@ class AuthStore:
         if refresh_token:
             entry["refresh_token"] = refresh_token
         if expires_in is not None:
-            exp = datetime.now(timezone.utc).timestamp() + int(expires_in)
+            exp = datetime.now(UTC).timestamp() + int(expires_in)
             entry["expires_at"] = (
-                datetime.fromtimestamp(exp, tz=timezone.utc)
+                datetime.fromtimestamp(exp, tz=UTC)
                 .isoformat()
                 .replace("+00:00", "Z")
             )

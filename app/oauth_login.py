@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -52,11 +52,11 @@ def _pkce_pair() -> tuple[str, str]:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso_z(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _parse_expires_ts(value: Any) -> float | None:
@@ -80,7 +80,7 @@ def _parse_expires_ts(value: Any) -> float | None:
             raw = f"{head}.{frac_s}{tz}"
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt.timestamp()
     except ValueError:
         return None
@@ -192,7 +192,7 @@ def try_refresh(cfg: Settings | None = None) -> dict[str, Any] | None:
     new_refresh = tok.get("refresh_token") or refresh
     expires_in = int(tok.get("expires_in") or 21600)
     exp_at = _iso_z(
-        datetime.fromtimestamp(time.time() + expires_in, tz=timezone.utc)
+        datetime.fromtimestamp(time.time() + expires_in, tz=UTC)
     )
 
     _merge_entry(
@@ -253,7 +253,7 @@ def _save_token_response(
         "oidc_issuer": issuer.rstrip("/"),
         "oidc_client_id": client_id,
         "expires_at": _iso_z(
-            datetime.fromtimestamp(time.time() + expires_in, tz=timezone.utc)
+            datetime.fromtimestamp(time.time() + expires_in, tz=UTC)
         ),
         "create_time": _iso_z(now),
         "coding_data_retention_opt_out": False,
@@ -509,7 +509,7 @@ def device_login(
     interval = int(dev.get("interval") or 5)
     expires_in_dev = int(dev.get("expires_in") or 600)
 
-    print(f"[grok2api] Device login")
+    print("[grok2api] Device login")
     print(f"  Open: {verify_uri}")
     print(f"  Code: {user_code}")
     if open_url := dev.get("verification_uri_complete"):
@@ -559,7 +559,7 @@ def device_login(
         "oidc_issuer": issuer.rstrip("/"),
         "oidc_client_id": client_id,
         "expires_at": _iso_z(
-            datetime.fromtimestamp(time.time() + expires_in, tz=timezone.utc)
+            datetime.fromtimestamp(time.time() + expires_in, tz=UTC)
         ),
         "create_time": _iso_z(now),
     }

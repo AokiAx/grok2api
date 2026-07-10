@@ -101,8 +101,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "serve":
-        from .config import settings
         import uvicorn
+
+        from .config import settings
 
         host = args.host or settings.host
         port = args.port or settings.port
@@ -124,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-        print("[grok2api] register → CLI OIDC → data/cli_accounts.json")
+        print("[grok2api] register → CLI OIDC → SQLite account repository")
         run_batch(
             total_accounts=getattr(args, "count", None)
             or int(CFG.get("total_accounts") or 1),
@@ -137,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             from .cli_pool import cli_pool
+
+            cli_pool.reload()
 
             print(
                 json.dumps(

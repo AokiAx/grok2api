@@ -32,6 +32,8 @@ def _file_defaults() -> dict[str, Any]:
         "cli_pool_rotate": "cli_pool_rotate",
         "cli_pool_max_concurrent": "cli_pool_max_concurrent",
         "cli_pool_acquire_timeout": "cli_pool_acquire_timeout",
+        "cli_pool_flush_interval": "cli_pool_flush_interval",
+        "cli_pool_selection_strategy": "cli_pool_selection_strategy",
         "ensure_auth_on_start": "ensure_auth_on_start",
         "stream_fallback": "stream_fallback",
         "fold_reasoning": "fold_reasoning",

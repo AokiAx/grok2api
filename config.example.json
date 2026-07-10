@@ -32,5 +32,9 @@
   "cli_pool_max_concurrent": 1,
   "_help_cli_pool_max_concurrent": "每个 CLI 账号允许的最大在途请求数；满了会自动选其它号",
   "cli_pool_acquire_timeout": 60,
-  "_help_cli_pool_acquire_timeout": "所有号并发都满时最长等待秒数"
+  "_help_cli_pool_acquire_timeout": "所有号并发都满时最长等待秒数",
+  "cli_pool_selection_strategy": "balanced",
+  "_help_cli_pool_selection_strategy": "balanced / round_robin / least_used / priority",
+  "cli_pool_flush_interval": 30,
+  "_help_cli_pool_flush_interval": "运行时请求计数批量写入 SQLite 的最短间隔秒数"
 }

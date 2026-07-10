@@ -3,7 +3,7 @@
 把 **xAI Grok CLI 会话** 变成 **OpenAI / Anthropic 兼容 HTTP API** 的本地服务。
 
 - 上游：`cli-chat-proxy.grok.com`（**不是** grok.com 网页 SSO 聊天）
-- 凭证：OIDC `access_token` + `refresh_token`（`data/cli_accounts.json`）
+- 凭证：OIDC `access_token` + `refresh_token`（主存储 `data/grok2api.db`）
 - 面板：密码保护的 Web 管理台 `/panel`
 
 ## 快速开始
@@ -69,7 +69,7 @@ http://127.0.0.1:8787/panel
 | 功能 | 说明 |
 |------|------|
 | 服务状态 | health / 版本 / 默认模型 |
-| CLI 号池 | 列表、删除、手动导入 tokens、热重载 |
+| CLI 号池 | 状态、并发、冷却、删除、批量导入预览与应用 |
 | 额度 | 调用 `/v1/billing` |
 | 最近请求 | 本地 usage 摘要 |
 | 网页对话 | 直连本机 `/v1/chat/completions`（支持流式） |
@@ -92,6 +92,8 @@ http://127.0.0.1:8787/panel
 | `config.example.json` | 模板，含 `_help_*` 说明 |
 | `.env` | 可选，`GROK2API_*` 覆盖同名字段 |
 
+配置优先级：默认值 `< config.json < .env < 进程环境变量 < 显式启动参数`。
+
 ```powershell
 copy config.example.json config.json
 ```
@@ -100,10 +102,27 @@ copy config.example.json config.json
 
 | 方式 | 命令 / 操作 |
 |------|-------------|
-| 已有 access/refresh | 面板导入，或写入 `data/cli_accounts.json` |
-| 注册机 / mint | 写入 `data/cli_accounts.json` |
+| 已有 access/refresh | 面板批量导入，支持预览、合并、替换或跳过冲突 |
+| 旧账号池 JSON | 写入 `data/cli_accounts.json` 后在面板点击“重载号池” |
+| 注册机 / mint | 新代码直接写入 SQLite；旧模块输出可增量同步 |
 
-号池文件：`data/cli_accounts.json`（git 忽略）。与 `~/.grok` 无关。
+主号池：`data/grok2api.db`（git 忽略）。首次启动会备份并迁移旧
+`data/cli_accounts.json`；旧文件仍可作为外部进程的兼容交换格式。
+账号密码不会写入 SQLite。
+
+### 选号策略
+
+`cli_pool_selection_strategy` 支持：
+
+| 策略 | 说明 |
+|------|------|
+| `balanced` | 默认；综合并发占用、连续失败、优先级、最近使用时间与请求数 |
+| `round_robin` | 严格按账号顺序轮询 |
+| `least_used` | 优先累计请求数更少的账号 |
+| `priority` | 优先管理员设置的高优先级账号 |
+
+每个请求通过租约占用账号并发槽，异常、取消或流式断开时也会释放。
+`401/403/429` 会触发刷新、轮换或冷却；成功请求会恢复账号健康状态。
 
 ## 项目结构
 
@@ -112,7 +131,10 @@ app/                 # 2api 服务（CLI only）
   main.py            # 路由 / 面板
   admin.py           # 号池管理 API
   auth.py            # 单会话 auth.json
-  cli_pool.py        # 多账号轮询
+  cli_pool.py        # 新号池服务的兼容导出
+  domain/            # 账号领域模型和身份规则
+  services/          # 选号租约、批量导入等应用服务
+  infrastructure/    # SQLite Repository 与旧 JSON 迁移
   oauth_login.py     # login / refresh
   oidc_mint.py       # 可选：密码/session → CLI OIDC
   upstream.py        # cli-chat-proxy 客户端
@@ -146,6 +168,8 @@ python -m app mint-cli --email ... --password ... --turnstile ...
 | POST | `/v1/messages` | Anthropic 兼容 |
 | POST | `/v1/responses` | Responses 透传 |
 | GET/POST | `/admin/api/cli-accounts*` | 号池管理（需面板密码） |
+| POST | `/admin/api/accounts/import/preview` | 批量导入预览，不写入数据库 |
+| POST | `/admin/api/accounts/import` | 事务化批量导入账号 |
 
 ## Docker
 

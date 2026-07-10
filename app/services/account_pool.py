@@ -374,6 +374,9 @@ class CliAccountPool:
 
     def reload(self) -> int:
         with self._slot_cv:
+            sync_legacy = getattr(self.repository, "sync_legacy_json", None)
+            if callable(sync_legacy):
+                sync_legacy()
             self._accounts = {
                 account.id: account for account in self.repository.list_accounts()
             }

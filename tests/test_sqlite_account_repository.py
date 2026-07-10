@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from app.infrastructure.account_repository import SQLiteAccountRepository
@@ -42,7 +43,7 @@ def test_repository_migrates_legacy_json_once_without_password(tmp_path: Path):
     assert accounts[0].request_count == 7
     assert list(tmp_path.glob("cli_accounts.migration-backup-*.json"))
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(cli_accounts)").fetchall()
@@ -60,7 +61,7 @@ def test_repository_uses_wal_and_schema_version(tmp_path: Path):
     repo = SQLiteAccountRepository(database)
 
     assert repo.schema_version == 1
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal"
 

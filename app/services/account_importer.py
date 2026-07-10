@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 from app.domain.accounts import CliAccount, account_identity, iso_z, token_fingerprint
 from app.infrastructure.account_repository import AccountRepository

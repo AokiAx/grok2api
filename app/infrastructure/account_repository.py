@@ -6,8 +6,10 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Protocol
 
 from app.domain.accounts import CliAccount
 
@@ -55,10 +57,19 @@ class SQLiteAccountRepository:
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA synchronous=NORMAL")
                 connection.executescript(
@@ -107,7 +118,7 @@ class SQLiteAccountRepository:
 
     @property
     def schema_version(self) -> int:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT value FROM app_meta WHERE key='schema_version'"
             ).fetchone()
@@ -123,7 +134,7 @@ class SQLiteAccountRepository:
         legacy = self.legacy_json_path
         if legacy is None or not legacy.exists():
             return
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             if self._migration_done(connection):
                 return
             count = int(connection.execute("SELECT COUNT(*) FROM cli_accounts").fetchone()[0])
@@ -135,10 +146,7 @@ class SQLiteAccountRepository:
                 )
                 return
             try:
-                raw = json.loads(legacy.read_text(encoding="utf-8"))
-                items = raw.get("accounts") if isinstance(raw, dict) else raw
-                if not isinstance(items, list):
-                    raise ValueError("legacy account file must contain an accounts list")
+                items = self._read_legacy_items(legacy)
             except (OSError, ValueError, json.JSONDecodeError) as error:
                 log.warning("legacy CLI account migration skipped: %s", error)
                 return
@@ -151,40 +159,9 @@ class SQLiteAccountRepository:
 
             migrated = 0
             for item in items:
-                if not isinstance(item, dict) or not str(item.get("key") or "").strip():
+                account = self._legacy_account(item)
+                if account is None:
                     continue
-                token = str(item["key"]).strip()
-                email = str(item.get("email") or "").strip().lower()
-                account_id = str(
-                    item.get("id") or email or f"cli-{token[:12]}"
-                )
-                account = CliAccount(
-                    id=account_id,
-                    key=token,
-                    refresh_token=item.get("refresh_token"),
-                    expires_at=item.get("expires_at"),
-                    oidc_issuer=str(item.get("oidc_issuer") or "https://auth.x.ai"),
-                    oidc_client_id=str(
-                        item.get("oidc_client_id")
-                        or "b1a00492-073a-47ea-816f-4c329264a828"
-                    ),
-                    email=email,
-                    user_id=str(item.get("user_id") or ""),
-                    team_id=str(item.get("team_id") or ""),
-                    enabled=bool(item.get("enabled", True)),
-                    request_count=int(item.get("request_count") or 0),
-                    fail_count=int(item.get("fail_count") or 0),
-                    consecutive_failures=int(
-                        item.get("consecutive_failures") or item.get("fail_count") or 0
-                    ),
-                    last_used_at=item.get("last_used_at"),
-                    cooldown_until=item.get("cooldown_until"),
-                    created_at=float(item.get("created_at") or time.time()),
-                    updated_at=float(item.get("updated_at") or time.time()),
-                    note=str(item.get("note") or ""),
-                    priority=int(item.get("priority") or 0),
-                    disabled_reason=str(item.get("disabled_reason") or ""),
-                )
                 self._upsert_connection(connection, account)
                 migrated += 1
             connection.execute(
@@ -193,6 +170,67 @@ class SQLiteAccountRepository:
                 (str(migrated),),
             )
             log.info("migrated %d CLI accounts to %s; backup=%s", migrated, self.path, backup)
+
+    @staticmethod
+    def _read_legacy_items(path: Path) -> list[dict[str, object]]:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        items = raw.get("accounts") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            raise ValueError("legacy account file must contain an accounts list")
+        return [item for item in items if isinstance(item, dict)]
+
+    @staticmethod
+    def _legacy_account(item: dict[str, object]) -> CliAccount | None:
+        token = str(item.get("key") or item.get("access_token") or "").strip()
+        if not token:
+            return None
+        email = str(item.get("email") or "").strip().lower()
+        account_id = str(item.get("id") or email or f"cli-{token[:12]}")
+        return CliAccount(
+            id=account_id,
+            key=token,
+            refresh_token=item.get("refresh_token"),  # type: ignore[arg-type]
+            expires_at=item.get("expires_at"),  # type: ignore[arg-type]
+            oidc_issuer=str(item.get("oidc_issuer") or "https://auth.x.ai"),
+            oidc_client_id=str(
+                item.get("oidc_client_id")
+                or "b1a00492-073a-47ea-816f-4c329264a828"
+            ),
+            email=email,
+            user_id=str(item.get("user_id") or ""),
+            team_id=str(item.get("team_id") or ""),
+            enabled=bool(item.get("enabled", True)),
+            request_count=int(item.get("request_count") or 0),
+            fail_count=int(item.get("fail_count") or 0),
+            consecutive_failures=int(
+                item.get("consecutive_failures") or item.get("fail_count") or 0
+            ),
+            last_used_at=item.get("last_used_at"),  # type: ignore[arg-type]
+            cooldown_until=item.get("cooldown_until"),  # type: ignore[arg-type]
+            created_at=float(item.get("created_at") or time.time()),
+            updated_at=float(item.get("updated_at") or time.time()),
+            note=str(item.get("note") or ""),
+            priority=int(item.get("priority") or 0),
+            disabled_reason=str(item.get("disabled_reason") or ""),
+        )
+
+    def sync_legacy_json(self) -> int:
+        """Merge accounts produced by legacy/external writers into SQLite."""
+        legacy = self.legacy_json_path
+        if legacy is None or not legacy.exists():
+            return 0
+        try:
+            items = self._read_legacy_items(legacy)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            log.warning("legacy CLI account sync skipped: %s", error)
+            return 0
+        accounts = [
+            account
+            for item in items
+            if (account := self._legacy_account(item)) is not None
+        ]
+        self.upsert_many(accounts)
+        return len(accounts)
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> CliAccount:
@@ -221,21 +259,21 @@ class SQLiteAccountRepository:
         )
 
     def list_accounts(self) -> list[CliAccount]:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM cli_accounts ORDER BY created_at, id"
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
     def get(self, account_id: str) -> CliAccount | None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM cli_accounts WHERE id=?", (account_id,)
             ).fetchone()
         return self._from_row(row) if row else None
 
     def find_by_identity(self, identity_key: str) -> CliAccount | None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM cli_accounts WHERE identity_key=?", (identity_key,)
             ).fetchone()
@@ -313,16 +351,16 @@ class SQLiteAccountRepository:
         return account
 
     def upsert(self, account: CliAccount) -> CliAccount:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             return self._upsert_connection(connection, account)
 
     def upsert_many(self, accounts: Iterable[CliAccount]) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             for account in accounts:
                 self._upsert_connection(connection, account)
 
     def delete(self, account_id: str) -> bool:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             cursor = connection.execute(
                 "DELETE FROM cli_accounts WHERE id=?", (account_id,)
             )
@@ -330,4 +368,3 @@ class SQLiteAccountRepository:
 
     def close(self) -> None:
         """Kept for repository lifecycle symmetry; connections are short-lived."""
-
