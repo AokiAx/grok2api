@@ -397,6 +397,78 @@
     .empty { color: var(--dim); padding: 8px 0; }
     .meta { color: var(--dim); font-size: 12px; margin-top: 8px; }
 
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .settings-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+    .settings-card h3 {
+      margin: 0 0 12px;
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--text);
+    }
+    .field {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .field:last-child { margin-bottom: 0; }
+    .field-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .help {
+      color: var(--dim);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    details.advanced {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0f1218;
+      padding: 0 12px;
+    }
+    details.advanced > summary {
+      cursor: pointer;
+      list-style: none;
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 550;
+    }
+    details.advanced > summary::-webkit-details-marker { display: none; }
+    details.advanced[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+    details.advanced .body { padding: 0 0 12px; }
+    .cfmail-list { display: grid; gap: 10px; }
+    .cfmail-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0d1016;
+      padding: 12px;
+    }
+    .cfmail-item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .cfmail-item-head strong { font-size: 13px; }
+    @media (max-width: 900px) {
+      .settings-grid, .field-row { grid-template-columns: 1fr; }
+    }
+
     @media (max-width: 900px) {
       .grid-4, .grid-2, .form-grid { grid-template-columns: 1fr 1fr; }
       header { flex-direction: column; }
@@ -600,79 +672,142 @@
       </div>
     </section>
 
-    <section class="view" id="view-settings">
-      <div class="card">
-        <div class="toolbar">
-          <div>
-            <h2 style="margin:0;color:var(--text);font-size:14px">注册配置</h2>
-            <div class="meta">邮箱 / 过盾 / 代理 · 保存到 data/register_settings.json</div>
-          </div>
-          <div class="row">
-            <button type="button" class="btn" id="settingsReloadButton">重新加载</button>
-            <button type="button" class="btn primary" id="settingsSaveButton">保存</button>
-          </div>
+        <section class="view" id="view-settings">
+      <div class="toolbar" style="margin-bottom:12px">
+        <div>
+          <h2 style="margin:0;color:var(--text);font-size:14px">注册配置</h2>
+          <div class="meta">常用项默认展开 · 高级项折叠 · 保存到 data/register_settings.json</div>
         </div>
-        <div class="form-grid">
-          <div class="stack">
-            <label for="setEmailProvider">邮箱 Provider</label>
+        <div class="row">
+          <button type="button" class="btn" id="settingsReloadButton">重新加载</button>
+          <button type="button" class="btn primary" id="settingsSaveButton">保存</button>
+        </div>
+      </div>
+
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3>邮箱</h3>
+          <div class="field">
+            <label for="setEmailProvider">Provider</label>
             <select id="setEmailProvider">
               <option value="cfmail">cfmail</option>
               <option value="mailtm">mailtm</option>
             </select>
-            <label for="setCfmailProfile">cfmail profile</label>
-            <input id="setCfmailProfile" placeholder="auto">
-            <label for="setMailtmBase">mailtm API</label>
-            <input id="setMailtmBase" placeholder="https://api.mail.tm">
-            <label for="setMailtmDomain">mailtm domain</label>
-            <input id="setMailtmDomain" placeholder="可空">
-            <label for="setTotal">默认注册数量</label>
-            <input id="setTotal" type="number" min="1" value="1">
-            <label for="setWorkers">默认并发</label>
-            <input id="setWorkers" type="number" min="1" value="1">
           </div>
-          <div class="stack">
+          <div class="field-row" id="cfmailBasicFields">
+            <div class="field">
+              <label for="setCfmailProfile">cfmail profile</label>
+              <input id="setCfmailProfile" placeholder="auto">
+            </div>
+            <div class="field">
+              <label for="setMailTimeout">验证码超时（秒）</label>
+              <input id="setMailTimeout" type="number" min="30" value="120">
+            </div>
+          </div>
+          <div id="cfmailAccountsWrap">
+            <div class="toolbar" style="margin:4px 0 8px">
+              <div class="meta" style="margin:0">cfmail 账号</div>
+              <button type="button" class="btn sm" id="addCfmailButton">添加账号</button>
+            </div>
+            <div class="cfmail-list" id="cfmailList"></div>
+            <div class="help">至少保留一个启用中的账号。</div>
+          </div>
+          <div id="mailtmFields" class="hidden">
+            <div class="field">
+              <label for="setMailtmBase">mailtm API</label>
+              <input id="setMailtmBase" placeholder="https://api.mail.tm">
+            </div>
+            <div class="field">
+              <label for="setMailtmDomain">mailtm domain</label>
+              <input id="setMailtmDomain" placeholder="可空">
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3>过盾</h3>
+          <div class="field">
             <label for="setSolver">Turnstile solver</label>
             <select id="setSolver">
-              <option value="auto">auto</option>
+              <option value="auto">auto（本地优先）</option>
               <option value="local">local</option>
               <option value="capmonster">capmonster</option>
             </select>
+          </div>
+          <div class="field">
             <label for="setSolverURL">本地 solver URL</label>
             <input id="setSolverURL" placeholder="http://127.0.0.1:5072">
-            <label for="setSitekey">Turnstile sitekey</label>
-            <input id="setSitekey">
-            <label for="setCapBase">CapMonster API base</label>
-            <input id="setCapBase">
+          </div>
+          <div class="field">
             <label for="setCapKey">CapMonster API key</label>
             <input id="setCapKey" type="password" placeholder="留空=不修改；输入空格=清空">
-            <label for="setTsTimeout">Turnstile 超时(秒)</label>
-            <input id="setTsTimeout" type="number" min="30" value="120">
-            <label for="setMailTimeout">邮箱验证码超时(秒)</label>
-            <input id="setMailTimeout" type="number" min="30" value="120">
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="setTsTimeout">Turnstile 超时（秒）</label>
+              <input id="setTsTimeout" type="number" min="30" value="120">
+            </div>
+            <div class="field">
+              <label for="setSitekey">sitekey</label>
+              <input id="setSitekey" placeholder="通常不用改">
+            </div>
           </div>
         </div>
-        <div class="form-grid" style="margin-top:14px">
-          <div class="stack">
-            <label for="setProxy">代理</label>
+
+        <div class="settings-card">
+          <h3>代理</h3>
+          <div class="field">
+            <label for="setProxy">主代理</label>
             <input id="setProxy" placeholder="http://127.0.0.1:8118">
+          </div>
+          <div class="field">
             <label for="setProxyPool">代理池（每行一个）</label>
-            <textarea id="setProxyPool" style="min-height:100px"></textarea>
-            <label for="setProxyRotate">代理轮换</label>
+            <textarea id="setProxyPool" style="min-height:96px" placeholder="http://user:pass@host:port"></textarea>
+          </div>
+          <div class="field">
+            <label for="setProxyRotate">轮换策略</label>
             <input id="setProxyRotate" placeholder="per_account">
-            <label class="check"><input id="setFlareEnabled" type="checkbox"> 启用 FlareSolverr</label>
-            <label for="setFlareURL">FlareSolverr URL</label>
-            <input id="setFlareURL" placeholder="http://127.0.0.1:8191">
-          </div>
-          <div class="stack">
-            <label for="setCfmailJSON">cfmail_accounts JSON</label>
-            <textarea id="setCfmailJSON" style="min-height:220px"></textarea>
-            <div class="meta">保存后立即对后续注册任务生效，无需重启服务。</div>
           </div>
         </div>
-        <div class="stack" style="margin-top:12px">
-          <label>设置输出</label>
-          <pre id="settingsOutput">尚未加载</pre>
+
+        <div class="settings-card">
+          <h3>批跑默认值</h3>
+          <div class="field-row">
+            <div class="field">
+              <label for="setTotal">默认数量</label>
+              <input id="setTotal" type="number" min="1" value="1">
+            </div>
+            <div class="field">
+              <label for="setWorkers">默认并发</label>
+              <input id="setWorkers" type="number" min="1" value="1">
+            </div>
+          </div>
+          <div class="help">注册页可临时覆盖；这里只改默认值。</div>
+          <div style="margin-top:12px">
+            <details class="advanced">
+              <summary>高级选项</summary>
+              <div class="body">
+                <div class="field">
+                  <label for="setCapBase">CapMonster API base</label>
+                  <input id="setCapBase" placeholder="https://api.capmonster.cloud">
+                </div>
+                <div class="field">
+                  <label class="check"><input id="setFlareEnabled" type="checkbox"> 启用 FlareSolverr</label>
+                </div>
+                <div class="field">
+                  <label for="setFlareURL">FlareSolverr URL</label>
+                  <input id="setFlareURL" placeholder="http://127.0.0.1:8191">
+                </div>
+                <div class="help">FlareSolverr 可选，不能替代 Turnstile token。</div>
+              </div>
+            </details>
+          </div>
         </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="meta" style="margin-top:0">状态</div>
+        <pre id="settingsOutput" style="min-height:64px;margin-top:8px">尚未加载</pre>
       </div>
     </section>
 
@@ -1031,6 +1166,86 @@
     }
 
     
+    
+    let cfmailDraft = [];
+
+    function providerChanged(){
+      const provider = byId('setEmailProvider').value;
+      const isCf = provider === 'cfmail';
+      byId('cfmailAccountsWrap').classList.toggle('hidden', !isCf);
+      byId('cfmailBasicFields').classList.toggle('hidden', !isCf);
+      byId('mailtmFields').classList.toggle('hidden', isCf);
+    }
+
+    function escapeAttr(value){
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('"', '&quot;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+
+    function renderCfmailList(){
+      const root = byId('cfmailList');
+      root.replaceChildren();
+      if(!cfmailDraft.length){
+        const empty = document.createElement('div');
+        empty.className = 'help';
+        empty.textContent = '还没有 cfmail 账号，点“添加账号”。';
+        root.appendChild(empty);
+        return;
+      }
+      cfmailDraft.forEach((item, index) => {
+        const box = document.createElement('div');
+        box.className = 'cfmail-item';
+        box.innerHTML = `
+          <div class="cfmail-item-head">
+            <strong>账号 ${index + 1}</strong>
+            <button type="button" class="btn sm danger" data-remove="${index}">删除</button>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>名称</label>
+              <input data-k="name" data-i="${index}" value="${escapeAttr(item.name || '')}" placeholder="main">
+            </div>
+            <div class="field">
+              <label class="check" style="margin-top:22px"><input type="checkbox" data-k="enabled" data-i="${index}" ${item.enabled !== false ? 'checked' : ''}> 启用</label>
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>worker_domain</label>
+              <input data-k="worker_domain" data-i="${index}" value="${escapeAttr(item.worker_domain || '')}" placeholder="mail.example.com">
+            </div>
+            <div class="field">
+              <label>email_domain</label>
+              <input data-k="email_domain" data-i="${index}" value="${escapeAttr(item.email_domain || '')}" placeholder="example.com">
+            </div>
+          </div>
+          <div class="field">
+            <label>admin_password</label>
+            <input data-k="admin_password" data-i="${index}" type="password" value="${escapeAttr(item.admin_password || '')}" placeholder="管理密码">
+          </div>`;
+        root.appendChild(box);
+      });
+      root.querySelectorAll('[data-remove]').forEach(btn => {
+        btn.onclick = () => {
+          const i = Number(btn.getAttribute('data-remove'));
+          cfmailDraft.splice(i, 1);
+          renderCfmailList();
+        };
+      });
+      root.querySelectorAll('input[data-k]').forEach(input => {
+        input.oninput = () => {
+          const i = Number(input.getAttribute('data-i'));
+          const k = input.getAttribute('data-k');
+          if (!cfmailDraft[i]) return;
+          if (k === 'enabled') cfmailDraft[i].enabled = input.checked;
+          else cfmailDraft[i][k] = input.value;
+        };
+      });
+    }
+
     function fillSettings(s){
       byId('setEmailProvider').value = s.email_provider || 'cfmail';
       byId('setCfmailProfile').value = s.cfmail_profile || 'auto';
@@ -1050,8 +1265,19 @@
       byId('setProxyRotate').value = s.proxy_rotate || 'per_account';
       byId('setFlareEnabled').checked = Boolean(s.flaresolverr_enabled);
       byId('setFlareURL').value = s.flaresolverr_url || '';
-      byId('setCfmailJSON').value = JSON.stringify(s.cfmail_accounts || [], null, 2);
+      cfmailDraft = Array.isArray(s.cfmail_accounts)
+        ? s.cfmail_accounts.map(item => ({
+            name: item.name || '',
+            worker_domain: item.worker_domain || '',
+            email_domain: item.email_domain || '',
+            admin_password: item.admin_password || '',
+            enabled: item.enabled !== false
+          }))
+        : [];
+      renderCfmailList();
+      providerChanged();
     }
+
     async function loadSettings(){
       if(!state.authed) return;
       try{
@@ -1060,25 +1286,25 @@
         if(!resp.ok) throw new Error('settings '+resp.status);
         const data=await resp.json();
         fillSettings(data);
-        byId('settingsOutput').textContent='已加载';
+        byId('settingsOutput').textContent='已加载当前配置';
       }catch(error){
         byId('settingsOutput').textContent=String(error.message||error);
       }
     }
+
     async function saveSettings(){
       if(!state.authed) return;
-      let cfmail=[];
-      try{
-        const raw=byId('setCfmailJSON').value.trim();
-        cfmail = raw ? JSON.parse(raw) : [];
-        if(!Array.isArray(cfmail)) throw new Error('cfmail_accounts 必须是数组');
-      }catch(error){
-        byId('settingsOutput').textContent='cfmail JSON 无效: '+(error.message||error);
-        return;
+      const provider = byId('setEmailProvider').value;
+      if(provider === 'cfmail'){
+        const enabled = cfmailDraft.filter(item => item.enabled !== false && item.name && item.worker_domain && item.email_domain && item.admin_password);
+        if(!enabled.length){
+          byId('settingsOutput').textContent = '请至少配置一个完整且启用的 cfmail 账号';
+          return;
+        }
       }
       const proxyPool=byId('setProxyPool').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
       const payload={
-        email_provider: byId('setEmailProvider').value,
+        email_provider: provider,
         cfmail_profile: byId('setCfmailProfile').value,
         mailtm_api_base: byId('setMailtmBase').value,
         mailtm_domain: byId('setMailtmDomain').value,
@@ -1096,7 +1322,7 @@
         proxy_rotate: byId('setProxyRotate').value,
         flaresolverr_enabled: byId('setFlareEnabled').checked,
         flaresolverr_url: byId('setFlareURL').value,
-        cfmail_accounts: cfmail
+        cfmail_accounts: cfmailDraft
       };
       const btn=byId('settingsSaveButton');
       btn.disabled=true;
@@ -1110,7 +1336,7 @@
         const data=await resp.json();
         if(!resp.ok) throw new Error((data.error&&data.error.message)||('save '+resp.status));
         if(data.settings) fillSettings(data.settings);
-        byId('settingsOutput').textContent=JSON.stringify(data,null,2);
+        byId('settingsOutput').textContent='已保存';
         await refreshRegister();
       }catch(error){
         byId('settingsOutput').textContent=String(error.message||error);
@@ -1119,7 +1345,7 @@
       }
     }
 
-    async function stopRegister() {
+async function stopRegister() {
       const response = await fetch('/admin/api/register/stop', {
         method: 'POST',
         headers: auth()
@@ -1177,6 +1403,8 @@
     byId('registerRefreshButton').onclick = refreshRegister;
     byId('settingsReloadButton').onclick = () => loadSettings();
     byId('settingsSaveButton').onclick = saveSettings;
+    byId('setEmailProvider').onchange = providerChanged;
+    byId('addCfmailButton').onclick = () => { cfmailDraft.push({name:'',worker_domain:'',email_domain:'',admin_password:'',enabled:true}); renderCfmailList(); };
 
     bootstrap();
     setInterval(refresh,15000);
