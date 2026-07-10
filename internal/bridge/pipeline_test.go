@@ -218,3 +218,78 @@ func TestPipelineInvalidJSON(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestPipelineMessagesNativeFallback(t *testing.T) {
+	gateway := &fakeGateway{chat: service.ChatResult{
+		Status: http.StatusOK,
+		Body:   []byte(`{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`),
+	}}
+	pipeline := &bridge.Pipeline{
+		Gateway:         gateway,
+		Catalog:         upstream.NewDefaultCatalog(),
+		PreferResponses: false,
+	}
+	result, err := pipeline.Messages(context.Background(), []byte(`{"model":"grok-4.5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if gateway.path != "/chat/completions" {
+		t.Fatalf("path=%s", gateway.path)
+	}
+	if !strings.Contains(string(result.Body), `"type":"message"`) {
+		t.Fatalf("body=%s", result.Body)
+	}
+}
+
+func TestPipelineResponsesStreamPassthrough(t *testing.T) {
+	sse := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n"
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Stream: io.NopCloser(strings.NewReader(sse)),
+	}}
+	pipeline := &bridge.Pipeline{
+		Gateway:         gateway,
+		Catalog:         upstream.NewDefaultCatalog(),
+		PreferResponses: true,
+	}
+	result, err := pipeline.Responses(context.Background(), []byte(`{"model":"grok-4.5","input":"hi","stream":true}`))
+	if err != nil {
+		t.Fatalf("responses: %v", err)
+	}
+	if result.Stream == nil {
+		t.Fatal("expected stream")
+	}
+	data, _ := io.ReadAll(result.Stream)
+	_ = result.Stream.Close()
+	if !strings.Contains(string(data), "response.output_text.delta") {
+		t.Fatalf("body=%s", data)
+	}
+	if result.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("ct=%q", result.Header.Get("Content-Type"))
+	}
+}
+
+func TestPipelineUpstreamErrorMaterializesBody(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusUnprocessableEntity,
+		Stream: io.NopCloser(strings.NewReader(`{"error":"bad tools"}`)),
+	}}
+	pipeline := &bridge.Pipeline{
+		Gateway:         gateway,
+		Catalog:         upstream.NewDefaultCatalog(),
+		PreferResponses: true,
+	}
+	result, err := pipeline.Chat(context.Background(), []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if result.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d", result.Status)
+	}
+	if !strings.Contains(string(result.Body), "bad tools") {
+		t.Fatalf("body=%s", result.Body)
+	}
+	if result.Stream != nil {
+		t.Fatal("stream should be materialized")
+	}
+}

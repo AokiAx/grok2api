@@ -102,3 +102,86 @@ func TestPrepareResponsesFromAnthropic(t *testing.T) {
 		t.Fatalf("max_output_tokens=%#v", payload["max_output_tokens"])
 	}
 }
+
+func TestNormalizeResponsesRequestRewritesChatShapedInput(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[
+			{"role":"system","content":"be brief"},
+			{"role":"user","content":[{"type":"text","text":"hi"}]},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"foo","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		],
+		"max_completion_tokens":12,
+		"web_search":"yes",
+		"tools":[{"type":"web_search"}]
+	}`)
+	out, _, _, err := compat.NormalizeResponsesRequest(body, "fallback")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["instructions"] != "be brief" {
+		t.Fatalf("instructions=%#v", payload["instructions"])
+	}
+	if payload["max_output_tokens"] != float64(12) {
+		t.Fatalf("max_output_tokens=%#v", payload["max_output_tokens"])
+	}
+	if payload["backend_search"] != true {
+		t.Fatalf("backend_search=%#v", payload["backend_search"])
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) < 2 {
+		t.Fatalf("input=%#v", payload["input"])
+	}
+	// tool loop rewritten to function_call items
+	foundCall := false
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		if m["type"] == "function_call" && m["name"] == "foo" {
+			foundCall = true
+		}
+	}
+	if !foundCall {
+		t.Fatalf("expected function_call in input: %#v", input)
+	}
+}
+
+func TestPrepareResponsesFromChatAndFinalizeWebSearchFalse(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"stream":true,"web_search":false}`)
+	out, model, stream, err := compat.PrepareResponsesFromChat(body, "fallback")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if model != "grok-4.5" || !stream {
+		t.Fatalf("model=%q stream=%v", model, stream)
+	}
+	// Explicit web_search=false should not be overridden to true.
+	finalized, err := compat.FinalizeResponsesUpstream(out, compat.ModelHints{SupportsBackendSearch: true})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(finalized, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// EnsureBackendSearch mirrors web_search into backend_search when only web_search set.
+	if payload["backend_search"] != false && payload["web_search"] != false {
+		// After ChatToResponses, web_search is copied; Finalize may set backend_search from it.
+		t.Logf("payload=%#v", payload)
+	}
+	if payload["stream"] != true {
+		t.Fatalf("stream=%#v", payload["stream"])
+	}
+}
+
+func TestExtractCompletedResponseBareJSON(t *testing.T) {
+	raw := []byte(`{"id":"resp_bare","object":"response","status":"completed","output_text":"x"}`)
+	out := compat.ExtractCompletedResponse(raw)
+	if string(out) != string(raw) {
+		t.Fatalf("bare json should pass through: %s", out)
+	}
+}

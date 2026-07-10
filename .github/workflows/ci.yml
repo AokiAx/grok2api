@@ -37,7 +37,21 @@ jobs:
         # Register protocol clients (mail/mint/turnstile/registrar) are integration-heavy.
         # Keep unit coverage gate on the runtime core packages.
         run: |
-          go test -coverprofile=coverage.out             ./internal/account             ./internal/admin             ./internal/api             ./internal/compat             ./internal/config             ./internal/repository             ./internal/runtime             ./internal/scheduler             ./internal/service             ./internal/upstream             ./internal/register/settings             ./internal/register/codec             ./internal/register/proxy
+          go test -coverprofile=coverage.out \
+            ./internal/account \
+            ./internal/admin \
+            ./internal/api \
+            ./internal/bridge \
+            ./internal/compat \
+            ./internal/config \
+            ./internal/repository \
+            ./internal/runtime \
+            ./internal/scheduler \
+            ./internal/service \
+            ./internal/upstream \
+            ./internal/register/settings \
+            ./internal/register/codec \
+            ./internal/register/proxy
 
       - name: Enforce 80 percent coverage
         run: |
