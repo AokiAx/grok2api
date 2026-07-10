@@ -353,3 +353,75 @@ func TestAnthropicMessagesConvertsStreamingSSE(t *testing.T) {
 		}
 	}
 }
+
+func TestCompatibilityRoutesRequireAPIKey(t *testing.T) {
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "secret")
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/v1/models", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/billing", nil),
+		httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`)),
+		httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`)),
+	} {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d", request.URL.Path, recorder.Code)
+		}
+	}
+}
+
+func TestCompatibilityRouteErrorBranches(t *testing.T) {
+	t.Run("billing gateway error", func(t *testing.T) {
+		server := api.NewServer(&fakeGateway{requestErr: context.DeadlineExceeded}, fakeStatus{}, "")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/billing", nil))
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	})
+
+	t.Run("responses invalid json", func(t *testing.T) {
+		server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{invalid}`)))
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	})
+
+	t.Run("responses pool unavailable", func(t *testing.T) {
+		server := api.NewServer(&fakeGateway{requestErr: &service.PoolUnavailableError{Status: 429, RetryAfter: time.Minute}}, fakeStatus{}, "")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`)))
+		if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") == "" {
+			t.Fatalf("status=%d retry=%q", recorder.Code, recorder.Header().Get("Retry-After"))
+		}
+	})
+
+	t.Run("messages invalid request", func(t *testing.T) {
+		server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{invalid}`)))
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	})
+
+	t.Run("messages invalid upstream response", func(t *testing.T) {
+		server := api.NewServer(&fakeGateway{result: service.ChatResult{Status: 200, Header: make(http.Header), Body: []byte(`not-json`)}}, fakeStatus{}, "")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"messages":[]}`)))
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	})
+
+	t.Run("messages missing stream", func(t *testing.T) {
+		server := api.NewServer(&fakeGateway{result: service.ChatResult{Status: 200, Header: make(http.Header)}}, fakeStatus{}, "")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"stream":true,"messages":[]}`)))
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	})
+}

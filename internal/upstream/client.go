@@ -35,28 +35,46 @@ func (c *Client) Chat(
 	payload []byte,
 	stream bool,
 ) (*http.Response, error) {
+	return c.Request(ctx, item, http.MethodPost, "/chat/completions", payload, stream)
+}
+
+func (c *Client) Request(
+	ctx context.Context,
+	item account.Account,
+	method string,
+	path string,
+	payload []byte,
+	stream bool,
+) (*http.Response, error) {
 	model := ""
 	var requestBody struct {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(payload, &requestBody)
 	model = requestBody.Model
+	path = "/" + strings.TrimLeft(path, "/")
+	var body io.Reader
+	if len(payload) > 0 {
+		body = bytes.NewReader(payload)
+	}
 
 	request, err := http.NewRequestWithContext(
 		ctx,
-		http.MethodPost,
-		c.baseURL+"/chat/completions",
-		bytes.NewReader(payload),
+		method,
+		c.baseURL+path,
+		body,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create upstream chat request: %w", err)
+		return nil, fmt.Errorf("create upstream %s request: %w", path, err)
 	}
 	request.Header.Set("Authorization", "Bearer "+item.AccessToken)
 	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
 	request.Header.Set("x-grok-client-version", c.clientVersion)
 	request.Header.Set("x-grok-model-override", model)
 	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
-	request.Header.Set("Content-Type", "application/json")
+	if len(payload) > 0 {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if stream {
 		request.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -65,7 +83,7 @@ func (c *Client) Chat(
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("send upstream chat request: %w", err)
+		return nil, fmt.Errorf("send upstream %s request: %w", path, err)
 	}
 	return response, nil
 }

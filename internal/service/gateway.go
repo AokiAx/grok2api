@@ -18,8 +18,8 @@ type AccountStore interface {
 	SaveAccount(context.Context, account.Account) error
 }
 
-type ChatUpstream interface {
-	Chat(context.Context, account.Account, []byte, bool) (*http.Response, error)
+type Upstream interface {
+	Request(context.Context, account.Account, string, string, []byte, bool) (*http.Response, error)
 }
 
 type ChatResult struct {
@@ -32,7 +32,7 @@ type ChatResult struct {
 type Gateway struct {
 	scheduler  *scheduler.Scheduler
 	store      AccountStore
-	upstream   ChatUpstream
+	upstream   Upstream
 	quotaRetry time.Duration
 	rateRetry  time.Duration
 	now        func() time.Time
@@ -55,7 +55,7 @@ func WithRateRetry(duration time.Duration) Option {
 func NewGateway(
 	scheduler *scheduler.Scheduler,
 	store AccountStore,
-	upstream ChatUpstream,
+	upstream Upstream,
 	options ...Option,
 ) *Gateway {
 	gateway := &Gateway{
@@ -73,6 +73,16 @@ func NewGateway(
 }
 
 func (g *Gateway) Chat(ctx context.Context, payload []byte, stream bool) (ChatResult, error) {
+	return g.Request(ctx, http.MethodPost, "/chat/completions", payload, stream)
+}
+
+func (g *Gateway) Request(
+	ctx context.Context,
+	method string,
+	path string,
+	payload []byte,
+	stream bool,
+) (ChatResult, error) {
 	attempts := g.scheduler.ReadyCount()
 	if attempts == 0 {
 		return ChatResult{}, g.poolUnavailable()
@@ -86,7 +96,14 @@ func (g *Gateway) Chat(ctx context.Context, payload []byte, stream bool) (ChatRe
 			}
 			return ChatResult{}, fmt.Errorf("acquire account: %w", err)
 		}
-		response, err := g.upstream.Chat(ctx, lease.Account(), payload, stream)
+		response, err := g.upstream.Request(
+			ctx,
+			lease.Account(),
+			method,
+			path,
+			payload,
+			stream,
+		)
 		if err != nil {
 			lease.Release()
 			return ChatResult{}, err
