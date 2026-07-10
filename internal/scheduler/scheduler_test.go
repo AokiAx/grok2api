@@ -100,3 +100,37 @@ func TestAcquireHonorsContextWhenReadyPoolIsBusy(t *testing.T) {
 		t.Fatal("expected canceled acquire to fail")
 	}
 }
+
+func TestPromoteDueMovesRecoverableAccountsBackToReady(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	s := scheduler.New([]account.Account{
+		{
+			ID:                "quota-due",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonQuota,
+			RetryAt:           now.Add(-time.Minute),
+			MaxActive:         1,
+		},
+		{
+			ID:                "auth",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonAuth,
+			RetryAt:           now.Add(-time.Minute),
+			MaxActive:         1,
+		},
+	})
+
+	promoted := s.PromoteDue(now)
+
+	if len(promoted) != 1 || promoted[0].ID != "quota-due" {
+		t.Fatalf("promoted = %#v; want quota-due", promoted)
+	}
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire promoted: %v", err)
+	}
+	defer lease.Release()
+	if lease.Account().ID != "quota-due" {
+		t.Fatalf("selected %q", lease.Account().ID)
+	}
+}

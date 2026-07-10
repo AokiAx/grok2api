@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,5 +76,32 @@ func TestChatReturns429WithRetryAfterWhenReadyPoolEmpty(t *testing.T) {
 	}
 	if recorder.Header().Get("Retry-After") == "" {
 		t.Fatal("Retry-After header missing")
+	}
+}
+
+func TestChatStreamsSSEAndFlushesContent(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Stream: io.NopCloser(strings.NewReader("data: hello\n\ndata: [DONE]\n\n")),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if recorder.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("content type = %q", recorder.Header().Get("Content-Type"))
+	}
+	if recorder.Body.String() != "data: hello\n\ndata: [DONE]\n\n" {
+		t.Fatalf("body = %q", recorder.Body.String())
 	}
 }

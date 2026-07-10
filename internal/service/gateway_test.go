@@ -107,3 +107,40 @@ func TestAllQuotaReturnsStructuredPoolUnavailableError(t *testing.T) {
 		t.Fatalf("retry after = %s", poolErr.RetryAfter)
 	}
 }
+
+func TestStreamingResponseKeepsLeaseUntilStreamCloses(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(200, "data: hello\n\ndata: [DONE]\n\n")},
+	}}
+	s := scheduler.New([]account.Account{ready("a")})
+	gateway := service.NewGateway(s, store, upstream)
+
+	got, err := gateway.Chat(context.Background(), []byte(`{"stream":true}`), true)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if got.Stream == nil {
+		t.Fatal("stream response missing")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Acquire(canceled); err == nil {
+		t.Fatal("lease was released before stream close")
+	}
+	data, err := io.ReadAll(got.Stream)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if err := got.Stream.Close(); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+	if string(data) != "data: hello\n\ndata: [DONE]\n\n" {
+		t.Fatalf("stream = %q", data)
+	}
+	next, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire after close: %v", err)
+	}
+	next.Release()
+}
