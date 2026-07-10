@@ -336,3 +336,35 @@ func TestOpenSQLiteMigratesPythonV1AccountTable(t *testing.T) {
 		t.Fatalf("schema version = %d", repo.SchemaVersion(ctx))
 	}
 }
+
+func TestLegacyEnabledExpiredCredentialMigratesToAuth(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "cli_accounts.json")
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	data, err := json.Marshal(map[string]any{"accounts": []map[string]any{{
+		"id": "expired", "key": "token", "refresh_token": "refresh",
+		"enabled": true, "expires_at": past,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(legacy, data, 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	repo, err := repository.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	if _, err := repo.ImportLegacyJSON(ctx, legacy); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].UnavailableReason != account.ReasonAuth {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+}
