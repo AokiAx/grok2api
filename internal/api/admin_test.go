@@ -112,6 +112,9 @@ func TestPanelRouteIsEmbedded(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "Ready Pool") {
 		t.Fatal("Go panel content missing")
 	}
+	if !strings.Contains(recorder.Body.String(), "恢复验证") || strings.Contains(recorder.Body.String(), "accounts.innerHTML") {
+		t.Fatal("account actions or safe table rendering missing")
+	}
 }
 
 func TestAdminDeleteAndRecoverRoutes(t *testing.T) {

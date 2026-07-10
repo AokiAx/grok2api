@@ -273,6 +273,41 @@ func (r *SQLite) SaveAccount(ctx context.Context, item account.Account) error {
 	return nil
 }
 
+func (r *SQLite) DeleteAccount(ctx context.Context, id string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete account: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var fromPool string
+	err = tx.QueryRowContext(ctx, `SELECT pool FROM accounts WHERE id=?`, id).Scan(&fromPool)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load account before delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, id); err != nil {
+		return fmt.Errorf("delete account %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO account_state_events (
+			account_id, from_pool, to_pool, reason, error_code, created_at
+		) VALUES (?, ?, 'deleted', 'disabled', 'admin-delete', ?)`,
+		id,
+		fromPool,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return fmt.Errorf("record account deletion: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit account delete: %w", err)
+	}
+	return nil
+}
+
 func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error {
 	_, err := tx.ExecContext(
 		ctx,

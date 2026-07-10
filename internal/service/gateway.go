@@ -36,6 +36,14 @@ type Gateway struct {
 	quotaRetry time.Duration
 	rateRetry  time.Duration
 	now        func() time.Time
+	circuitMu  sync.Mutex
+	circuit    CircuitStatus
+}
+
+type CircuitStatus struct {
+	Open     bool      `json:"open"`
+	RetryAt  time.Time `json:"retry_at,omitempty"`
+	Revision uint64    `json:"revision,omitempty"`
 }
 
 type Option func(*Gateway)
@@ -83,11 +91,16 @@ func (g *Gateway) Request(
 	payload []byte,
 	stream bool,
 ) (ChatResult, error) {
+	if circuitError := g.quotaCircuitError(); circuitError != nil {
+		return ChatResult{}, circuitError
+	}
 	attempts := g.scheduler.ReadyCount()
 	if attempts == 0 {
 		return ChatResult{}, g.poolUnavailable()
 	}
 
+	attempted := 0
+	quotaFailures := 0
 	for range attempts {
 		lease, err := g.scheduler.Acquire(ctx)
 		if err != nil {
@@ -96,6 +109,7 @@ func (g *Gateway) Request(
 			}
 			return ChatResult{}, fmt.Errorf("acquire account: %w", err)
 		}
+		attempted++
 		response, err := g.upstream.Request(
 			ctx,
 			lease.Account(),
@@ -106,9 +120,11 @@ func (g *Gateway) Request(
 		)
 		if err != nil {
 			lease.Release()
+			g.resetCircuit()
 			return ChatResult{}, err
 		}
 		if stream && response.StatusCode < 400 {
+			g.resetCircuit()
 			return ChatResult{
 				Status: response.StatusCode,
 				Header: response.Header.Clone(),
@@ -130,6 +146,7 @@ func (g *Gateway) Request(
 		}
 		if response.StatusCode < 400 {
 			lease.Release()
+			g.resetCircuit()
 			return ChatResult{
 				Status: response.StatusCode,
 				Header: response.Header.Clone(),
@@ -140,6 +157,9 @@ func (g *Gateway) Request(
 		failure := upstream.ClassifyFailure(response.StatusCode, body)
 		switch failure.Kind {
 		case upstream.FailureQuota, upstream.FailureAuth, upstream.FailureRateLimit:
+			if failure.Kind == upstream.FailureQuota {
+				quotaFailures++
+			}
 			retryAt := g.now().Add(g.rateRetry)
 			if failure.Kind == upstream.FailureQuota {
 				retryAt = g.now().Add(g.quotaRetry)
@@ -156,6 +176,7 @@ func (g *Gateway) Request(
 			continue
 		default:
 			lease.Release()
+			g.resetCircuit()
 			return ChatResult{
 				Status: response.StatusCode,
 				Header: response.Header.Clone(),
@@ -163,8 +184,60 @@ func (g *Gateway) Request(
 			}, nil
 		}
 	}
+	if attempted > 0 && quotaFailures == attempted {
+		g.openQuotaCircuit()
+	}
 
 	return ChatResult{}, g.poolUnavailable()
+}
+
+func (g *Gateway) CircuitStatus() CircuitStatus {
+	g.circuitMu.Lock()
+	defer g.circuitMu.Unlock()
+	g.refreshCircuitLocked()
+	return g.circuit
+}
+
+func (g *Gateway) quotaCircuitError() *PoolUnavailableError {
+	status := g.CircuitStatus()
+	if !status.Open {
+		return nil
+	}
+	retryAfter := status.RetryAt.Sub(g.now())
+	if retryAfter < time.Second {
+		retryAfter = time.Second
+	}
+	return &PoolUnavailableError{Status: http.StatusTooManyRequests, RetryAfter: retryAfter}
+}
+
+func (g *Gateway) openQuotaCircuit() {
+	now := g.now()
+	retryAt := now.Add(g.quotaRetry)
+	if earliest := g.scheduler.EarliestRetry(); !earliest.IsZero() && earliest.After(now) {
+		retryAt = earliest
+	}
+	g.circuitMu.Lock()
+	g.circuit = CircuitStatus{
+		Open:     true,
+		RetryAt:  retryAt,
+		Revision: g.scheduler.Revision(),
+	}
+	g.circuitMu.Unlock()
+}
+
+func (g *Gateway) resetCircuit() {
+	g.circuitMu.Lock()
+	g.circuit = CircuitStatus{}
+	g.circuitMu.Unlock()
+}
+
+func (g *Gateway) refreshCircuitLocked() {
+	if !g.circuit.Open {
+		return
+	}
+	if g.circuit.Revision != g.scheduler.Revision() || !g.circuit.RetryAt.After(g.now()) {
+		g.circuit = CircuitStatus{}
+	}
 }
 
 type leaseReadCloser struct {
@@ -208,7 +281,7 @@ func AsPoolUnavailable(err error) (*PoolUnavailableError, bool) {
 func (g *Gateway) poolUnavailable() *PoolUnavailableError {
 	retryAfter := g.quotaRetry
 	if earliest := g.scheduler.EarliestRetry(); !earliest.IsZero() {
-		retryAfter = time.Until(earliest)
+		retryAfter = earliest.Sub(g.now())
 		if retryAfter < time.Second {
 			retryAfter = time.Second
 		}

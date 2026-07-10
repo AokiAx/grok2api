@@ -25,8 +25,9 @@ func (s *memorySink) Upsert(item account.Account) {
 	s.items = append(s.items, item)
 }
 
-func (s *memorySink) Delete(id string) {
+func (s *memorySink) Delete(id string) bool {
 	s.deleted = append(s.deleted, id)
+	return true
 }
 
 func (r *memoryRepository) ListAccounts(context.Context) ([]account.Account, error) {
@@ -199,6 +200,13 @@ func TestDeleteRemovesAccountFromRepositoryAndScheduler(t *testing.T) {
 	}
 	if len(sink.deleted) != 1 || sink.deleted[0] != "account-1" {
 		t.Fatalf("sink deleted = %#v", sink.deleted)
+	}
+}
+
+func TestDeleteMissingAccountReturnsError(t *testing.T) {
+	service := admin.NewService(&memoryRepository{}, validator{})
+	if err := service.Delete(context.Background(), "missing"); !errors.Is(err, admin.ErrAccountNotFound) {
+		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 type Repository interface {
 	ListAccounts(context.Context) ([]account.Account, error)
 	SaveAccount(context.Context, account.Account) error
+	DeleteAccount(context.Context, string) error
 }
 
 type Validator interface {
@@ -21,6 +23,7 @@ type Validator interface {
 
 type AccountSink interface {
 	Upsert(account.Account)
+	Delete(string) bool
 }
 
 type Service struct {
@@ -28,6 +31,8 @@ type Service struct {
 	validator  Validator
 	sink       AccountSink
 	now        func() time.Time
+	quotaRetry time.Duration
+	rateRetry  time.Duration
 }
 
 type Option func(*Service)
@@ -43,12 +48,16 @@ func NewService(repository Repository, validator Validator, options ...Option) *
 		repository: repository,
 		validator:  validator,
 		now:        time.Now,
+		quotaRetry: 30 * time.Minute,
+		rateRetry:  45 * time.Second,
 	}
 	for _, option := range options {
 		option(service)
 	}
 	return service
 }
+
+var ErrAccountNotFound = errors.New("account not found")
 
 type ImportAccount struct {
 	ID           string `json:"id"`
@@ -164,10 +173,12 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 			item.Pool = account.PoolReady
 			item.UnavailableReason = ""
 			item.LastErrorCode = ""
+			item.RetryAt = time.Time{}
 		} else {
 			item.Pool = account.PoolUnavailable
 			item.UnavailableReason = reason
 			item.LastErrorCode = errorCode
+			item.RetryAt = s.retryAt(reason, item.RetryAt, now)
 		}
 		if err := s.repository.SaveAccount(ctx, item); err != nil {
 			return ImportResult{}, fmt.Errorf("save imported account %s: %w", id, err)
@@ -178,6 +189,97 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 		byIdentity[key] = item
 	}
 	return result, nil
+}
+
+func (s *Service) Delete(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("delete account: %w", ErrAccountNotFound)
+	}
+	accounts, err := s.repository.ListAccounts(ctx)
+	if err != nil {
+		return fmt.Errorf("list accounts before delete: %w", err)
+	}
+	found := false
+	for _, item := range accounts {
+		if item.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("delete account %s: %w", id, ErrAccountNotFound)
+	}
+	if err := s.repository.DeleteAccount(ctx, id); err != nil {
+		return fmt.Errorf("delete account %s: %w", id, err)
+	}
+	if s.sink != nil {
+		s.sink.Delete(id)
+	}
+	return nil
+}
+
+func (s *Service) Recover(ctx context.Context, id string) (account.Account, error) {
+	id = strings.TrimSpace(id)
+	accounts, err := s.repository.ListAccounts(ctx)
+	if err != nil {
+		return account.Account{}, fmt.Errorf("list accounts before recovery: %w", err)
+	}
+	var item account.Account
+	found := false
+	for _, candidate := range accounts {
+		if candidate.ID == id {
+			item = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return account.Account{}, fmt.Errorf("recover account %s: %w", id, ErrAccountNotFound)
+	}
+
+	reason, errorCode, err := s.validator.Validate(ctx, item)
+	if err != nil {
+		return account.Account{}, fmt.Errorf("validate account %s: %w", id, err)
+	}
+	now := s.now().UTC()
+	item.UpdatedAt = now
+	item.LastErrorCode = errorCode
+	if reason == "" {
+		item.Pool = account.PoolReady
+		item.UnavailableReason = ""
+		item.RetryAt = time.Time{}
+		item.LastErrorCode = ""
+	} else {
+		item.Pool = account.PoolUnavailable
+		item.UnavailableReason = reason
+		item.RetryAt = s.retryAt(reason, item.RetryAt, now)
+	}
+	if err := s.repository.SaveAccount(ctx, item); err != nil {
+		return account.Account{}, fmt.Errorf("save recovered account %s: %w", id, err)
+	}
+	if s.sink != nil {
+		s.sink.Upsert(item)
+	}
+	return item, nil
+}
+
+func (s *Service) retryAt(
+	reason account.UnavailableReason,
+	previous time.Time,
+	now time.Time,
+) time.Time {
+	if !previous.IsZero() && previous.After(now) {
+		return previous
+	}
+	switch reason {
+	case account.ReasonQuota:
+		return now.Add(s.quotaRetry)
+	case account.ReasonCooldown:
+		return now.Add(s.rateRetry)
+	default:
+		return time.Time{}
+	}
 }
 
 func identity(email, userID, token string) string {

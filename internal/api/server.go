@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -56,6 +57,8 @@ func WithDefaultModel(model string) Option {
 type AdminService interface {
 	List(context.Context) ([]account.Account, error)
 	Import(context.Context, admin.ImportRequest) (admin.ImportResult, error)
+	Delete(context.Context, string) error
+	Recover(context.Context, string) (account.Account, error)
 }
 
 func WithAdmin(service AdminService, key string) Option {
@@ -88,6 +91,8 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	mux.HandleFunc("GET /admin/api/panel-meta", server.panelMeta)
 	if server.admin != nil {
 		mux.HandleFunc("GET /admin/api/cli-accounts", server.adminList)
+		mux.HandleFunc("DELETE /admin/api/cli-accounts/{id}", server.adminDelete)
+		mux.HandleFunc("POST /admin/api/cli-accounts/{id}/recover", server.adminRecover)
 		mux.HandleFunc("POST /admin/api/accounts/import/preview", server.adminImportPreview)
 		mux.HandleFunc("POST /admin/api/accounts/import", server.adminImport)
 	}
@@ -120,25 +125,63 @@ func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
 	}
 	public := make([]map[string]any, 0, len(accounts))
 	for _, item := range accounts {
-		public = append(public, map[string]any{
-			"id":                 item.ID,
-			"email":              item.Email,
-			"pool":               item.Pool,
-			"unavailable_reason": item.UnavailableReason,
-			"retry_at":           item.RetryAt,
-			"last_error_code":    item.LastErrorCode,
-			"quota_actual":       item.QuotaActual,
-			"quota_limit":        item.QuotaLimit,
-			"request_count":      item.RequestCount,
-			"active":             item.Active,
-			"max_active":         item.MaxActive,
-			"has_refresh_token":  item.RefreshToken != "",
-		})
+		public = append(public, publicAccount(item))
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"count":    len(accounts),
 		"accounts": public,
 	})
+}
+
+func publicAccount(item account.Account) map[string]any {
+	return map[string]any{
+		"id":                 item.ID,
+		"email":              item.Email,
+		"pool":               item.Pool,
+		"unavailable_reason": item.UnavailableReason,
+		"retry_at":           item.RetryAt,
+		"last_error_code":    item.LastErrorCode,
+		"quota_actual":       item.QuotaActual,
+		"quota_limit":        item.QuotaLimit,
+		"request_count":      item.RequestCount,
+		"active":             item.Active,
+		"max_active":         item.MaxActive,
+		"has_refresh_token":  item.RefreshToken != "",
+	}
+}
+
+func (s *Server) adminDelete(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	id := request.PathValue("id")
+	if err := s.admin.Delete(request.Context(), id); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, admin.ErrAccountNotFound) {
+			status = http.StatusNotFound
+		}
+		writeOpenAIError(writer, status, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"deleted": true, "id": id})
+}
+
+func (s *Server) adminRecover(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	item, err := s.admin.Recover(request.Context(), request.PathValue("id"))
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, admin.ErrAccountNotFound) {
+			status = http.StatusNotFound
+		}
+		writeOpenAIError(writer, status, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, publicAccount(item))
 }
 
 func (s *Server) adminImportPreview(writer http.ResponseWriter, request *http.Request) {
@@ -174,11 +217,17 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
 	status := s.status.PoolStatus()
-	writeJSON(writer, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"ok":           status.Ready > 0,
 		"version":      "1.0.0-go",
 		"account_pool": status,
-	})
+	}
+	if provider, ok := s.gateway.(interface {
+		CircuitStatus() service.CircuitStatus
+	}); ok {
+		payload["quota_circuit"] = provider.CircuitStatus()
+	}
+	writeJSON(writer, http.StatusOK, payload)
 }
 
 func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {

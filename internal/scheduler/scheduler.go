@@ -16,12 +16,14 @@ type Scheduler struct {
 	accounts map[string]*account.Account
 	ready    []string
 	notify   chan struct{}
+	revision uint64
 }
 
 func New(accounts []account.Account) *Scheduler {
 	scheduler := &Scheduler{
 		accounts: make(map[string]*account.Account, len(accounts)),
 		notify:   make(chan struct{}, 1),
+		revision: 1,
 	}
 	for index := range accounts {
 		item := accounts[index]
@@ -125,6 +127,9 @@ func (s *Scheduler) PromoteDue(now time.Time) []account.Account {
 		s.ready = append(s.ready, item.ID)
 		promoted = append(promoted, *item)
 	}
+	if len(promoted) > 0 {
+		s.revision++
+	}
 	s.mu.Unlock()
 	if len(promoted) > 0 {
 		s.signal()
@@ -138,13 +143,37 @@ func (s *Scheduler) Upsert(item account.Account) {
 	}
 	s.mu.Lock()
 	s.removeReadyLocked(item.ID)
+	if existing := s.accounts[item.ID]; existing != nil {
+		item.Active = existing.Active
+	}
 	copy := item
 	s.accounts[item.ID] = &copy
 	if item.Pool == account.PoolReady {
 		s.ready = append(s.ready, item.ID)
 	}
+	s.revision++
 	s.mu.Unlock()
 	s.signal()
+}
+
+func (s *Scheduler) Delete(id string) bool {
+	s.mu.Lock()
+	if _, exists := s.accounts[id]; !exists {
+		s.mu.Unlock()
+		return false
+	}
+	s.removeReadyLocked(id)
+	delete(s.accounts, id)
+	s.revision++
+	s.mu.Unlock()
+	s.signal()
+	return true
+}
+
+func (s *Scheduler) Revision() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revision
 }
 
 func (s *Scheduler) signal() {
@@ -187,12 +216,19 @@ func (l *Lease) MoveUnavailable(reason account.UnavailableReason, retryAt time.T
 	if item == nil {
 		return
 	}
+	changed := item.Pool != account.PoolUnavailable ||
+		item.UnavailableReason != reason ||
+		!item.RetryAt.Equal(retryAt) ||
+		item.LastErrorCode != errorCode
 	item.Pool = account.PoolUnavailable
 	item.UnavailableReason = reason
 	item.RetryAt = retryAt
 	item.LastErrorCode = errorCode
 	item.UpdatedAt = time.Now().UTC()
 	l.scheduler.removeReadyLocked(l.accountID)
+	if changed {
+		l.scheduler.revision++
+	}
 }
 
 func (l *Lease) Release() {

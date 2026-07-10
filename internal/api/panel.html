@@ -12,13 +12,36 @@
 </head>
 <body><main>
   <h1>grok2api Go</h1><p class="muted">Ready Pool / Unavailable Pool</p>
-  <div class="grid"><div class="card"><div class="muted">Ready Pool</div><div class="value" id="ready">-</div></div><div class="card"><div class="muted">Unavailable Pool</div><div class="value" id="unavailable">-</div></div></div>
-  <div class="card" style="margin-top:12px"><h2>账号</h2><table><thead><tr><th>账号</th><th>Pool</th><th>原因</th><th>重试时间</th></tr></thead><tbody id="accounts"></tbody></table></div>
+  <div class="grid"><div class="card"><div class="muted">Ready Pool</div><div class="value" id="ready">-</div></div><div class="card"><div class="muted">Unavailable Pool</div><div class="value" id="unavailable">-</div></div><div class="card"><div class="muted">Quota Circuit</div><div class="value" id="circuit">-</div></div></div>
+  <div class="card" style="margin-top:12px"><h2>账号</h2><table><thead><tr><th>账号</th><th>Pool</th><th>原因</th><th>重试时间</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
   <div class="card" style="margin-top:12px"><h2>导入授权凭证</h2><input id="key" type="password" placeholder="面板密码" style="width:100%;margin-bottom:8px"><textarea id="input" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea><p><button onclick="send(true)">预览</button><button onclick="send(false)">导入</button></p><pre id="output"></pre></div>
   <script>
-    const auth=()=>{const v=document.getElementById('key').value;return v?{'Authorization':'Bearer '+v}:{} };
-    async function refresh(){const h=await fetch('/health').then(r=>r.json());ready.textContent=h.account_pool.ready;unavailable.textContent=h.account_pool.unavailable;const r=await fetch('/admin/api/cli-accounts',{headers:auth()});if(!r.ok)return;const d=await r.json();accounts.innerHTML=d.accounts.map(a=>`<tr><td>${a.email||a.id}</td><td>${a.pool}</td><td>${a.unavailable_reason||''}</td><td>${a.retry_at||''}</td></tr>`).join('')}
-    async function send(preview){let parsed=JSON.parse(input.value);if(!Array.isArray(parsed))parsed=parsed.accounts||[parsed];const path=preview?'/admin/api/accounts/import/preview':'/admin/api/accounts/import';const r=await fetch(path,{method:'POST',headers:{...auth(),'Content-Type':'application/json'},body:JSON.stringify({accounts:parsed})});output.textContent=JSON.stringify(await r.json(),null,2);await refresh()}
+    const byId=id=>document.getElementById(id);
+    const auth=()=>{const v=byId('key').value;return v?{'Authorization':'Bearer '+v}:{} };
+    const cell=(row,value)=>{const td=document.createElement('td');td.textContent=value??'';row.appendChild(td);return td};
+    async function refresh(){
+      const h=await fetch('/health').then(r=>r.json());
+      byId('ready').textContent=h.account_pool.ready;
+      byId('unavailable').textContent=h.account_pool.unavailable;
+      byId('circuit').textContent=h.quota_circuit?.open?'OPEN':'closed';
+      const r=await fetch('/admin/api/cli-accounts',{headers:auth()});if(!r.ok)return;
+      const d=await r.json();const body=byId('accounts');body.replaceChildren();
+      for(const account of d.accounts){
+        const row=document.createElement('tr');
+        cell(row,account.email||account.id);cell(row,account.pool);cell(row,account.unavailable_reason);cell(row,account.retry_at);
+        const actions=cell(row,'');
+        const recover=document.createElement('button');recover.textContent='恢复验证';recover.onclick=()=>accountAction(account.id,'recover');actions.appendChild(recover);
+        const remove=document.createElement('button');remove.textContent='删除';remove.onclick=()=>accountAction(account.id,'delete');actions.appendChild(remove);
+        body.appendChild(row);
+      }
+    }
+    async function accountAction(id,action){
+      if(action==='delete'&&!confirm(`确认删除 ${id}？`))return;
+      const path=`/admin/api/cli-accounts/${encodeURIComponent(id)}${action==='recover'?'/recover':''}`;
+      const r=await fetch(path,{method:action==='recover'?'POST':'DELETE',headers:auth()});
+      const data=await r.json();byId('output').textContent=JSON.stringify(data,null,2);await refresh();
+    }
+    async function send(preview){try{let parsed=JSON.parse(byId('input').value);if(!Array.isArray(parsed))parsed=parsed.accounts||[parsed];const path=preview?'/admin/api/accounts/import/preview':'/admin/api/accounts/import';const r=await fetch(path,{method:'POST',headers:{...auth(),'Content-Type':'application/json'},body:JSON.stringify({accounts:parsed})});byId('output').textContent=JSON.stringify(await r.json(),null,2);await refresh()}catch(error){byId('output').textContent=String(error)}}
     refresh();
   </script>
 </main></body></html>
