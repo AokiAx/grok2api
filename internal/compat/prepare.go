@@ -38,7 +38,9 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 			delete(input, "messages")
 		}
 	} else if rawMessages, ok := input["input"].([]any); ok {
-		if looksLikeChatMessages(rawMessages) {
+		// Only rewrite chat-shaped history. Codex/Responses already send
+		// input_text / function_call items — re-running chat conversion empties them.
+		if looksLikeChatMessages(rawMessages) && !looksLikeResponsesInput(rawMessages) {
 			items, instructions := ChatMessagesToResponsesInput(rawMessages)
 			input["input"] = items
 			if strings.TrimSpace(stringValue(input["instructions"])) == "" && instructions != "" {
@@ -174,4 +176,39 @@ func looksLikeChatMessages(items []any) bool {
 		}
 	}
 	return true
+}
+
+// looksLikeResponsesInput reports Codex/OpenAI Responses native input items.
+func looksLikeResponsesInput(items []any) bool {
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(stringValue(object["type"]))) {
+		case "function_call", "function_call_output", "message", "input_text", "input_image",
+			"item_reference", "reasoning":
+			return true
+		}
+		content, ok := object["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, part := range content {
+			block, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(stringValue(block["type"]))) {
+			case "input_text", "input_image", "output_text", "text":
+				// input_text is Responses-native; plain "text" alone is ambiguous,
+				// but combined with role+array content from Codex still safe to keep.
+				if strings.EqualFold(stringValue(block["type"]), "input_text") ||
+					strings.EqualFold(stringValue(block["type"]), "input_image") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

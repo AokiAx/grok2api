@@ -269,6 +269,48 @@ func TestPipelineResponsesStreamPassthrough(t *testing.T) {
 	}
 }
 
+func TestPipelineMessagesAcceptsResponsesShapedBody(t *testing.T) {
+	// Regression: Codex/NewAPI posting Responses JSON to /v1/messages used to
+	// wipe input to [] after AnthropicToOpenAI.
+	sse := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output_text\":\"ok\"}}\n\n"
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Stream: io.NopCloser(strings.NewReader(sse)),
+	}}
+	pipeline := &bridge.Pipeline{
+		Gateway:         gateway,
+		Catalog:         upstream.NewDefaultCatalog(),
+		PreferResponses: true,
+	}
+	body := []byte(`{
+		"model":"grok-4.5",
+		"stream":true,
+		"instructions":"You are Codex",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{}}}],
+		"tool_choice":"auto"
+	}`)
+	result, err := pipeline.Messages(context.Background(), body)
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if gateway.path != "/responses" {
+		t.Fatalf("path=%s", gateway.path)
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	input, _ := forwarded["input"].([]any)
+	if len(input) == 0 {
+		t.Fatalf("input must not be emptied: %#v", forwarded)
+	}
+	if result.Stream == nil {
+		t.Fatal("expected responses stream passthrough")
+	}
+	_ = result.Stream.Close()
+}
+
 func TestPipelineUpstreamErrorMaterializesBody(t *testing.T) {
 	gateway := &fakeGateway{result: service.ChatResult{
 		Status: http.StatusUnprocessableEntity,

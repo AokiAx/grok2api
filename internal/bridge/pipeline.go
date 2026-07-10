@@ -59,7 +59,11 @@ type Pipeline struct {
 type Result = service.ChatResult
 
 // Chat handles POST /v1/chat/completions.
+// Misrouted Responses bodies (input/instructions, no chat messages) are re-routed.
 func (p *Pipeline) Chat(ctx context.Context, body []byte) (Result, error) {
+	if compat.DetectPayload(body) == compat.KindResponses {
+		return p.Responses(ctx, body)
+	}
 	req, err := p.prepareChat(body)
 	if err != nil {
 		return Result{}, err
@@ -71,7 +75,13 @@ func (p *Pipeline) Chat(ctx context.Context, body []byte) (Result, error) {
 }
 
 // Messages handles POST /v1/messages (Anthropic).
+//
+// Codex and some gateways POST Responses-shaped JSON to /v1/messages. Detect
+// that and handle as Responses so input/instructions/tools are not dropped.
 func (p *Pipeline) Messages(ctx context.Context, body []byte) (Result, error) {
+	if compat.DetectPayload(body) == compat.KindResponses {
+		return p.Responses(ctx, body)
+	}
 	req, err := p.prepareAnthropic(body)
 	if err != nil {
 		return Result{}, err

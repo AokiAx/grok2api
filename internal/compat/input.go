@@ -138,12 +138,12 @@ func flattenContentParts(parts []any) string {
 		if !ok {
 			continue
 		}
-		switch part["type"] {
-		case "text":
+		switch strings.ToLower(strings.TrimSpace(stringValue(part["type"]))) {
+		case "text", "input_text", "output_text":
 			if text, _ := part["text"].(string); text != "" {
 				b.WriteString(text)
 			}
-		case "image_url":
+		case "image_url", "input_image":
 			// Images are not forwarded on the Responses text path.
 		default:
 			if text, _ := part["text"].(string); text != "" {
