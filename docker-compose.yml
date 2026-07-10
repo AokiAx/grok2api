@@ -1,38 +1,96 @@
 services:
-  grok2api:
-    image: ghcr.io/aokiax/grok2api:${GROK2API_IMAGE_TAG:-main}
-    container_name: grok2api-go
+  warp:
+    image: caomingjun/warp:latest
+    container_name: grok2api-warp
+    restart: unless-stopped
+    environment:
+      WARP_SLEEP: "2"
+      # Optional Cloudflare WARP+ license:
+      # WARP_LICENSE_KEY: ${WARP_LICENSE_KEY:-}
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv4.conf.all.src_valid_mark: "1"
     ports:
-      - "8787:8787"
+      - "127.0.0.1:${WARP_SOCKS_PORT:-40001}:1080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1', 1080), 5); s.close()\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  privoxy:
+    image: vimagick/privoxy:latest
+    container_name: grok2api-privoxy
+    restart: unless-stopped
+    depends_on:
+      warp:
+        condition: service_started
     volumes:
-      - ./data:/app/data
-      - ./config.json:/app/config.json:ro
+      - ./deploy/privoxy-warp.conf:/etc/privoxy/config:ro
+    ports:
+      - "127.0.0.1:${PRIVOXY_PORT:-40081}:8118"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: grok2api-flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${FLARESOLVERR_PORT:-8192}:8191"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8191/ >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  app:
+    image: ${GROK2API_IMAGE:-ghcr.io/aokiax/grok2api:latest}
+    container_name: grok2api-go
+    restart: unless-stopped
+    depends_on:
+      privoxy:
+        condition: service_started
+      flaresolverr:
+        condition: service_started
+    ports:
+      - "${GROK2API_PORT:-8787}:8787"
     environment:
       GROK2API_HOST: 0.0.0.0
       GROK2API_PORT: 8787
-      GROK2API_API_KEY: ${GROK2API_API_KEY:-}
-      GROK2API_APP_KEY: ${GROK2API_APP_KEY:-}
-      GROK2API_PANEL_PASSWORD: ${GROK2API_PANEL_PASSWORD:-}
-      GROK2API_PROXY: ${GROK2API_PROXY:-}
-      GROK2API_TURNSTILE_SOLVER_URL: ${GROK2API_TURNSTILE_SOLVER_URL:-http://host.docker.internal:5072}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
-  privoxy:
-    profiles: ["proxy"]
-    image: dockage/privoxy:latest
-    container_name: grok2api-privoxy
-    ports:
-      - "8118:8118"
-    restart: unless-stopped
-
-  flaresolverr:
-    profiles: ["flaresolverr"]
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: grok2api-flaresolverr
-    environment:
-      LOG_LEVEL: info
-    ports:
-      - "8191:8191"
-    restart: unless-stopped
+      GROK2API_DATA_DIR: /app/data
+      # Optional overrides; file config remains source of truth for most keys.
+      GROK2API_PROXY: ${GROK2API_PROXY:-http://privoxy:8118}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/grok2api",
+          "status",
+          "--config",
+          "/app/config.json",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
