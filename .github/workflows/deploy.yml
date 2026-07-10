@@ -90,14 +90,44 @@ jobs:
           digest=$(cat "$root/go-canary/image-digest")
           previous=$(docker inspect --format='{{.Image}}' grok2api-go 2>/dev/null || true)
           printf '%s\n' "$previous" > "$root/.previous-go-image"
+          python_was_running=$(docker inspect --format='{{.State.Running}}' grok2api-cli 2>/dev/null || true)
           chown -R 65532:65532 "$root/data"
           docker stop grok2api-cli 2>/dev/null || true
           docker rm -f grok2api-go 2>/dev/null || true
-          docker run -d --name grok2api-go \
-            --restart unless-stopped \
-            -p 0.0.0.0:8787:8787 \
-            -e GROK2API_HOST=0.0.0.0 \
-            -v "$root/config.json:/app/config.json:ro" \
-            -v "$root/data:/app/data" \
-            "$digest"
+
+          run_go() {
+            docker run -d --name grok2api-go \
+              --restart unless-stopped \
+              -p 0.0.0.0:8787:8787 \
+              -e GROK2API_HOST=0.0.0.0 \
+              -v "$root/config.json:/app/config.json:ro" \
+              -v "$root/data:/app/data" \
+              "$1"
+          }
+
+          run_go "$digest"
+
+          # Verify promoted service before accepting the production switch.
+          promoted=false
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              promoted=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$promoted" = true ]; then
+            exit 0
+          fi
+
+          docker logs --tail 100 grok2api-go || true
+          docker rm -f grok2api-go 2>/dev/null || true
+
+          # Rollback to Python container or the previous Go image.
+          if [ -n "$previous" ]; then
+            run_go "$previous"
+          elif [ "$python_was_running" = true ]; then
+            docker start grok2api-cli
+          fi
+          exit 1
           REMOTE
