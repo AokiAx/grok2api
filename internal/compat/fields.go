@@ -69,6 +69,9 @@ func StripUnknownResponsesFields(payload []byte) ([]byte, error) {
 
 // sanitizeResponsesMap mutates input in place: maps client web-access flags onto
 // backend_search, then drops every non-whitelisted field.
+//
+// Also re-sanitizes tools[] so nested Codex extras (web_search.external_web_access,
+// search_context_size, local_shell, …) never reach Grok even if prepare was skipped.
 func sanitizeResponsesMap(input map[string]any) bool {
 	changed := false
 
@@ -80,6 +83,24 @@ func sanitizeResponsesMap(input map[string]any) bool {
 		}
 		delete(input, "external_web_access")
 		changed = true
+	}
+
+	// Nested tool sanitize (Codex puts external_web_access on tools, not only root).
+	if rawTools, ok := input["tools"]; ok {
+		result := NormalizeResponsesToolsDetailed(rawTools, MaxUpstreamTools)
+		if result.BackendSearch != nil {
+			if _, exists := input["backend_search"]; !exists {
+				input["backend_search"] = *result.BackendSearch
+				changed = true
+			}
+		}
+		if len(result.Tools) > 0 {
+			input["tools"] = result.Tools
+			changed = true
+		} else if rawTools != nil {
+			delete(input, "tools")
+			changed = true
+		}
 	}
 
 	for _, key := range codexRejectedFields {

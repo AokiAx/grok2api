@@ -60,10 +60,17 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 		}
 		delete(input, "max_completion_tokens")
 	}
-	if tools := NormalizeResponsesTools(input["tools"], MaxUpstreamTools); len(tools) > 0 {
-		input["tools"] = tools
+	toolResult := NormalizeResponsesToolsDetailed(input["tools"], MaxUpstreamTools)
+	if len(toolResult.Tools) > 0 {
+		input["tools"] = toolResult.Tools
 	} else {
 		delete(input, "tools")
+	}
+	// Codex nests live-search policy on tools[].external_web_access; Grok uses backend_search.
+	if toolResult.BackendSearch != nil {
+		if _, exists := input["backend_search"]; !exists {
+			input["backend_search"] = *toolResult.BackendSearch
+		}
 	}
 	if choice, exists := input["tool_choice"]; exists && choice != nil {
 		input["tool_choice"] = NormalizeResponsesToolChoice(choice)

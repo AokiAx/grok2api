@@ -426,6 +426,96 @@ func TestStripUnknownResponsesFieldsNoopWhenClean(t *testing.T) {
 	}
 }
 
+func TestNormalizeResponsesToolsSanitizesCodexWebSearchAndDropsLocalShell(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type":                 "web_search",
+			"external_web_access":  true,
+			"indexed_web_access":   true,
+			"search_context_size":  "medium",
+			"search_content_types": []any{"text"},
+			"filters":              map[string]any{"allowed_domains": []any{"example.com"}},
+			"user_location":        map[string]any{"type": "approximate", "country": "US"},
+		},
+		map[string]any{"type": "local_shell"},
+		map[string]any{"type": "tool_search", "execution": "x", "description": "y", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "shell"}, // missing environment → drop
+		map[string]any{
+			"type": "function",
+			"name": "shell_command",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"command": map[string]any{"type": "string"}},
+			},
+		},
+	}
+	result := compat.NormalizeResponsesToolsDetailed(raw, 16)
+	if len(result.Tools) != 2 {
+		t.Fatalf("tools=%#v want web_search + shell_command", result.Tools)
+	}
+	first := result.Tools[0].(map[string]any)
+	if first["type"] != "web_search" || len(first) != 1 {
+		t.Fatalf("web_search not bare: %#v", first)
+	}
+	if result.BackendSearch == nil || !*result.BackendSearch {
+		t.Fatalf("BackendSearch=%v want true from external_web_access", result.BackendSearch)
+	}
+	second := result.Tools[1].(map[string]any)
+	if second["type"] != "function" || second["name"] != "shell_command" {
+		t.Fatalf("second=%#v", second)
+	}
+}
+
+func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"stream":false,
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[
+			{"type":"web_search","external_web_access":true,"search_context_size":"medium"},
+			{"type":"local_shell"},
+			{"type":"function","name":"shell_command","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}
+		],
+		"external_web_access":false,
+		"store":false,
+		"parallel_tool_calls":true
+	}`)
+	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: true})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := payload["external_web_access"]; ok {
+		t.Fatalf("top-level external_web_access leaked: %#v", payload)
+	}
+	// Nested tool external_web_access wins when top-level was only a rejected field
+	// (mapped first); tool-level true should still set backend_search if not set —
+	// but top-level false was mapped first. Either way tools must be clean.
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools=%#v", tools)
+	}
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		if _, ok := tool["external_web_access"]; ok {
+			t.Fatalf("nested external_web_access leaked: %#v", tool)
+		}
+		if _, ok := tool["search_context_size"]; ok {
+			t.Fatalf("search_context_size leaked: %#v", tool)
+		}
+		if tool["type"] == "local_shell" {
+			t.Fatalf("local_shell should be dropped: %#v", tool)
+		}
+	}
+	encoded := string(out)
+	if strings.Contains(encoded, "external_web_access") || strings.Contains(encoded, "local_shell") {
+		t.Fatalf("forbidden tokens remain: %s", encoded)
+	}
+}
+
 func TestNormalizeResponsesToolsFlattensChatFunctionShape(t *testing.T) {
 	raw := []any{
 		map[string]any{
