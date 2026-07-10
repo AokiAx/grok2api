@@ -1,0 +1,109 @@
+package service_test
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/AokiAx/grok2api/internal/account"
+	"github.com/AokiAx/grok2api/internal/scheduler"
+	"github.com/AokiAx/grok2api/internal/service"
+)
+
+type fakeStore struct {
+	saved []account.Account
+}
+
+func (s *fakeStore) SaveAccount(_ context.Context, item account.Account) error {
+	s.saved = append(s.saved, item)
+	return nil
+}
+
+type fakeUpstream struct {
+	responses map[string][]*http.Response
+}
+
+func (u *fakeUpstream) Chat(
+	_ context.Context,
+	item account.Account,
+	_ []byte,
+	_ bool,
+) (*http.Response, error) {
+	queue := u.responses[item.ID]
+	response := queue[0]
+	u.responses[item.ID] = queue[1:]
+	return response, nil
+}
+
+func response(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewBufferString(body)),
+	}
+}
+
+func ready(id string) account.Account {
+	return account.Account{
+		ID:          id,
+		AccessToken: "token-" + id,
+		Pool:        account.PoolReady,
+		MaxActive:   1,
+	}
+}
+
+func TestQuotaAccountMovesUnavailableAndNextReadyAccountSucceeds(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted","error":"rolling 24-hour window"}`)},
+		"b": {response(200, `{"choices":[{"message":{"content":"ok"}}]}`)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a"), ready("b")}),
+		store,
+		upstream,
+		service.WithQuotaRetry(30*time.Minute),
+	)
+
+	got, err := gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if got.Status != http.StatusOK || string(got.Body) != `{"choices":[{"message":{"content":"ok"}}]}` {
+		t.Fatalf("response = %d %s", got.Status, got.Body)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved transitions = %d; want 1", len(store.saved))
+	}
+	if store.saved[0].UnavailableReason != account.ReasonQuota {
+		t.Fatalf("reason = %q; want quota", store.saved[0].UnavailableReason)
+	}
+}
+
+func TestAllQuotaReturnsStructuredPoolUnavailableError(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		upstream,
+		service.WithQuotaRetry(45*time.Minute),
+	)
+
+	_, err := gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	poolErr, ok := service.AsPoolUnavailable(err)
+	if !ok {
+		t.Fatalf("error = %v; want pool unavailable", err)
+	}
+	if poolErr.Status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d; want 429", poolErr.Status)
+	}
+	if poolErr.RetryAfter <= 0 {
+		t.Fatalf("retry after = %s", poolErr.RetryAfter)
+	}
+}
