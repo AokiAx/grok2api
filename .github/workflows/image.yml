@@ -74,8 +74,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # GitHub attestations API is unavailable for private user-owned repos.
+      # Keep the step for public/org-enabled repos, but do not fail the image publish.
       - name: Attest build provenance
         if: github.event_name != 'pull_request'
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.IMAGE_NAME }}

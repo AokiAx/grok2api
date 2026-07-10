@@ -256,7 +256,7 @@ func (c *CapMonster) post(ctx context.Context, endpoint string, body map[string]
 }
 
 type Auto struct {
-	local     *Local
+	local      *Local
 	capmonster *CapMonster
 }
 

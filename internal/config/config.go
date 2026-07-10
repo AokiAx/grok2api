@@ -35,29 +35,29 @@ type Config struct {
 	RequestTimeoutSec int    `json:"timeout_secs"`
 
 	// Register / anti-bot settings (compatible with Python config.json keys).
-	AccountsBase            string          `json:"accounts_base"`
-	TurnstileSitekey        string          `json:"turnstile_sitekey"`
-	CapMonsterAPIBase       string          `json:"capmonster_api_base"`
-	CapMonsterAPIKey        string          `json:"capmonster_api_key"`
-	TurnstileSolver         string          `json:"turnstile_solver"`
-	TurnstileSolverURL      string          `json:"turnstile_solver_url"`
-	TurnstileTimeoutSec     int             `json:"turnstile_timeout"`
-	EmailCodeTimeoutSec     int             `json:"email_code_timeout"`
-	Proxy                   string          `json:"proxy"`
-	ProxyPool               []string        `json:"proxy_pool"`
-	ProxyRotate             string          `json:"proxy_rotate"`
-	ImpersonateBrowser      string          `json:"impersonate_browser"`
-	TokenJSONDir            string          `json:"token_json_dir"`
-	EmailProvider           string          `json:"email_provider"`
-	CfmailProfile           string          `json:"cfmail_profile"`
-	CfmailAccounts          []CfmailAccount `json:"cfmail_accounts"`
-	MailtmAPIBase           string          `json:"mailtm_api_base"`
-	MailtmDomain            string          `json:"mailtm_domain"`
-	TotalAccounts           int             `json:"total_accounts"`
-	MaxWorkers              int             `json:"max_workers"`
-	FlareSolverrURL         string          `json:"flaresolverr_url"`
-	FlareSolverrEnabled     bool            `json:"flaresolverr_enabled"`
-	RegisterBackupTokens    bool            `json:"register_backup_tokens"`
+	AccountsBase         string          `json:"accounts_base"`
+	TurnstileSitekey     string          `json:"turnstile_sitekey"`
+	CapMonsterAPIBase    string          `json:"capmonster_api_base"`
+	CapMonsterAPIKey     string          `json:"capmonster_api_key"`
+	TurnstileSolver      string          `json:"turnstile_solver"`
+	TurnstileSolverURL   string          `json:"turnstile_solver_url"`
+	TurnstileTimeoutSec  int             `json:"turnstile_timeout"`
+	EmailCodeTimeoutSec  int             `json:"email_code_timeout"`
+	Proxy                string          `json:"proxy"`
+	ProxyPool            []string        `json:"proxy_pool"`
+	ProxyRotate          string          `json:"proxy_rotate"`
+	ImpersonateBrowser   string          `json:"impersonate_browser"`
+	TokenJSONDir         string          `json:"token_json_dir"`
+	EmailProvider        string          `json:"email_provider"`
+	CfmailProfile        string          `json:"cfmail_profile"`
+	CfmailAccounts       []CfmailAccount `json:"cfmail_accounts"`
+	MailtmAPIBase        string          `json:"mailtm_api_base"`
+	MailtmDomain         string          `json:"mailtm_domain"`
+	TotalAccounts        int             `json:"total_accounts"`
+	MaxWorkers           int             `json:"max_workers"`
+	FlareSolverrURL      string          `json:"flaresolverr_url"`
+	FlareSolverrEnabled  bool            `json:"flaresolverr_enabled"`
+	RegisterBackupTokens bool            `json:"register_backup_tokens"`
 }
 
 func Defaults() Config {
@@ -155,42 +155,42 @@ func normalize(config *Config) {
 
 func applyEnvironment(config *Config) error {
 	stringValues := map[string]*string{
-		"GROK2API_HOST":                  &config.Host,
-		"GROK2API_API_KEY":               &config.APIKey,
-		"GROK2API_APP_KEY":               &config.AppKey,
-		"GROK2API_PANEL_PASSWORD":        &config.PanelPassword,
-		"GROK2API_PROXY_BASE_URL":        &config.ProxyBaseURL,
-		"GROK2API_CLIENT_VERSION":        &config.ClientVersion,
-		"GROK2API_DEFAULT_MODEL":         &config.DefaultModel,
-		"GROK2API_DATA_DIR":              &config.DataDir,
-		"GROK2API_ACCOUNTS_BASE":         &config.AccountsBase,
-		"ACCOUNTS_BASE":                  &config.AccountsBase,
-		"GROK2API_TURNSTILE_SITEKEY":     &config.TurnstileSitekey,
-		"TURNSTILE_SITEKEY":              &config.TurnstileSitekey,
-		"GROK2API_CAPMONSTER_API_BASE":   &config.CapMonsterAPIBase,
-		"CAPMONSTER_API_BASE":            &config.CapMonsterAPIBase,
-		"GROK2API_CAPMONSTER_API_KEY":    &config.CapMonsterAPIKey,
-		"CAPMONSTER_API_KEY":             &config.CapMonsterAPIKey,
-		"GROK2API_TURNSTILE_SOLVER":      &config.TurnstileSolver,
-		"GROK_TURNSTILE_SOLVER":          &config.TurnstileSolver,
-		"GROK2API_TURNSTILE_SOLVER_URL":  &config.TurnstileSolverURL,
-		"GROK_TURNSTILE_SOLVER_URL":      &config.TurnstileSolverURL,
-		"GROK2API_PROXY":                 &config.Proxy,
-		"PROXY_URL":                      &config.Proxy,
-		"GROK2API_IMPERSONATE_BROWSER":   &config.ImpersonateBrowser,
-		"IMPERSONATE_BROWSER":            &config.ImpersonateBrowser,
-		"GROK2API_TOKEN_JSON_DIR":        &config.TokenJSONDir,
-		"GROK_TOKEN_DIR":                 &config.TokenJSONDir,
-		"GROK2API_EMAIL_PROVIDER":        &config.EmailProvider,
-		"GROK_EMAIL_PROVIDER":            &config.EmailProvider,
-		"GROK2API_CFMAIL_PROFILE":        &config.CfmailProfile,
-		"GROK_CFMAIL_PROFILE":            &config.CfmailProfile,
-		"GROK2API_MAILTM_API_BASE":       &config.MailtmAPIBase,
-		"GROK_MAILTM_API_BASE":           &config.MailtmAPIBase,
-		"GROK2API_MAILTM_DOMAIN":         &config.MailtmDomain,
-		"GROK_MAILTM_DOMAIN":             &config.MailtmDomain,
-		"GROK2API_PROXY_ROTATE":          &config.ProxyRotate,
-		"GROK2API_FLARESOLVERR_URL":      &config.FlareSolverrURL,
+		"GROK2API_HOST":                 &config.Host,
+		"GROK2API_API_KEY":              &config.APIKey,
+		"GROK2API_APP_KEY":              &config.AppKey,
+		"GROK2API_PANEL_PASSWORD":       &config.PanelPassword,
+		"GROK2API_PROXY_BASE_URL":       &config.ProxyBaseURL,
+		"GROK2API_CLIENT_VERSION":       &config.ClientVersion,
+		"GROK2API_DEFAULT_MODEL":        &config.DefaultModel,
+		"GROK2API_DATA_DIR":             &config.DataDir,
+		"GROK2API_ACCOUNTS_BASE":        &config.AccountsBase,
+		"ACCOUNTS_BASE":                 &config.AccountsBase,
+		"GROK2API_TURNSTILE_SITEKEY":    &config.TurnstileSitekey,
+		"TURNSTILE_SITEKEY":             &config.TurnstileSitekey,
+		"GROK2API_CAPMONSTER_API_BASE":  &config.CapMonsterAPIBase,
+		"CAPMONSTER_API_BASE":           &config.CapMonsterAPIBase,
+		"GROK2API_CAPMONSTER_API_KEY":   &config.CapMonsterAPIKey,
+		"CAPMONSTER_API_KEY":            &config.CapMonsterAPIKey,
+		"GROK2API_TURNSTILE_SOLVER":     &config.TurnstileSolver,
+		"GROK_TURNSTILE_SOLVER":         &config.TurnstileSolver,
+		"GROK2API_TURNSTILE_SOLVER_URL": &config.TurnstileSolverURL,
+		"GROK_TURNSTILE_SOLVER_URL":     &config.TurnstileSolverURL,
+		"GROK2API_PROXY":                &config.Proxy,
+		"PROXY_URL":                     &config.Proxy,
+		"GROK2API_IMPERSONATE_BROWSER":  &config.ImpersonateBrowser,
+		"IMPERSONATE_BROWSER":           &config.ImpersonateBrowser,
+		"GROK2API_TOKEN_JSON_DIR":       &config.TokenJSONDir,
+		"GROK_TOKEN_DIR":                &config.TokenJSONDir,
+		"GROK2API_EMAIL_PROVIDER":       &config.EmailProvider,
+		"GROK_EMAIL_PROVIDER":           &config.EmailProvider,
+		"GROK2API_CFMAIL_PROFILE":       &config.CfmailProfile,
+		"GROK_CFMAIL_PROFILE":           &config.CfmailProfile,
+		"GROK2API_MAILTM_API_BASE":      &config.MailtmAPIBase,
+		"GROK_MAILTM_API_BASE":          &config.MailtmAPIBase,
+		"GROK2API_MAILTM_DOMAIN":        &config.MailtmDomain,
+		"GROK_MAILTM_DOMAIN":            &config.MailtmDomain,
+		"GROK2API_PROXY_ROTATE":         &config.ProxyRotate,
+		"GROK2API_FLARESOLVERR_URL":     &config.FlareSolverrURL,
 	}
 	for name, target := range stringValues {
 		if value, ok := os.LookupEnv(name); ok {
@@ -227,7 +227,7 @@ func applyEnvironment(config *Config) error {
 	}
 
 	boolValues := map[string]*bool{
-		"GROK2API_FLARESOLVERR_ENABLED":  &config.FlareSolverrEnabled,
+		"GROK2API_FLARESOLVERR_ENABLED":   &config.FlareSolverrEnabled,
 		"GROK2API_REGISTER_BACKUP_TOKENS": &config.RegisterBackupTokens,
 	}
 	for name, target := range boolValues {

@@ -224,7 +224,6 @@ func (p poolStatusProvider) PoolStatus() api.PoolStatus {
 	}
 }
 
-
 func runRegister(
 	ctx context.Context,
 	output io.Writer,

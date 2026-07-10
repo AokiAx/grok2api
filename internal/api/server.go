@@ -274,7 +274,6 @@ func (s *Server) handleAdminImport(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, result)
 }
 
-
 func (s *Server) registerStatus(writer http.ResponseWriter, request *http.Request) {
 	if !authorizedWithKey(request, s.adminKey) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
@@ -309,9 +308,9 @@ func (s *Server) registerStart(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	var payload struct {
-		Count   int  `json:"count"`
-		Workers int  `json:"workers"`
-		DryRun  bool `json:"dry_run"`
+		Count   int    `json:"count"`
+		Workers int    `json:"workers"`
+		DryRun  bool   `json:"dry_run"`
 		Proxy   string `json:"proxy"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&payload)

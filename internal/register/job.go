@@ -18,25 +18,25 @@ var (
 type JobState string
 
 const (
-	JobIdle    JobState = "idle"
-	JobRunning JobState = "running"
+	JobIdle     JobState = "idle"
+	JobRunning  JobState = "running"
 	JobStopping JobState = "stopping"
 	JobFinished JobState = "finished"
-	JobFailed  JobState = "failed"
+	JobFailed   JobState = "failed"
 )
 
 type JobStatus struct {
-	State     JobState         `json:"state"`
-	JobID     string           `json:"job_id,omitempty"`
-	Requested int              `json:"requested"`
-	OK        int              `json:"ok"`
-	Failed    int              `json:"failed"`
-	DryRun    bool             `json:"dry_run"`
-	StartedAt time.Time        `json:"started_at,omitempty"`
-	FinishedAt time.Time       `json:"finished_at,omitempty"`
-	Error     string           `json:"error,omitempty"`
-	Logs      []string         `json:"logs"`
-	Accounts  []AccountOutcome `json:"accounts,omitempty"`
+	State      JobState         `json:"state"`
+	JobID      string           `json:"job_id,omitempty"`
+	Requested  int              `json:"requested"`
+	OK         int              `json:"ok"`
+	Failed     int              `json:"failed"`
+	DryRun     bool             `json:"dry_run"`
+	StartedAt  time.Time        `json:"started_at,omitempty"`
+	FinishedAt time.Time        `json:"finished_at,omitempty"`
+	Error      string           `json:"error,omitempty"`
+	Logs       []string         `json:"logs"`
+	Accounts   []AccountOutcome `json:"accounts,omitempty"`
 }
 
 type JobManager struct {

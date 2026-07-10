@@ -19,17 +19,17 @@ import (
 )
 
 const (
-	grpcService       = "auth_mgmt.AuthManagement"
-	defaultStateTree  = "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Fsign-up%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-	defaultUserAgent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+	grpcService      = "auth_mgmt.AuthManagement"
+	defaultStateTree = "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Fsign-up%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
+	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
 
 var allowedSSOHosts = map[string]struct{}{
-	"auth.x.ai":              {},
-	"auth.grok.com":          {},
-	"auth.grokipedia.com":    {},
+	"auth.x.ai":                {},
+	"auth.grok.com":            {},
+	"auth.grokipedia.com":      {},
 	"auth.grokusercontent.com": {},
-	"accounts.x.ai":          {},
+	"accounts.x.ai":            {},
 }
 
 type RegistrarConfig struct {
@@ -290,10 +290,10 @@ func (r *Registrar) submitRegistration(
 	payload := []map[string]any{{
 		"emailValidationCode": emailCode,
 		"createUserAndSessionRequest": map[string]any{
-			"email":             email,
-			"givenName":         givenName,
-			"familyName":        familyName,
-			"clearTextPassword": password,
+			"email":              email,
+			"givenName":          givenName,
+			"familyName":         familyName,
+			"clearTextPassword":  password,
 			"tosAcceptedVersion": "$undefined",
 		},
 		"turnstileToken":         turnstileToken,

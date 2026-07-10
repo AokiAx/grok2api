@@ -211,5 +211,5 @@ func (p *MailtmProvider) firstDomain(ctx context.Context) (string, error) {
 	return payload.HydraMember[0].Domain, nil
 }
 
-func (p *MailtmProvider) RecordSuccess()            {}
+func (p *MailtmProvider) RecordSuccess()              {}
 func (p *MailtmProvider) RecordFailure(reason string) {}
