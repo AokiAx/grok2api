@@ -27,17 +27,30 @@ type StatusProvider interface {
 }
 
 type Server struct {
-	gateway ChatGateway
-	status  StatusProvider
-	apiKey  string
-	handler http.Handler
+	gateway      ChatGateway
+	status       StatusProvider
+	apiKey       string
+	defaultModel string
+	handler      http.Handler
 }
 
-func NewServer(gateway ChatGateway, status StatusProvider, apiKey string) *Server {
+type Option func(*Server)
+
+func WithDefaultModel(model string) Option {
+	return func(server *Server) {
+		server.defaultModel = model
+	}
+}
+
+func NewServer(gateway ChatGateway, status StatusProvider, apiKey string, options ...Option) *Server {
 	server := &Server{
-		gateway: gateway,
-		status:  status,
-		apiKey:  apiKey,
+		gateway:      gateway,
+		status:       status,
+		apiKey:       apiKey,
+		defaultModel: "grok-4.5",
+	}
+	for _, option := range options {
+		option(server)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -70,14 +83,21 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	metadata := struct {
-		Stream bool `json:"stream"`
-	}{}
-	if err := json.Unmarshal(body, &metadata); err != nil {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
-	result, err := s.gateway.Chat(request.Context(), body, metadata.Stream)
+	if model, ok := payload["model"].(string); !ok || model == "" {
+		payload["model"] = s.defaultModel
+	}
+	stream, _ := payload["stream"].(bool)
+	body, err = json.Marshal(payload)
+	if err != nil {
+		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	result, err := s.gateway.Chat(request.Context(), body, stream)
 	if err != nil {
 		if poolError, ok := service.AsPoolUnavailable(err); ok {
 			writer.Header().Set(

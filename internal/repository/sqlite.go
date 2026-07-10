@@ -106,6 +106,14 @@ func (r *SQLite) SchemaVersion(ctx context.Context) int {
 	return version
 }
 
+func (r *SQLite) AccountCount(ctx context.Context) (int, error) {
+	var count int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count accounts: %w", err)
+	}
+	return count, nil
+}
+
 type legacyFile struct {
 	Accounts []legacyAccount `json:"accounts"`
 }
