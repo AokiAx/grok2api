@@ -85,3 +85,28 @@ def test_repository_can_resync_accounts_written_by_legacy_process(tmp_path: Path
 
     assert repo.sync_legacy_json() == 2
     assert len(repo.list_accounts()) == 2
+
+
+def test_repository_closes_short_lived_connections(tmp_path: Path, monkeypatch):
+    database = tmp_path / "grok2api.db"
+    repo = SQLiteAccountRepository(database)
+    connections: list[TrackingConnection] = []
+
+    class TrackingConnection(sqlite3.Connection):
+        was_closed = False
+
+        def close(self) -> None:
+            self.was_closed = True
+            super().close()
+
+    def connect() -> TrackingConnection:
+        connection = sqlite3.connect(database, factory=TrackingConnection)
+        connection.row_factory = sqlite3.Row
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(repo, "_connect", connect)
+
+    repo.list_accounts()
+
+    assert connections[-1].was_closed is True

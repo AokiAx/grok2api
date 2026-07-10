@@ -85,3 +85,63 @@ def test_acquire_does_not_persist_every_request(tmp_path: Path):
     pool.release(account.id)
 
     assert database.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        ("least_used", "b@example.com"),
+        ("priority", "b@example.com"),
+    ],
+)
+def test_configurable_selection_strategies(
+    tmp_path: Path,
+    strategy: str,
+    expected: str,
+):
+    cfg = Settings(
+        data_dir=tmp_path,
+        auth_file=tmp_path / "auth.json",
+        cli_pool_acquire_timeout=0.05,
+        cli_pool_selection_strategy=strategy,
+    )
+    pool = CliAccountPool(
+        cfg,
+        repository=SQLiteAccountRepository(tmp_path / "grok2api.db"),
+    )
+    _add(pool, "a@example.com")
+    _add(pool, "b@example.com")
+    first = pool.get("a@example.com")
+    second = pool.get("b@example.com")
+    assert first is not None and second is not None
+    first.request_count = 10
+    second.priority = 10
+
+    selected = pool.acquire(wait=False)
+
+    assert selected is not None
+    assert selected.email == expected
+    pool.release(selected.id)
+
+
+def test_update_delete_and_runtime_flush(tmp_path: Path):
+    pool = _pool(tmp_path)
+    _add(pool, "a@example.com")
+    account = pool.acquire(wait=False)
+    assert account is not None
+    pool.release(account.id)
+
+    pool.update_tokens(
+        account.id,
+        key="updated-token",
+        refresh_token="updated-refresh",
+        expires_in=7200,
+    )
+    updated = pool.get(account.id)
+    assert updated is not None
+    assert updated.key == "updated-token"
+    assert updated.refresh_token == "updated-refresh"
+
+    pool.close()
+    assert pool.delete(account.id) is True
+    assert pool.delete(account.id) is False
