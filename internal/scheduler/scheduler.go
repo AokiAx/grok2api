@@ -231,6 +231,25 @@ func (l *Lease) MoveUnavailable(reason account.UnavailableReason, retryAt time.T
 	}
 }
 
+// RecordUsage updates free-tier quota counters observed from response headers.
+func (l *Lease) RecordUsage(actual, limit int64, at time.Time) {
+	l.scheduler.mu.Lock()
+	defer l.scheduler.mu.Unlock()
+	item := l.scheduler.accounts[l.accountID]
+	if item == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	} else {
+		at = at.UTC()
+	}
+	item.QuotaActual = actual
+	item.QuotaLimit = limit
+	item.LastSuccessAt = at
+	item.UpdatedAt = at
+}
+
 func (l *Lease) Release() {
 	l.once.Do(func() {
 		l.scheduler.mu.Lock()

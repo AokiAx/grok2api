@@ -368,3 +368,50 @@ func TestLegacyEnabledExpiredCredentialMigratesToAuth(t *testing.T) {
 		t.Fatalf("accounts = %#v", accounts)
 	}
 }
+
+func TestSaveAccountPersistsQuotaAndLastSuccess(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "quota.db")
+	repo, err := repository.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	item := account.Account{
+		ID:            "free-1",
+		AccessToken:   "token",
+		Pool:          account.PoolReady,
+		QuotaActual:   250_000,
+		QuotaLimit:    1_000_000,
+		LastSuccessAt: now,
+		MaxActive:     1,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := repo.SaveAccount(ctx, item); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// update again to ensure ON CONFLICT persists quota fields
+	item.QuotaActual = 300_000
+	item.LastSuccessAt = now.Add(time.Minute)
+	item.UpdatedAt = now.Add(time.Minute)
+	if err := repo.SaveAccount(ctx, item); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("count = %d", len(accounts))
+	}
+	got := accounts[0]
+	if got.QuotaActual != 300_000 || got.QuotaLimit != 1_000_000 {
+		t.Fatalf("quota = %d/%d", got.QuotaActual, got.QuotaLimit)
+	}
+	if got.LastSuccessAt.IsZero() {
+		t.Fatal("last_success_at not persisted")
+	}
+}

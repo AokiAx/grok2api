@@ -124,6 +124,13 @@ func (g *Gateway) Request(
 			return ChatResult{}, err
 		}
 		if stream && response.StatusCode < 400 {
+			if err := g.persistSuccessUsage(ctx, lease, response.Header); err != nil {
+				_ = response.Body.Close()
+				lease.Release()
+				return ChatResult{}, err
+			}
+			// Keep returning this successful stream even if remaining hit 0;
+			// the account is already marked unavailable for subsequent traffic.
 			g.resetCircuit()
 			return ChatResult{
 				Status: response.StatusCode,
@@ -145,6 +152,11 @@ func (g *Gateway) Request(
 			return ChatResult{}, fmt.Errorf("close upstream response: %w", closeErr)
 		}
 		if response.StatusCode < 400 {
+			if err := g.persistSuccessUsage(ctx, lease, response.Header); err != nil {
+				lease.Release()
+				return ChatResult{}, err
+			}
+			// Return the successful body even if this response exhausted free quota.
 			lease.Release()
 			g.resetCircuit()
 			return ChatResult{
@@ -155,6 +167,13 @@ func (g *Gateway) Request(
 		}
 
 		failure := upstream.ClassifyFailure(response.StatusCode, body)
+		// Prefer body-reported free quota; fall back to response headers.
+		if failure.Kind == upstream.FailureQuota && failure.QuotaLimit == 0 {
+			if usage := upstream.ParseRateLimitHeaders(response.Header); usage.Present() {
+				failure.QuotaActual = usage.QuotaActual()
+				failure.QuotaLimit = usage.QuotaLimit()
+			}
+		}
 		switch failure.Kind {
 		case upstream.FailureQuota, upstream.FailureAuth, upstream.FailureRateLimit:
 			if failure.Kind == upstream.FailureQuota {
@@ -166,8 +185,10 @@ func (g *Gateway) Request(
 			}
 			lease.MoveUnavailable(failure.Reason, retryAt, failure.Code)
 			updated := lease.Account()
-			updated.QuotaActual = failure.QuotaActual
-			updated.QuotaLimit = failure.QuotaLimit
+			if failure.QuotaLimit > 0 || failure.QuotaActual > 0 {
+				updated.QuotaActual = failure.QuotaActual
+				updated.QuotaLimit = failure.QuotaLimit
+			}
 			if err := g.store.SaveAccount(ctx, updated); err != nil {
 				lease.Release()
 				return ChatResult{}, fmt.Errorf("save account transition: %w", err)
@@ -189,6 +210,42 @@ func (g *Gateway) Request(
 	}
 
 	return ChatResult{}, g.poolUnavailable()
+}
+
+func (g *Gateway) persistSuccessUsage(
+	ctx context.Context,
+	lease *scheduler.Lease,
+	header http.Header,
+) error {
+	usage := upstream.ParseRateLimitHeaders(header)
+	now := g.now().UTC()
+	if usage.Present() {
+		lease.RecordUsage(usage.QuotaActual(), usage.QuotaLimit(), now)
+		if usage.Exhausted() {
+			lease.MoveUnavailable(
+				account.ReasonQuota,
+				now.Add(g.quotaRetry),
+				"subscription:free-usage-exhausted",
+			)
+		}
+		if err := g.store.SaveAccount(ctx, lease.Account()); err != nil {
+			return fmt.Errorf("save free quota usage: %w", err)
+		}
+		return nil
+	}
+
+	// Even without rate-limit headers, mark last success for ops visibility.
+	item := lease.Account()
+	if item.ID == "" {
+		return nil
+	}
+	item.LastSuccessAt = now
+	item.UpdatedAt = now
+	lease.RecordUsage(item.QuotaActual, item.QuotaLimit, now)
+	if err := g.store.SaveAccount(ctx, item); err != nil {
+		return fmt.Errorf("save account success timestamp: %w", err)
+	}
+	return nil
 }
 
 func (g *Gateway) CircuitStatus() CircuitStatus {

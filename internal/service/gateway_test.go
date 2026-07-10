@@ -53,9 +53,17 @@ func (u *fakeUpstream) Request(
 }
 
 func response(status int, body string) *http.Response {
+	return responseWithHeaders(status, body, nil)
+}
+
+func responseWithHeaders(status int, body string, headers map[string]string) *http.Response {
+	header := make(http.Header)
+	for key, value := range headers {
+		header.Set(key, value)
+	}
 	return &http.Response{
 		StatusCode: status,
-		Header:     make(http.Header),
+		Header:     header,
 		Body:       io.NopCloser(bytes.NewBufferString(body)),
 	}
 }
@@ -89,11 +97,17 @@ func TestQuotaAccountMovesUnavailableAndNextReadyAccountSucceeds(t *testing.T) {
 	if got.Status != http.StatusOK || string(got.Body) != `{"choices":[{"message":{"content":"ok"}}]}` {
 		t.Fatalf("response = %d %s", got.Status, got.Body)
 	}
-	if len(store.saved) != 1 {
-		t.Fatalf("saved transitions = %d; want 1", len(store.saved))
+	if len(store.saved) < 1 {
+		t.Fatalf("saved transitions = %d; want >=1", len(store.saved))
 	}
-	if store.saved[0].UnavailableReason != account.ReasonQuota {
-		t.Fatalf("reason = %q; want quota", store.saved[0].UnavailableReason)
+	foundQuota := false
+	for _, item := range store.saved {
+		if item.UnavailableReason == account.ReasonQuota {
+			foundQuota = true
+		}
+	}
+	if !foundQuota {
+		t.Fatalf("saved = %#v; want quota transition", store.saved)
 	}
 }
 
@@ -230,7 +244,13 @@ func TestGenericRequestUsesSameRotationAndLeasePipeline(t *testing.T) {
 	if result.Status != http.StatusOK || upstream.method != http.MethodGet || upstream.path != "/models" {
 		t.Fatalf("result=%d upstream=%s %s", result.Status, upstream.method, upstream.path)
 	}
-	if len(store.saved) != 1 || store.saved[0].UnavailableReason != account.ReasonQuota {
+	foundQuota := false
+	for _, item := range store.saved {
+		if item.UnavailableReason == account.ReasonQuota {
+			foundQuota = true
+		}
+	}
+	if !foundQuota {
 		t.Fatalf("saved = %#v", store.saved)
 	}
 }
@@ -274,4 +294,81 @@ func TestMixedFailuresDoNotOpenQuotaCircuit(t *testing.T) {
 	if gateway.CircuitStatus().Open {
 		t.Fatal("mixed quota/auth failures must not open quota circuit")
 	}
+}
+
+func TestSuccessfulChatPersistsFreeRateLimitUsage(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {responseWithHeaders(200, `{"choices":[{"message":{"content":"ok"}}]}`, map[string]string{
+			"x-ratelimit-limit-tokens":       "1000000",
+			"x-ratelimit-remaining-tokens":   "750000",
+			"x-ratelimit-limit-requests":     "21",
+			"x-ratelimit-remaining-requests": "20",
+		})},
+	}}
+	gateway := service.NewGateway(scheduler.New([]account.Account{ready("a")}), store, upstream)
+
+	got, err := gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if got.Status != http.StatusOK {
+		t.Fatalf("status = %d", got.Status)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved = %d; want 1", len(store.saved))
+	}
+	item := store.saved[0]
+	if item.QuotaLimit != 1_000_000 || item.QuotaActual != 250_000 {
+		t.Fatalf("quota = %d/%d; want 250000/1000000", item.QuotaActual, item.QuotaLimit)
+	}
+	if item.Pool != account.PoolReady {
+		t.Fatalf("pool = %s; want ready", item.Pool)
+	}
+	if item.LastSuccessAt.IsZero() {
+		t.Fatal("last success timestamp missing")
+	}
+}
+
+func TestSuccessfulChatWithZeroRemainingMovesToQuota(t *testing.T) {
+	store := &fakeStore{}
+	s := scheduler.New([]account.Account{ready("a"), ready("b")})
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {responseWithHeaders(200, `{"choices":[{"message":{"content":"ok"}}]}`, map[string]string{
+			"x-ratelimit-limit-tokens":     "1000000",
+			"x-ratelimit-remaining-tokens": "0",
+		})},
+	}}
+	gateway := service.NewGateway(
+		s,
+		store,
+		upstream,
+		service.WithQuotaRetry(30*time.Minute),
+	)
+
+	got, err := gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if got.Status != http.StatusOK || string(got.Body) != `{"choices":[{"message":{"content":"ok"}}]}` {
+		t.Fatalf("should still return successful body, got %d %s", got.Status, got.Body)
+	}
+	foundExhausted := false
+	for _, item := range store.saved {
+		if item.ID == "a" && item.UnavailableReason == account.ReasonQuota && item.QuotaActual == 1_000_000 {
+			foundExhausted = true
+		}
+	}
+	if !foundExhausted {
+		t.Fatalf("saved = %#v; want a moved to quota with full usage", store.saved)
+	}
+	// next acquire should skip a and use b
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire next: %v", err)
+	}
+	if lease.Account().ID != "b" {
+		t.Fatalf("next account = %s; want b", lease.Account().ID)
+	}
+	lease.Release()
 }

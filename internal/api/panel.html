@@ -552,9 +552,9 @@
           <div class="stat-note">有 refresh token</div>
         </div>
         <div class="card">
-          <div class="stat-label">额度汇总</div>
+          <div class="stat-label">Free 额度汇总</div>
           <div class="stat-value amber" id="quotaUsage">—</div>
-          <div class="stat-note" id="quotaNote">上游未报告</div>
+          <div class="stat-note" id="quotaNote">成功请求后从响应头回写</div>
         </div>
         <div class="card">
           <div class="stat-label">Quota Circuit</div>
@@ -843,7 +843,17 @@
     };
 
     const percent = (value, total) => total > 0 ? Math.round(value / total * 100) : 0;
-    const quotaText = (actual, limit) => limit > 0 ? `${number.format(actual)} / ${number.format(limit)}` : '—';
+    // Free quota is stored as used/limit from x-ratelimit headers.
+    const quotaText = (actual, limit) => {
+      if (!(limit > 0)) return '—';
+      const remaining = Math.max(0, limit - (actual || 0));
+      return `${number.format(remaining)} 剩余 · ${number.format(actual || 0)}/${number.format(limit)}`;
+    };
+    const quotaNoteText = (actual, limit) => {
+      if (!(limit > 0)) return 'free 额度需成功请求后从响应头回写';
+      const remaining = Math.max(0, limit - (actual || 0));
+      return `剩余 ${number.format(remaining)} · 已用 ${percent(actual || 0, limit)}%`;
+    };
     const timeText = value => {
       if (!value || String(value).startsWith('0001-')) return '—';
       const date = new Date(value);
@@ -885,9 +895,7 @@
       byId('activeLeases').textContent = `${number.format(summary.active_leases || 0)} / ${number.format(summary.max_active || 0)}`;
       byId('refreshableAccounts').textContent = number.format(summary.refreshable_accounts || 0);
       byId('quotaUsage').textContent = quotaText(summary.quota_actual || 0, summary.quota_limit || 0);
-      byId('quotaNote').textContent = summary.quota_limit > 0
-        ? `已使用 ${percent(summary.quota_actual, summary.quota_limit)}%`
-        : '上游未报告额度';
+      byId('quotaNote').textContent = quotaNoteText(summary.quota_actual || 0, summary.quota_limit || 0);
 
       const open = Boolean(health.quota_circuit?.open);
       byId('circuit').textContent = open ? 'OPEN' : 'CLOSED';

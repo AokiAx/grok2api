@@ -1,6 +1,7 @@
 package upstream_test
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/AokiAx/grok2api/internal/account"
@@ -76,5 +77,46 @@ func TestQuotaFailureExtractsUsage(t *testing.T) {
 			failure.QuotaActual,
 			failure.QuotaLimit,
 		)
+	}
+}
+
+func TestParseRateLimitHeadersPrefersTokens(t *testing.T) {
+	header := make(http.Header)
+	header.Set("x-ratelimit-limit-requests", "21")
+	header.Set("x-ratelimit-remaining-requests", "18")
+	header.Set("x-ratelimit-limit-tokens", "1000000")
+	header.Set("x-ratelimit-remaining-tokens", "750000")
+
+	usage := upstream.ParseRateLimitHeaders(header)
+	if !usage.Present() {
+		t.Fatal("expected usage present")
+	}
+	if usage.QuotaLimit() != 1_000_000 {
+		t.Fatalf("limit = %d; want tokens limit", usage.QuotaLimit())
+	}
+	if usage.QuotaActual() != 250_000 {
+		t.Fatalf("actual = %d; want 250000 used tokens", usage.QuotaActual())
+	}
+	if usage.Exhausted() {
+		t.Fatal("should not be exhausted")
+	}
+}
+
+func TestParseRateLimitHeadersExhaustedRemainingZero(t *testing.T) {
+	header := make(http.Header)
+	header.Set("x-ratelimit-limit-tokens", "1000000")
+	header.Set("x-ratelimit-remaining-tokens", "0")
+	usage := upstream.ParseRateLimitHeaders(header)
+	if !usage.Exhausted() {
+		t.Fatal("remaining 0 should be exhausted")
+	}
+	if usage.QuotaActual() != 1_000_000 || usage.QuotaLimit() != 1_000_000 {
+		t.Fatalf("quota = %d/%d", usage.QuotaActual(), usage.QuotaLimit())
+	}
+}
+
+func TestParseRateLimitHeadersIgnoresMissing(t *testing.T) {
+	if usage := upstream.ParseRateLimitHeaders(http.Header{}); usage.Present() {
+		t.Fatalf("empty headers should not present: %#v", usage)
 	}
 }
