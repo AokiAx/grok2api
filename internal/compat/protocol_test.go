@@ -387,3 +387,105 @@ func TestStripUnknownResponsesFieldsNoopWhenClean(t *testing.T) {
 		t.Fatalf("expected noop, got %s", out)
 	}
 }
+
+func TestNormalizeResponsesToolsFlattensChatFunctionShape(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "Read",
+				"description": "Read a file",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+
+	out := compat.NormalizeResponsesTools(raw, 10)
+	if len(out) != 1 {
+		t.Fatalf("len=%d want 1: %#v", len(out), out)
+	}
+	tool := out[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "Read" || tool["description"] != "Read a file" {
+		t.Fatalf("tool identity not flattened: %#v", tool)
+	}
+	if _, ok := tool["parameters"].(map[string]any); !ok {
+		t.Fatalf("top-level parameters missing: %#v", tool)
+	}
+	if _, exists := tool["function"]; exists {
+		t.Fatalf("nested Chat function must not reach Responses: %#v", tool)
+	}
+}
+
+func TestAnthropicToolsReachResponsesAsFlatFunctions(t *testing.T) {
+	anthropic := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"inspect"}],
+		"tools":[{
+			"name":"Inspect",
+			"description":"Inspect the workspace",
+			"input_schema":{"type":"object","properties":{"path":{"type":"string"}}}
+		}]
+	}`)
+
+	chat, _, err := compat.AnthropicToOpenAI(anthropic, "grok-4.5")
+	if err != nil {
+		t.Fatalf("anthropic to chat: %v", err)
+	}
+	responses, _, err := compat.ChatToResponses(chat)
+	if err != nil {
+		t.Fatalf("chat to responses: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(responses, &payload); err != nil {
+		t.Fatalf("decode responses: %v", err)
+	}
+	tools := payload["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	if tool["name"] != "Inspect" {
+		t.Fatalf("name=%#v payload=%s", tool["name"], responses)
+	}
+	if _, ok := tool["parameters"].(map[string]any); !ok {
+		t.Fatalf("top-level parameters missing: %s", responses)
+	}
+	if _, exists := tool["function"]; exists {
+		t.Fatalf("nested function leaked: %s", responses)
+	}
+}
+
+func TestNormalizeResponsesToolsFlattensNamespaceChildren(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type": "namespace",
+			"name": "workspace",
+			"tools": []any{
+				map[string]any{
+					"type": "function",
+					"function": map[string]any{
+						"name": "Search",
+					},
+				},
+			},
+		},
+	}
+
+	out := compat.NormalizeResponsesTools(raw, 10)
+	if len(out) != 1 {
+		t.Fatalf("len=%d want 1: %#v", len(out), out)
+	}
+	tool := out[0].(map[string]any)
+	if tool["name"] != "Search" {
+		t.Fatalf("name=%#v tool=%#v", tool["name"], tool)
+	}
+	parameters, ok := tool["parameters"].(map[string]any)
+	if !ok || parameters["type"] != "object" {
+		t.Fatalf("default top-level parameters missing: %#v", tool)
+	}
+	if _, exists := tool["function"]; exists {
+		t.Fatalf("nested namespace function leaked: %#v", tool)
+	}
+}
