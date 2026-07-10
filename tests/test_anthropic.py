@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.anthropic_compat import (
+    AnthropicStreamConverter,
     anthropic_to_openai_body,
     anthropic_tools_to_openai,
     openai_to_anthropic_message,
@@ -157,3 +158,27 @@ def test_anthropic_tools_to_openai_helper():
         [{"name": "x", "description": "d", "input_schema": {"type": "object"}}]
     )
     assert tools[0]["function"]["name"] == "x"
+
+
+def test_anthropic_stream_converter_emits_single_stop():
+    converter = AnthropicStreamConverter("grok-4.5")
+
+    events = converter.prelude()
+    events.extend(
+        converter.feed(
+            {
+                "choices": [
+                    {
+                        "delta": {"content": "hello"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+    )
+    events.extend(converter.finish())
+    events.extend(converter.finish())
+
+    event_types = [event["type"] for event in events]
+    assert event_types.count("content_block_stop") == 1
+    assert event_types.count("message_stop") == 1
