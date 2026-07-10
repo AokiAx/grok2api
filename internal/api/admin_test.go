@@ -40,13 +40,23 @@ func (a *fakeAdmin) Recover(_ context.Context, id string) (account.Account, erro
 }
 
 func TestAdminListNeverReturnsTokens(t *testing.T) {
-	adminService := &fakeAdmin{accounts: []account.Account{{
-		ID:           "account-1",
-		Email:        "user@example.com",
-		AccessToken:  "secret-access-token",
-		RefreshToken: "secret-refresh-token",
-		Pool:         account.PoolReady,
-	}}}
+	adminService := &fakeAdmin{accounts: []account.Account{
+		{
+			ID: "account-1", Email: "user@example.com",
+			AccessToken: "secret-access-token", RefreshToken: "secret-refresh-token",
+			Pool: account.PoolReady, Active: 1, MaxActive: 2,
+			RequestCount: 10, QuotaActual: 20, QuotaLimit: 100,
+		},
+		{
+			ID: "account-2", RefreshToken: "refresh-2",
+			Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota,
+			MaxActive: 1, RequestCount: 5, QuotaActual: 90, QuotaLimit: 100,
+		},
+		{
+			ID: "account-3", Pool: account.PoolUnavailable,
+			UnavailableReason: account.ReasonAuth, MaxActive: 1, RequestCount: 2,
+		},
+	}}
 	server := api.NewServer(
 		&fakeGateway{},
 		fakeStatus{},
@@ -65,6 +75,36 @@ func TestAdminListNeverReturnsTokens(t *testing.T) {
 	body := recorder.Body.String()
 	if strings.Contains(body, "secret-access-token") || strings.Contains(body, "secret-refresh-token") {
 		t.Fatalf("response leaked token: %s", body)
+	}
+	var payload struct {
+		Summary struct {
+			TotalAccounts       int            `json:"total_accounts"`
+			ReadyAccounts       int            `json:"ready_accounts"`
+			UnavailableAccounts int            `json:"unavailable_accounts"`
+			ActiveLeases        int            `json:"active_leases"`
+			MaxActive           int            `json:"max_active"`
+			TotalRequests       int64          `json:"total_requests"`
+			RefreshableAccounts int            `json:"refreshable_accounts"`
+			QuotaActual         int64          `json:"quota_actual"`
+			QuotaLimit          int64          `json:"quota_limit"`
+			Reasons             map[string]int `json:"reasons"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	summary := payload.Summary
+	if summary.TotalAccounts != 3 || summary.ReadyAccounts != 1 || summary.UnavailableAccounts != 2 {
+		t.Fatalf("pool summary = %#v", summary)
+	}
+	if summary.ActiveLeases != 1 || summary.MaxActive != 4 || summary.TotalRequests != 17 {
+		t.Fatalf("runtime summary = %#v", summary)
+	}
+	if summary.RefreshableAccounts != 2 || summary.QuotaActual != 110 || summary.QuotaLimit != 200 {
+		t.Fatalf("credential summary = %#v", summary)
+	}
+	if summary.Reasons["quota"] != 1 || summary.Reasons["auth"] != 1 {
+		t.Fatalf("reasons = %#v", summary.Reasons)
 	}
 }
 
@@ -114,6 +154,15 @@ func TestPanelRouteIsEmbedded(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "恢复验证") || strings.Contains(recorder.Body.String(), "accounts.innerHTML") {
 		t.Fatal("account actions or safe table rendering missing")
+	}
+	for _, marker := range []string{
+		`id="totalAccounts"`, `id="totalRequests"`, `id="activeLeases"`,
+		`id="refreshableAccounts"`, `id="quotaUsage"`, `id="reasonBars"`,
+		`id="lastUpdated"`, "renderSummary", "setInterval(refresh,15000)",
+	} {
+		if !strings.Contains(recorder.Body.String(), marker) {
+			t.Fatalf("panel statistics marker missing: %s", marker)
+		}
 	}
 }
 
