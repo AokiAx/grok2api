@@ -15,6 +15,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/compat"
+	"github.com/AokiAx/grok2api/internal/register"
 	"github.com/AokiAx/grok2api/internal/service"
 )
 
@@ -43,6 +44,7 @@ type Server struct {
 	defaultModel string
 	admin        AdminService
 	adminKey     string
+	registerJobs RegisterJobService
 	handler      http.Handler
 }
 
@@ -65,6 +67,19 @@ func WithAdmin(service AdminService, key string) Option {
 	return func(server *Server) {
 		server.admin = service
 		server.adminKey = key
+	}
+}
+
+type RegisterJobService interface {
+	Start(register.RunConfig) (string, error)
+	Stop() error
+	Status() register.JobStatus
+	Health(context.Context) register.HealthReport
+}
+
+func WithRegisterJobs(service RegisterJobService) Option {
+	return func(server *Server) {
+		server.registerJobs = service
 	}
 }
 
@@ -95,6 +110,12 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		mux.HandleFunc("POST /admin/api/cli-accounts/{id}/recover", server.adminRecover)
 		mux.HandleFunc("POST /admin/api/accounts/import/preview", server.adminImportPreview)
 		mux.HandleFunc("POST /admin/api/accounts/import", server.adminImport)
+	}
+	if server.registerJobs != nil {
+		mux.HandleFunc("GET /admin/api/register/status", server.registerStatus)
+		mux.HandleFunc("POST /admin/api/register/start", server.registerStart)
+		mux.HandleFunc("POST /admin/api/register/stop", server.registerStop)
+		mux.HandleFunc("GET /admin/api/register/health", server.registerHealth)
 	}
 	server.handler = mux
 	return server
@@ -251,6 +272,84 @@ func (s *Server) handleAdminImport(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+
+func (s *Server) registerStatus(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	if s.registerJobs == nil {
+		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, s.registerJobs.Status())
+}
+
+func (s *Server) registerHealth(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	if s.registerJobs == nil {
+		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, s.registerJobs.Health(request.Context()))
+}
+
+func (s *Server) registerStart(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	if s.registerJobs == nil {
+		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
+		return
+	}
+	var payload struct {
+		Count   int  `json:"count"`
+		Workers int  `json:"workers"`
+		DryRun  bool `json:"dry_run"`
+		Proxy   string `json:"proxy"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&payload)
+	jobID, err := s.registerJobs.Start(register.RunConfig{
+		Count:    payload.Count,
+		Workers:  payload.Workers,
+		DryRun:   payload.DryRun,
+		ProxyURL: payload.Proxy,
+	})
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, register.ErrJobRunning) {
+			status = http.StatusConflict
+		}
+		writeOpenAIError(writer, status, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"job_id": jobID, "started": true})
+}
+
+func (s *Server) registerStop(writer http.ResponseWriter, request *http.Request) {
+	if !authorizedWithKey(request, s.adminKey) {
+		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+		return
+	}
+	if s.registerJobs == nil {
+		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
+		return
+	}
+	if err := s.registerJobs.Stop(); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, register.ErrNoJob) {
+			status = http.StatusConflict
+		}
+		writeOpenAIError(writer, status, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"stopped": true})
 }
 
 func (s *Server) Handler() http.Handler {

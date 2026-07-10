@@ -5,7 +5,7 @@
 - `ready`：已验证可用，按简单环形轮询选号，不评分、不排序。
 - `unavailable`：暂不可用，并记录 `quota`、`auth`、`cooldown`、`validating` 或 `disabled` 原因。
 
-上游是 `cli-chat-proxy.grok.com`，不是 grok.com 网页 SSO。项目只支持导入和验证用户已授权的 CLI 凭证，不包含批量自动注册逻辑。
+上游是 `cli-chat-proxy.grok.com`，不是 grok.com 网页 SSO。支持导入已有 CLI 凭证，也支持在服务内/CLI 批量自动注册并直接写入号池（需邮箱与 Turnstile 求解器）。请仅使用你有权操作的账号资源，并遵守上游服务条款。
 
 ## 当前架构
 
@@ -59,6 +59,49 @@ go build -trimpath -o grok2api.exe ./cmd/grok2api
 ./grok2api.exe status --config config.json
 ./grok2api.exe serve --config config.json
 ```
+
+
+
+## 自动注册（服务内 + CLI）
+
+注册机已融入 Go 服务，成功后经 `admin.Import` 校验并写入 `data/grok2api.db`，运行中的 Ready 池会热更新。
+
+### 面板
+
+打开 `/panel` → **账号注册**：
+
+1. 填写数量/并发（默认 1）
+2. 可选 Dry-run
+3. 开始/停止，查看日志与健康摘要（solver / mail / proxy）
+
+依赖：
+
+- `cfmail_accounts` 或 `email_provider=mailtm`
+- Turnstile：`turnstile_solver=auto|local|capmonster`，本地默认 `http://127.0.0.1:5072`
+- 可选 `proxy` / `proxy_pool`（可指向 Privoxy 或 WARP 出口 HTTP 代理）
+- FlareSolverr **可选**，用于 CF 挑战辅助，**不能替代** Turnstile token
+
+### CLI
+
+```powershell
+go run ./cmd/grok2api register --config config.json --count 3 --workers 1
+go run ./cmd/grok2api mint --config config.json --sso-cookie "..." --email user@example.com
+```
+
+### 可选防封组件
+
+```powershell
+# 仅 API
+docker compose up -d
+
+# 附加本地 Privoxy
+docker compose --profile proxy up -d
+
+# 附加 FlareSolverr
+docker compose --profile flaresolverr up -d
+```
+
+应用只认代理 URL 与 solver URL，不强制绑定 WARP/Privoxy/FlareSolverr。
 
 ## 导入账号
 
@@ -115,6 +158,10 @@ go build -trimpath -o grok2api.exe ./cmd/grok2api
 | POST | `/admin/api/accounts/import` | 验证并导入 |
 | DELETE | `/admin/api/cli-accounts/{id}` | 删除账号 |
 | POST | `/admin/api/cli-accounts/{id}/recover` | 验证并尝试恢复账号 |
+| GET | `/admin/api/register/status` | 注册任务状态与日志 |
+| POST | `/admin/api/register/start` | 启动批注册 |
+| POST | `/admin/api/register/stop` | 停止批注册 |
+| GET | `/admin/api/register/health` | 注册依赖健康摘要 |
 
 调用示例：
 

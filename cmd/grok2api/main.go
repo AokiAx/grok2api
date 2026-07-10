@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/api"
 	"github.com/AokiAx/grok2api/internal/config"
+	"github.com/AokiAx/grok2api/internal/register"
 	"github.com/AokiAx/grok2api/internal/repository"
 	runtimeworker "github.com/AokiAx/grok2api/internal/runtime"
 	"github.com/AokiAx/grok2api/internal/scheduler"
@@ -46,6 +48,12 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(output)
 	configPath := flags.String("config", "config.json", "configuration file")
+	count := flags.Int("count", 0, "register account count")
+	workers := flags.Int("workers", 0, "register worker concurrency")
+	dryRun := flags.Bool("dry-run", false, "register without persisting accounts")
+	proxyURL := flags.String("proxy", "", "override proxy URL for register/mint")
+	ssoCookie := flags.String("sso-cookie", "", "SSO cookie for mint command")
+	email := flags.String("email", "", "email metadata for mint command")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -71,6 +79,10 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 		return printStatus(ctx, output, repo)
 	case "serve":
 		return serve(ctx, settings, repo)
+	case "register":
+		return runRegister(ctx, output, settings, repo, *count, *workers, *dryRun, *proxyURL)
+	case "mint":
+		return runMint(ctx, output, settings, repo, *ssoCookie, *email, *dryRun)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -142,12 +154,15 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 	)
 	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
+	registerPipeline := register.NewPipeline(settings, adminService)
+	registerJobs := register.NewJobManager(settings, registerPipeline)
 	handler := api.NewServer(
 		gateway,
 		poolStatusProvider{scheduler: pool},
 		settings.APIKey,
 		api.WithDefaultModel(settings.DefaultModel),
 		api.WithAdmin(adminService, settings.AdminKey()),
+		api.WithRegisterJobs(registerJobs),
 	).Handler()
 	server := &http.Server{
 		Addr:              settings.Address(),
@@ -207,4 +222,60 @@ func (p poolStatusProvider) PoolStatus() api.PoolStatus {
 		Unavailable: unavailable,
 		Reasons:     converted,
 	}
+}
+
+
+func runRegister(
+	ctx context.Context,
+	output io.Writer,
+	settings config.Config,
+	repo *repository.SQLite,
+	count, workers int,
+	dryRun bool,
+	proxyURL string,
+) error {
+	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
+	upstreamClient := upstream.NewClient(settings.ProxyBaseURL, settings.ClientVersion, httpClient)
+	adminService := admin.NewService(repo, upstreamClient)
+	pipeline := register.NewPipeline(settings, adminService)
+	summary, err := pipeline.Run(ctx, register.RunConfig{
+		Count:    count,
+		Workers:  workers,
+		DryRun:   dryRun,
+		ProxyURL: proxyURL,
+	}, func(message string) {
+		slog.Info("register", "event", message)
+	})
+	if encodeErr := json.NewEncoder(output).Encode(summary); encodeErr != nil {
+		return encodeErr
+	}
+	if err != nil {
+		return err
+	}
+	if summary.Failed > 0 {
+		return fmt.Errorf("register finished with %d failures", summary.Failed)
+	}
+	return nil
+}
+
+func runMint(
+	ctx context.Context,
+	output io.Writer,
+	settings config.Config,
+	repo *repository.SQLite,
+	ssoCookie, email string,
+	dryRun bool,
+) error {
+	if strings.TrimSpace(ssoCookie) == "" {
+		return fmt.Errorf("mint requires --sso-cookie")
+	}
+	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
+	upstreamClient := upstream.NewClient(settings.ProxyBaseURL, settings.ClientVersion, httpClient)
+	adminService := admin.NewService(repo, upstreamClient)
+	pipeline := register.NewPipeline(settings, adminService)
+	outcome, err := pipeline.MintSSO(ctx, ssoCookie, email, dryRun)
+	if encodeErr := json.NewEncoder(output).Encode(outcome); encodeErr != nil {
+		return encodeErr
+	}
+	return err
 }

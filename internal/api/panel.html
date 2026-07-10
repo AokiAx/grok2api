@@ -53,6 +53,30 @@
     <div class="table-wrap"><table><thead><tr><th>账号</th><th>状态</th><th>原因 / 错误</th><th>请求</th><th>并发</th><th>额度</th><th>重试时间</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
   </section>
 
+  <section class="panel import-panel" id="registerPanel">
+    <div class="panel-head"><h2>账号注册</h2><span class="panel-note" id="registerHealthNote">服务内批注册 · 成功后直写号池</span></div>
+    <div class="import-grid">
+      <div class="stack">
+        <label class="field-label" for="regCount">数量</label>
+        <input id="regCount" type="number" min="1" value="1">
+        <label class="field-label" for="regWorkers">并发</label>
+        <input id="regWorkers" type="number" min="1" value="1">
+        <label class="field-label"><input id="regDryRun" type="checkbox"> Dry-run（不入库）</label>
+        <div class="button-row">
+          <button class="primary" id="registerStartButton">开始注册</button>
+          <button class="danger" id="registerStopButton">停止</button>
+          <button id="registerRefreshButton">刷新状态</button>
+        </div>
+      </div>
+      <div>
+        <div class="field-label">任务状态</div>
+        <div class="panel-note" id="registerState">idle</div>
+        <div class="metric-note" id="registerProgress">requested 0 · ok 0 · failed 0</div>
+        <pre id="registerLogs">等待注册任务</pre>
+      </div>
+    </div>
+  </section>
+
   <section class="panel import-panel">
     <div class="panel-head"><h2>导入授权凭证</h2><span class="panel-note">先预览，再写入</span></div>
     <div class="import-grid">
@@ -106,6 +130,51 @@
     async function accountAction(id,action){if(action==='delete'&&!confirm(`确认删除 ${id}？`))return;const path=`/admin/api/cli-accounts/${encodeURIComponent(id)}${action==='recover'?'/recover':''}`;const response=await fetch(path,{method:action==='recover'?'POST':'DELETE',headers:auth()});const data=await response.json();byId('output').textContent=JSON.stringify(data,null,2);await refresh()}
     async function send(preview){try{let parsed=JSON.parse(byId('input').value);if(!Array.isArray(parsed))parsed=parsed.accounts||[parsed];const path=preview?'/admin/api/accounts/import/preview':'/admin/api/accounts/import';const response=await fetch(path,{method:'POST',headers:{...auth(),'Content-Type':'application/json'},body:JSON.stringify({accounts:parsed})});byId('output').textContent=JSON.stringify(await response.json(),null,2);await refresh()}catch(error){byId('output').textContent=String(error.message||error)}}
     byId('previewButton').onclick=()=>send(true);byId('importButton').onclick=()=>send(false);byId('search').oninput=renderAccounts;byId('poolFilter').onchange=renderAccounts;byId('key').onchange=refresh;
-    refresh();setInterval(refresh,15000);
+
+    async function refreshRegister(){
+      try{
+        const [statusResp, healthResp]=await Promise.all([
+          fetch('/admin/api/register/status',{headers:auth()}),
+          fetch('/admin/api/register/health',{headers:auth()}),
+        ]);
+        if(!statusResp.ok){throw new Error(statusResp.status===401?'请输入正确的面板密码':`register status ${statusResp.status}`);}
+        const status=await statusResp.json();
+        const health=healthResp.ok?await healthResp.json():{};
+        byId('registerState').textContent=status.state||'idle';
+        byId('registerProgress').textContent=`requested ${status.requested||0} · ok ${status.ok||0} · failed ${status.failed||0}`;
+        const logs=(status.logs||[]).slice(-30).join('\n') || '暂无日志';
+        byId('registerLogs').textContent=logs;
+        if(health){
+          byId('registerHealthNote').textContent=`solver=${health.turnstile||'-'} · mail=${health.email||'-'} · proxy=${health.proxy||'-'} · flare=${health.flaresolverr||'-'}`;
+        }
+      }catch(error){
+        byId('registerState').textContent='error';
+        byId('registerLogs').textContent=String(error.message||error);
+      }
+    }
+    async function startRegister(){
+      const count=Number(byId('regCount').value||1);
+      const workers=Number(byId('regWorkers').value||1);
+      if(count>20 && !confirm(`确认启动注册 ${count} 个账号？`))return;
+      const response=await fetch('/admin/api/register/start',{
+        method:'POST',
+        headers:{...auth(),'Content-Type':'application/json'},
+        body:JSON.stringify({count,workers,dry_run:byId('regDryRun').checked})
+      });
+      const data=await response.json();
+      byId('output').textContent=JSON.stringify(data,null,2);
+      await refreshRegister();
+    }
+    async function stopRegister(){
+      const response=await fetch('/admin/api/register/stop',{method:'POST',headers:auth()});
+      const data=await response.json();
+      byId('output').textContent=JSON.stringify(data,null,2);
+      await refreshRegister();
+    }
+    byId('registerStartButton').onclick=startRegister;
+    byId('registerStopButton').onclick=stopRegister;
+    byId('registerRefreshButton').onclick=refreshRegister;
+
+    refresh();refreshRegister();setInterval(refresh,15000);setInterval(refreshRegister,5000);
   </script>
 </main></body></html>
