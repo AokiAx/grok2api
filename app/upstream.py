@@ -47,10 +47,14 @@ class UpstreamClient:
         return headers
 
     async def _token_pair(
-        self, force_refresh: bool = False
+        self,
+        force_refresh: bool = False,
+        exclude_ids: set[str] | None = None,
     ) -> tuple[str, str | None]:
         return await asyncio.to_thread(
-            self.store.get_access_token_with_account, force_refresh
+            self.store.get_access_token_with_account,
+            force_refresh,
+            exclude_ids,
         )
 
     def _release(self, account_id: str | None) -> None:
@@ -62,6 +66,31 @@ class UpstreamClient:
             cli_pool.release(account_id)
         except Exception:
             log.debug("release failed for %s", account_id, exc_info=True)
+
+    def _report_success(self, account_id: str | None) -> None:
+        if not account_id:
+            return
+        try:
+            from .cli_pool import cli_pool
+
+            cli_pool.report_success(account_id)
+        except Exception:
+            log.debug("report_success failed for %s", account_id, exc_info=True)
+
+    def _report_failure(
+        self,
+        account_id: str | None,
+        *,
+        cooldown_secs: float,
+    ) -> None:
+        if not account_id:
+            return
+        try:
+            from .cli_pool import cli_pool
+
+            cli_pool.report_failure(account_id, cooldown_secs=cooldown_secs)
+        except Exception:
+            log.debug("report_failure failed for %s", account_id, exc_info=True)
 
     def _pool_max_tries(self) -> int:
         try:
@@ -96,6 +125,7 @@ class UpstreamClient:
         max_tries = self._pool_max_tries()
         last_code = 0
         held_id: str | None = None
+        attempted_ids: set[str] = set()
 
         try:
             for attempt in range(max_tries):
@@ -105,7 +135,10 @@ class UpstreamClient:
                     held_id = None
 
                 force = attempt > 0 and last_code in (401, 403)
-                token, account_id = await self._token_pair(force_refresh=force)
+                token, account_id = await self._token_pair(
+                    force_refresh=force,
+                    exclude_ids=attempted_ids,
+                )
                 held_id = account_id
 
                 resp = await once(token)
@@ -127,6 +160,7 @@ class UpstreamClient:
                 await resp.aclose()
 
                 if account_id:
+                    attempted_ids.add(account_id)
                     try:
                         from .cli_pool import cli_pool
 
@@ -158,17 +192,10 @@ class UpstreamClient:
                     except Exception:
                         log.debug("report_failure failed", exc_info=True)
 
-            # last attempt: one more shot, return whatever we get
-            if held_id:
-                self._release(held_id)
-                held_id = None
-            token, account_id = await self._token_pair(
-                force_refresh=(last_code in (401, 403))
+            raise RuntimeError(
+                f"all eligible CLI accounts failed for {path}; "
+                f"attempted={len(attempted_ids)} last_status={last_code}"
             )
-            held_id = account_id
-            resp = await once(token)
-            out_id, held_id = held_id, None
-            return resp, out_id
         except Exception:
             if held_id:
                 self._release(held_id)
@@ -183,6 +210,7 @@ class UpstreamClient:
         )
         try:
             r.raise_for_status()
+            self._report_success(acc)
             return r.json()
         finally:
             await r.aclose()
@@ -197,6 +225,7 @@ class UpstreamClient:
         )
         try:
             r.raise_for_status()
+            self._report_success(acc)
             return r.json()
         finally:
             await r.aclose()
@@ -223,6 +252,7 @@ class UpstreamClient:
                     request=resp.request,
                     response=resp,
                 )
+            self._report_success(acc)
             return resp
         except Exception:
             await resp.aclose()
@@ -276,7 +306,13 @@ class UpstreamClient:
                     request=resp.request,
                     response=resp,
                 )
-            return resp.json()
+            payload = resp.json()
+            self._report_success(acc)
+            return payload
+        except Exception:
+            if resp.status_code not in _ROTATE_STATUSES:
+                self._report_failure(acc, cooldown_secs=30)
+            raise
         finally:
             await resp.aclose()
             self._release(acc)
@@ -317,6 +353,11 @@ class UpstreamClient:
             async for chunk in resp.aiter_bytes():
                 if chunk:
                     yield chunk
+            self._report_success(release_account)
+        except Exception:
+            if resp.status_code not in _ROTATE_STATUSES:
+                self._report_failure(release_account, cooldown_secs=30)
+            raise
         finally:
             await resp.aclose()
             self._release(release_account)

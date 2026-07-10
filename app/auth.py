@@ -212,18 +212,20 @@ class AuthStore:
         return token
 
     def get_access_token_with_account(
-        self, force_refresh: bool = False
+        self,
+        force_refresh: bool = False,
+        exclude_ids: set[str] | None = None,
     ) -> tuple[str, str | None]:
         """Return ``(access_token, cli_account_id|None)`` for pool-aware retries."""
         # Prefer multi-account CLI pool when enabled and non-empty
         if getattr(self.cfg, "cli_pool_rotate", True):
-            try:
-                from .cli_pool import cli_pool
+            from .cli_pool import cli_pool
 
-                if cli_pool.count(enabled_only=True) > 0:
-                    return self._token_from_cli_pool(force_refresh=force_refresh)
-            except Exception:
-                log.debug("cli pool token path failed; fall back auth.json", exc_info=True)
+            if cli_pool.count(enabled_only=False) > 0:
+                return self._token_from_cli_pool(
+                    force_refresh=force_refresh,
+                    exclude_ids=exclude_ids,
+                )
 
         with self._lock:
             cred = self._load(force=True)
@@ -242,11 +244,13 @@ class AuthStore:
             return cred.key, None
 
     def _token_from_cli_pool(
-        self, force_refresh: bool = False
+        self,
+        force_refresh: bool = False,
+        exclude_ids: set[str] | None = None,
     ) -> tuple[str, str]:
         from .cli_pool import cli_pool
 
-        acc = cli_pool.acquire(wait=True)
+        acc = cli_pool.acquire(wait=True, exclude_ids=exclude_ids)
         if acc is None:
             raise RuntimeError(
                 "CLI account pool empty or all accounts at concurrency limit / cooldown"

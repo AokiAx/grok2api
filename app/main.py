@@ -427,9 +427,7 @@ async def anthropic_messages(
     _: None = Depends(require_local_key),
 ) -> Any:
     from .anthropic_compat import (
-        anthropic_stream_prelude,
         anthropic_to_openai_body,
-        openai_sse_to_anthropic_events,
         openai_to_anthropic_message,
     )
 
@@ -441,15 +439,22 @@ async def anthropic_messages(
     stream = bool(oai.get("stream"))
 
     if stream:
+        from .anthropic_compat import AnthropicStreamConverter
+
         result = await upstream.chat_completions(oai)
         assert isinstance(result, AsyncIterator)
 
         async def gen() -> AsyncIterator[bytes]:
-            for ev in anthropic_stream_prelude(str(oai["model"])):
-                yield (
+            converter = AnthropicStreamConverter(str(oai["model"]))
+
+            def encode_event(ev: dict[str, Any]) -> bytes:
+                return (
                     f"event: {ev['type']}\ndata: "
                     f"{json.dumps(ev, ensure_ascii=False)}\n\n"
                 ).encode()
+
+            for ev in converter.prelude():
+                yield encode_event(ev)
             async for raw in result:
                 text = raw.decode("utf-8", "replace")
                 for line in text.splitlines():
@@ -458,20 +463,17 @@ async def anthropic_messages(
                         continue
                     data_s = line[5:].strip()
                     if data_s == "[DONE]":
-                        yield (
-                            b"event: message_stop\n"
-                            b'data: {"type":"message_stop"}\n\n'
-                        )
+                        for ev in converter.finish():
+                            yield encode_event(ev)
                         return
                     try:
                         chunk = json.loads(data_s)
                     except json.JSONDecodeError:
                         continue
-                    for ev in openai_sse_to_anthropic_events(chunk):
-                        yield (
-                            f"event: {ev['type']}\ndata: "
-                            f"{json.dumps(ev, ensure_ascii=False)}\n\n"
-                        ).encode()
+                    for ev in converter.feed(chunk):
+                        yield encode_event(ev)
+            for ev in converter.finish():
+                yield encode_event(ev)
 
         return StreamingResponse(
             gen(),
