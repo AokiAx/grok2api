@@ -31,19 +31,32 @@ var responsesAllowedFields = map[string]struct{}{
 	"reasoning":               {},
 }
 
+// codexRejectedFields are known client extras that Grok rejects with
+// "Argument not supported: …" (Codex / OpenAI Responses clients).
+var codexRejectedFields = []string{
+	"external_web_access",
+	"prompt_cache_key",
+	"safety_identifier",
+	"service_tier",
+	"store",
+	"background",
+	"parallel_tool_calls",
+	"previous_response_id",
+	"truncation",
+	"user",
+	"metadata",
+	"tool_resources",
+	"max_tool_calls",
+	"prompt_cache_retention",
+}
+
 // StripUnknownResponsesFields removes fields not in the Responses whitelist.
 func StripUnknownResponsesFields(payload []byte) ([]byte, error) {
 	var input map[string]any
 	if err := json.Unmarshal(payload, &input); err != nil {
 		return nil, fmt.Errorf("decode responses request: %w", err)
 	}
-	changed := false
-	for key := range input {
-		if _, ok := responsesAllowedFields[key]; !ok {
-			delete(input, key)
-			changed = true
-		}
-	}
+	changed := sanitizeResponsesMap(input)
 	if !changed {
 		return payload, nil
 	}
@@ -52,6 +65,37 @@ func StripUnknownResponsesFields(payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode responses request: %w", err)
 	}
 	return encoded, nil
+}
+
+// sanitizeResponsesMap mutates input in place: maps client web-access flags onto
+// backend_search, then drops every non-whitelisted field.
+func sanitizeResponsesMap(input map[string]any) bool {
+	changed := false
+
+	// Codex / OpenAI clients send external_web_access; Grok uses backend_search.
+	if raw, ok := input["external_web_access"]; ok {
+		if _, exists := input["backend_search"]; !exists {
+			input["backend_search"] = truthy(raw)
+			changed = true
+		}
+		delete(input, "external_web_access")
+		changed = true
+	}
+
+	for _, key := range codexRejectedFields {
+		if _, ok := input[key]; ok {
+			delete(input, key)
+			changed = true
+		}
+	}
+
+	for key := range input {
+		if _, ok := responsesAllowedFields[key]; !ok {
+			delete(input, key)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // EnsureBackendSearch sets backend_search when the model supports native search

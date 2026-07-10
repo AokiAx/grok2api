@@ -113,6 +113,7 @@ func (c *Catalog) EnrichModelMap(item map[string]any) map[string]any {
 	}
 	info, ok := c.Get(id)
 	if !ok {
+		applyCodexModelDefaults(item, 128000, false, false)
 		return item
 	}
 	if _, exists := item["api_backend"]; !exists {
@@ -133,5 +134,58 @@ func (c *Catalog) EnrichModelMap(item map[string]any) map[string]any {
 	if name, _ := item["name"].(string); name == "" && info.Name != "" {
 		item["name"] = info.Name
 	}
+	applyCodexModelDefaults(item, info.ContextWindow, info.SupportsReasoningEffort, info.SupportsBackendSearch)
 	return item
+}
+
+// applyCodexModelDefaults fills fields Codex looks up in model metadata.
+// Missing metadata causes: "Model metadata for grok-4.5 not found".
+func applyCodexModelDefaults(item map[string]any, contextWindow int, reasoning, search bool) {
+	if contextWindow <= 0 {
+		contextWindow = 128000
+	}
+	if _, ok := item["context_window"]; !ok {
+		item["context_window"] = contextWindow
+	}
+	if _, ok := item["max_context_window"]; !ok {
+		item["max_context_window"] = contextWindow
+	}
+	if _, ok := item["context_length"]; !ok {
+		item["context_length"] = contextWindow
+	}
+	if _, ok := item["max_completion_tokens"]; !ok {
+		maxOut := contextWindow / 4
+		if maxOut > 128000 {
+			maxOut = 128000
+		}
+		if maxOut < 8192 {
+			maxOut = 8192
+		}
+		item["max_completion_tokens"] = maxOut
+	}
+	if _, ok := item["supports_function_calling"]; !ok {
+		item["supports_function_calling"] = true
+	}
+	if _, ok := item["supports_tools"]; !ok {
+		item["supports_tools"] = true
+	}
+	if _, ok := item["supports_parallel_function_calling"]; !ok {
+		item["supports_parallel_function_calling"] = true
+	}
+	if _, ok := item["supports_streaming"]; !ok {
+		item["supports_streaming"] = true
+	}
+	if reasoning {
+		if _, ok := item["supports_reasoning"]; !ok {
+			item["supports_reasoning"] = true
+		}
+	}
+	if search {
+		if _, ok := item["supports_web_search"]; !ok {
+			item["supports_web_search"] = true
+		}
+	}
+	if _, ok := item["supported_endpoints"]; !ok {
+		item["supported_endpoints"] = []string{"chat_completions", "responses"}
+	}
 }

@@ -51,7 +51,7 @@ func TestNormalizeResponsesRequestMapsChatShape(t *testing.T) {
 }
 
 func TestFinalizeResponsesUpstreamForcesStreamAndStrips(t *testing.T) {
-	body := []byte(`{"model":"grok-4.5","stream":false,"input":[],"external_web_access":true,"metadata":{"x":1}}`)
+	body := []byte(`{"model":"grok-4.5","stream":false,"input":[],"external_web_access":true,"metadata":{"x":1},"store":false,"parallel_tool_calls":false,"prompt_cache_key":"abc"}`)
 	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: true})
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
@@ -63,14 +63,32 @@ func TestFinalizeResponsesUpstreamForcesStreamAndStrips(t *testing.T) {
 	if payload["stream"] != true {
 		t.Fatalf("stream=%#v", payload["stream"])
 	}
+	// external_web_access is mapped onto backend_search, then dropped.
 	if payload["backend_search"] != true {
 		t.Fatalf("backend_search=%#v", payload["backend_search"])
 	}
-	if _, ok := payload["external_web_access"]; ok {
-		t.Fatalf("external_web_access should be stripped: %#v", payload)
+	for _, key := range []string{"external_web_access", "metadata", "store", "parallel_tool_calls", "prompt_cache_key"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("%s should be stripped: %#v", key, payload)
+		}
 	}
-	if _, ok := payload["metadata"]; ok {
-		t.Fatalf("metadata should be stripped: %#v", payload)
+}
+
+func TestFinalizeMapsExternalWebAccessWithoutDefaultSearch(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","stream":false,"input":"hi","external_web_access":false}`)
+	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: false})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := payload["external_web_access"]; ok {
+		t.Fatalf("external_web_access still present: %#v", payload)
+	}
+	if payload["backend_search"] != false {
+		t.Fatalf("backend_search=%#v want false from external_web_access", payload["backend_search"])
 	}
 }
 

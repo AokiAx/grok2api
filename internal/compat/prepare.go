@@ -119,14 +119,18 @@ func PrepareResponsesFromAnthropic(payload []byte, defaultModel string) ([]byte,
 //  3. force stream:true so the gateway can always read SSE (non-stream clients
 //     are aggregated after the fact)
 func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error) {
-	body := payload
-	if ensured, err := EnsureBackendSearch(body, hints.SupportsBackendSearch); err == nil {
+	// Strip first so client extras (external_web_access, store, …) never reach
+	// EnsureBackendSearch / upstream. Map external_web_access → backend_search inside strip.
+	body, err := StripUnknownResponsesFields(payload)
+	if err != nil {
+		return nil, err
+	}
+	if ensured, ensureErr := EnsureBackendSearch(body, hints.SupportsBackendSearch); ensureErr == nil {
 		body = ensured
 	}
-	if stripped, err := StripUnknownResponsesFields(body); err == nil {
+	// Second pass in case EnsureBackendSearch reintroduced nothing unexpected.
+	if stripped, stripErr := StripUnknownResponsesFields(body); stripErr == nil {
 		body = stripped
-	} else {
-		return nil, err
 	}
 	forced, err := SetJSONStreamFlag(body, true)
 	if err != nil {
