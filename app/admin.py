@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .cli_pool import cli_pool
 from .config import settings
+from .services.account_importer import AccountImporter
 from .usage import usage_logger
 
 router = APIRouter(tags=["admin"])
@@ -57,6 +58,11 @@ class CliDeleteBody(BaseModel):
     id: str = Field(..., description="CLI account id or email")
 
 
+class CliBulkImportBody(BaseModel):
+    accounts: list[dict[str, Any]] = Field(default_factory=list)
+    conflict_policy: Literal["merge", "replace", "skip"] = "merge"
+
+
 @router.get("/admin/api/cli-accounts")
 @router.get("/admin/api/tokens")
 async def list_cli_accounts(_: None = Depends(require_admin)) -> Any:
@@ -75,20 +81,47 @@ async def add_cli_account(
 ) -> Any:
     if not body.access_token.strip():
         raise HTTPException(status_code=400, detail="access_token required")
-    acc = cli_pool.upsert_from_tokens(
-        access_token=body.access_token.strip(),
-        refresh_token=body.refresh_token,
-        expires_in=body.expires_in,
-        email=body.email,
-        password=body.password,
-        note=body.note,
-        account_id=body.email or None,
+    importer = AccountImporter(cli_pool.repository)
+    result = importer.import_accounts(
+        [body.model_dump()],
+        conflict_policy="merge",
     )
+    cli_pool.reload()
+    item = result.items[0]
+    acc = cli_pool.get(item.account_id or "")
     return {
         "ok": True,
-        "account": acc.to_public(),
+        "account": acc.to_public() if acc else None,
         "usable": cli_pool.count(enabled_only=True),
     }
+
+
+def _run_bulk_import(body: CliBulkImportBody, *, dry_run: bool) -> dict[str, Any]:
+    importer = AccountImporter(cli_pool.repository)
+    result = importer.import_accounts(
+        body.accounts,
+        dry_run=dry_run,
+        conflict_policy=body.conflict_policy,
+    )
+    if result.applied:
+        cli_pool.reload()
+    return result.to_dict()
+
+
+@router.post("/admin/api/accounts/import")
+async def import_cli_accounts(
+    body: CliBulkImportBody,
+    _: None = Depends(require_admin),
+) -> Any:
+    return _run_bulk_import(body, dry_run=False)
+
+
+@router.post("/admin/api/accounts/import/preview")
+async def preview_cli_accounts(
+    body: CliBulkImportBody,
+    _: None = Depends(require_admin),
+) -> Any:
+    return _run_bulk_import(body, dry_run=True)
 
 
 @router.post("/admin/api/cli-accounts/delete")
@@ -102,7 +135,7 @@ async def delete_cli_account(
 
 @router.post("/admin/api/cli-accounts/reload")
 async def reload_cli_accounts(_: None = Depends(require_admin)) -> Any:
-    """Reload pool from data/cli_accounts.json (after external register)."""
+    """Reload the in-memory scheduler from the durable account repository."""
     total = cli_pool.reload()
     return {
         "ok": True,

@@ -19,7 +19,7 @@ config.json
 data/
 
 # Private: auto-registration stack (kept local only)
-register/
+/register/
 scripts/start-turnstile.ps1
 
 # Editor / OS
@@ -30,3 +30,8 @@ Thumbs.db
 
 auth.json
 
+# Register / token artifacts
+register/output/
+auth_from_tokens.json
+tokens-*.json
+**/grok_tokens/

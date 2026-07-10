@@ -116,5 +116,5 @@ def test_cli_pool_does_not_write_home_auth_json(tmp_path: Path):
         expires_in=100,
         email="b@test.com",
     )
-    assert (data_dir / "cli_accounts.json").exists()
+    assert (data_dir / "grok2api.db").exists()
     assert not auth.exists()

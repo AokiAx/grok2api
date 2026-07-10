@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/**
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Verify formatting
+        run: test -z "$(gofmt -l cmd internal)"
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        run: go test -race ./...
+
+      - name: Measure internal package coverage
+        # Register protocol clients (mail/mint/turnstile/registrar) are integration-heavy.
+        # Keep unit coverage gate on the runtime core packages.
+        run: |
+          go test -coverprofile=coverage.out             ./internal/account             ./internal/admin             ./internal/api             ./internal/compat             ./internal/config             ./internal/repository             ./internal/runtime             ./internal/scheduler             ./internal/service             ./internal/upstream             ./internal/register/settings             ./internal/register/codec             ./internal/register/proxy
+
+      - name: Enforce 80 percent coverage
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v total="$total" 'BEGIN { if (total < 80) exit 1 }'
+
+      - name: Build
+        run: go build ./cmd/grok2api
+
+  python-legacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest -q

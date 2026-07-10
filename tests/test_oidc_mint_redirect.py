@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.oidc_mint import _extract_oauth_code_from_location, _abs_url
+from app.oidc_mint import _abs_url, _extract_oauth_code_from_location
 
 
 def test_extract_code_from_loopback():

@@ -1,0 +1,133 @@
+name: Deploy Go canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: GHCR image tag to deploy
+        required: true
+        default: main
+      canary_port:
+        description: Canary host port
+        required: true
+        default: "8788"
+      promote:
+        description: Promote canary to production port 8787
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.PRODUCTION_SSH_KEY }}
+
+      - name: Trust production host key
+        env:
+          HOST: ${{ secrets.PRODUCTION_HOST }}
+        run: ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Pull digest and run canary
+        env:
+          HOST: ${{ secrets.PRODUCTION_HOST }}
+          USER: ${{ secrets.PRODUCTION_USER }}
+          READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          IMAGE: ghcr.io/aokiax/grok2api:${{ inputs.image_tag }}
+          CANARY_PORT: ${{ inputs.canary_port }}
+        run: |
+          printf '%s' "$READ_TOKEN" | ssh "$USER@$HOST" "docker login ghcr.io -u aokiax --password-stdin"
+          ssh "$USER@$HOST" "IMAGE='$IMAGE' CANARY_PORT='$CANARY_PORT' bash -s" <<'REMOTE'
+          set -euo pipefail
+          root=/opt/grok2api
+          stamp=$(date -u +%Y%m%d-%H%M%S)
+          mkdir -p "$root/backups/$stamp" "$root/go-canary/data"
+          cp -a "$root/config.json" "$root/backups/$stamp/config.json"
+          cp -a "$root/data/." "$root/backups/$stamp/data/"
+          rm -rf "$root/go-canary/data"
+          mkdir -p "$root/go-canary/data"
+          cp -a "$root/data/." "$root/go-canary/data/"
+          chown -R 65532:65532 "$root/go-canary/data"
+          docker pull "$IMAGE"
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")
+          printf '%s\n' "$digest" > "$root/go-canary/image-digest"
+          docker rm -f grok2api-go-canary 2>/dev/null || true
+          docker run -d --name grok2api-go-canary \
+            --restart unless-stopped \
+            -p "127.0.0.1:${CANARY_PORT}:8787" \
+            -e GROK2API_HOST=0.0.0.0 \
+            -v "$root/config.json:/app/config.json:ro" \
+            -v "$root/go-canary/data:/app/data" \
+            "$digest"
+          for attempt in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${CANARY_PORT}/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs --tail 100 grok2api-go-canary
+          exit 1
+          REMOTE
+
+      - name: Promote digest to production
+        if: inputs.promote
+        env:
+          HOST: ${{ secrets.PRODUCTION_HOST }}
+          USER: ${{ secrets.PRODUCTION_USER }}
+        run: |
+          ssh "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          root=/opt/grok2api
+          digest=$(cat "$root/go-canary/image-digest")
+          previous=$(docker inspect --format='{{.Image}}' grok2api-go 2>/dev/null || true)
+          printf '%s\n' "$previous" > "$root/.previous-go-image"
+          python_was_running=$(docker inspect --format='{{.State.Running}}' grok2api-cli 2>/dev/null || true)
+          chown -R 65532:65532 "$root/data"
+          docker stop grok2api-cli 2>/dev/null || true
+          docker rm -f grok2api-go 2>/dev/null || true
+
+          run_go() {
+            docker run -d --name grok2api-go \
+              --restart unless-stopped \
+              -p 0.0.0.0:8787:8787 \
+              -e GROK2API_HOST=0.0.0.0 \
+              -v "$root/config.json:/app/config.json:ro" \
+              -v "$root/data:/app/data" \
+              "$1"
+          }
+
+          run_go "$digest"
+
+          # Verify promoted service before accepting the production switch.
+          promoted=false
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              promoted=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$promoted" = true ]; then
+            exit 0
+          fi
+
+          docker logs --tail 100 grok2api-go || true
+          docker rm -f grok2api-go 2>/dev/null || true
+
+          # Rollback to Python container or the previous Go image.
+          if [ -n "$previous" ]; then
+            run_go "$previous"
+          elif [ "$python_was_running" = true ]; then
+            docker start grok2api-cli
+          fi
+          exit 1
+          REMOTE

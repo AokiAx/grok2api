@@ -195,8 +195,8 @@
               <button id="btnModels">查询 Models</button>
             </div>
             <p class="muted" style="margin:.85rem 0 0;font-size:.84rem;line-height:1.5">
-              凭证只在 <span class="mono">data/cli_accounts.json</span>。<br/>
-              面板可手动导入 access/refresh；外部写入后点「重载号池」。
+              主存储：<span class="mono">data/grok2api.db</span>。<br/>
+              旧 JSON 或外部注册输出可通过「重载号池」增量同步。
             </p>
           </div>
           <div class="card">
@@ -228,6 +228,24 @@
               <tbody id="accBody"></tbody>
             </table>
           </div>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h2>批量导入账号</h2>
+          <p class="muted" style="font-size:.84rem;line-height:1.5">
+            支持账号数组、单个账号对象，或含 <span class="mono">accounts</span> 数组的旧号池 JSON。
+            密码字段会被忽略，不进入 SQLite。
+          </p>
+          <textarea id="accountImportInput" spellcheck="false" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea>
+          <div class="row" style="margin-top:.65rem">
+            <select id="accountImportConflict">
+              <option value="merge">冲突时合并</option>
+              <option value="skip">冲突时跳过</option>
+              <option value="replace">冲突时替换</option>
+            </select>
+            <button id="btnPreviewImport">预览导入</button>
+            <button class="primary" id="btnApplyImport">确认导入</button>
+          </div>
+          <div class="out muted" id="accountImportOut" style="margin-top:.75rem;min-height:80px">等待输入 JSON</div>
         </div>
       </section>
 
@@ -460,6 +478,61 @@
         toast(`已重载号池：可用 ${r.usable ?? 0} / 总数 ${r.count ?? 0}`);
         await refresh();
       } catch (e) { toast(e.message || String(e)); }
+    };
+
+    function importPayload() {
+      const raw = $("accountImportInput").value.trim();
+      if (!raw) throw new Error("请输入账号 JSON");
+      const parsed = JSON.parse(raw);
+      let accounts;
+      if (Array.isArray(parsed)) accounts = parsed;
+      else if (Array.isArray(parsed?.accounts)) accounts = parsed.accounts;
+      else if (parsed && typeof parsed === "object") accounts = [parsed];
+      else throw new Error("JSON 必须是账号对象或数组");
+      return {
+        accounts,
+        conflict_policy: $("accountImportConflict").value,
+      };
+    }
+
+    function showImportResult(result) {
+      const summary = `added=${result.added || 0} updated=${result.updated || 0} skipped=${result.skipped || 0} invalid=${result.invalid || 0} applied=${!!result.applied}`;
+      const details = (result.items || []).map((item) =>
+        `#${item.index} ${item.status} ${item.account_id || ""} ${item.message || ""}`.trim()
+      );
+      $("accountImportOut").textContent = [summary, ...details].join("\n");
+    }
+
+    $("btnPreviewImport").onclick = async () => {
+      try {
+        const result = await api("/admin/api/accounts/import/preview", {
+          method: "POST",
+          body: JSON.stringify(importPayload()),
+        });
+        showImportResult(result);
+        toast("导入预览完成");
+      } catch (e) {
+        $("accountImportOut").textContent = e.message || String(e);
+        toast(e.message || String(e));
+      }
+    };
+
+    $("btnApplyImport").onclick = async () => {
+      try {
+        const payload = importPayload();
+        if (!confirm(`确认导入 ${payload.accounts.length} 条账号记录？`)) return;
+        const result = await api("/admin/api/accounts/import", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        showImportResult(result);
+        $("accountImportInput").value = "";
+        toast("账号导入完成");
+        await refresh();
+      } catch (e) {
+        $("accountImportOut").textContent = e.message || String(e);
+        toast(e.message || String(e));
+      }
     };
     $("btnBilling").onclick = async () => {
       $("billingBox").textContent = "查询中…";

@@ -1,17 +1,38 @@
 services:
   grok2api:
-    build: .
-    container_name: grok2api
+    image: ghcr.io/aokiax/grok2api:${GROK2API_IMAGE_TAG:-main}
+    container_name: grok2api-go
     ports:
       - "8787:8787"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
     environment:
-      - GROK2API_HOST=0.0.0.0
-      - GROK2API_PORT=8787
-      - GROK2API_MODE=cli
-      - GROK2API_API_KEY=${GROK2API_API_KEY:-}
-      - GROK2API_APP_KEY=${GROK2API_APP_KEY:-}
-      - GROK2API_PANEL_PASSWORD=${GROK2API_PANEL_PASSWORD:-}
+      GROK2API_HOST: 0.0.0.0
+      GROK2API_PORT: 8787
+      GROK2API_API_KEY: ${GROK2API_API_KEY:-}
+      GROK2API_APP_KEY: ${GROK2API_APP_KEY:-}
+      GROK2API_PANEL_PASSWORD: ${GROK2API_PANEL_PASSWORD:-}
+      GROK2API_PROXY: ${GROK2API_PROXY:-}
+      GROK2API_TURNSTILE_SOLVER_URL: ${GROK2API_TURNSTILE_SOLVER_URL:-http://host.docker.internal:5072}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  privoxy:
+    profiles: ["proxy"]
+    image: dockage/privoxy:latest
+    container_name: grok2api-privoxy
+    ports:
+      - "8118:8118"
+    restart: unless-stopped
+
+  flaresolverr:
+    profiles: ["flaresolverr"]
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: grok2api-flaresolverr
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "8191:8191"
     restart: unless-stopped

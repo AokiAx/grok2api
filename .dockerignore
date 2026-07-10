@@ -1,0 +1,15 @@
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.log
+.env
+config.json
+data/
+coverage*.out
+grok2api
+grok2api.exe

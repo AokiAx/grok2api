@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from typing import Any
 
@@ -347,6 +346,100 @@ def openai_sse_to_anthropic_events(chunk: dict[str, Any]) -> list[dict[str, Any]
         )
         events.append({"type": "message_stop"})
     return events
+
+
+class AnthropicStreamConverter:
+    """Stateful OpenAI SSE to Anthropic event lifecycle converter."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self._tool_blocks: set[int] = set()
+        self._blocks_closed = False
+        self._message_stopped = False
+
+    def prelude(self) -> list[dict[str, Any]]:
+        return anthropic_stream_prelude(self.model)
+
+    def feed(self, chunk: dict[str, Any]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        choices = chunk.get("choices") or []
+        if not choices:
+            return events
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        text = delta.get("content")
+        if text:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                }
+            )
+        for tool_call in delta.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            index = int(tool_call.get("index") or 0) + 1
+            function = tool_call.get("function") or {}
+            if index not in self._tool_blocks:
+                self._tool_blocks.add(index)
+                events.append(
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": str(tool_call.get("id") or f"toolu_{index}"),
+                            "name": str(function.get("name") or ""),
+                            "input": {},
+                        },
+                    }
+                )
+            if function.get("arguments"):
+                events.append(
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": str(function["arguments"]),
+                        },
+                    }
+                )
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            events.extend(self._close_blocks(finish_reason))
+        return events
+
+    def _close_blocks(self, finish_reason: str = "stop") -> list[dict[str, Any]]:
+        if self._blocks_closed:
+            return []
+        self._blocks_closed = True
+        events = [{"type": "content_block_stop", "index": 0}]
+        events.extend(
+            {"type": "content_block_stop", "index": index}
+            for index in sorted(self._tool_blocks)
+        )
+        stop_reason = "end_turn"
+        if finish_reason == "tool_calls":
+            stop_reason = "tool_use"
+        elif finish_reason == "length":
+            stop_reason = "max_tokens"
+        events.append(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": 0},
+            }
+        )
+        return events
+
+    def finish(self) -> list[dict[str, Any]]:
+        events = self._close_blocks()
+        if not self._message_stopped:
+            self._message_stopped = True
+            events.append({"type": "message_stop"})
+        return events
 
 
 def anthropic_stream_prelude(model: str) -> list[dict[str, Any]]:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from app.main import _normalize_model
 from app.config import settings
+from app.main import _normalize_model
 
 
 def test_normalize_model_alias():
