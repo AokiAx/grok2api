@@ -301,7 +301,7 @@ func (s *ResponsesToChatStream) emitToolCallStart(item map[string]any) {
 	s.nextToolIx++
 	s.sawTools = true
 	fn, _ := call["function"].(map[string]any)
-	s.queueToolCallChunk(index, callID, stringValue(fn["name"]), stringValue(fn["arguments"]), false)
+	s.queueToolCallChunk(index, callID, stringValue(fn["name"]), stringValue(fn["arguments"]))
 }
 
 func (s *ResponsesToChatStream) emitToolCallArgumentsDelta(payload map[string]any) {
@@ -327,10 +327,10 @@ func (s *ResponsesToChatStream) emitToolCallArgumentsDelta(payload map[string]an
 			s.queueContentChunk("", "")
 			s.started = true
 		}
-		s.queueToolCallChunk(index, callID, "", delta, true)
+		s.queueToolCallChunk(index, callID, "", delta)
 		return
 	}
-	s.queueToolCallChunk(index, "", "", delta, true)
+	s.queueToolCallChunk(index, "", "", delta)
 }
 
 func (s *ResponsesToChatStream) queueContentChunk(delta string, finish string) {
@@ -351,7 +351,7 @@ func (s *ResponsesToChatStream) queueContentChunk(delta string, finish string) {
 	s.queueChoice(choice)
 }
 
-func (s *ResponsesToChatStream) queueToolCallChunk(index int, id, name, arguments string, argumentsOnly bool) {
+func (s *ResponsesToChatStream) queueToolCallChunk(index int, id, name, arguments string) {
 	toolCall := map[string]any{
 		"index": index,
 	}
@@ -368,10 +368,6 @@ func (s *ResponsesToChatStream) queueToolCallChunk(index int, id, name, argument
 	}
 	if len(function) > 0 {
 		toolCall["function"] = function
-	}
-	// argumentsOnly still needs function.arguments for OpenAI stream clients.
-	if argumentsOnly && arguments != "" {
-		toolCall["function"] = map[string]any{"arguments": arguments}
 	}
 	choice := map[string]any{
 		"index":         0,

@@ -153,26 +153,3 @@ func flattenContentParts(parts []any) string {
 	}
 	return b.String()
 }
-
-// sanitizeMessages is retained for callers that need chat-shaped cleanup without
-// tool-item expansion. Prefer ChatMessagesToResponsesInput for upstream bodies.
-func sanitizeMessages(messages []any) []any {
-	out := make([]any, 0, len(messages))
-	for _, raw := range messages {
-		msg, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		clean := map[string]any{
-			"role":    msg["role"],
-			"content": normalizeMessageContent(msg["content"]),
-		}
-		for _, key := range []string{"tool_calls", "tool_call_id", "name", "function_call"} {
-			if value, ok := msg[key]; ok && value != nil {
-				clean[key] = value
-			}
-		}
-		out = append(out, clean)
-	}
-	return out
-}
