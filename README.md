@@ -105,12 +105,21 @@ docker compose --profile flaresolverr up -d
 
 ## 导入账号
 
-在 `/panel` 中粘贴已授权凭证，先“预览”，再“导入”：
+在 `/panel` 中粘贴已授权凭证，先“预览”，再“导入”。
+
+导入兼容：
+
+- 数组：`[{"key":"...","refresh_token":"..."}]`
+- 旧字段：`access_token` 可替代 `key`
+- 号池文件：`{"accounts":[...]}`
+- `~/.grok/auth.json` / `auth_from_*.json` 的 map 格式
+
+推荐：
 
 ```json
 [
   {
-    "access_token": "...",
+    "key": "...",
     "refresh_token": "...",
     "email": "user@example.com",
     "expires_in": 3600

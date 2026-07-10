@@ -70,11 +70,11 @@ class AccountImporter:
                     ImportItemResult(index, "invalid", message="account must be an object")
                 )
                 continue
-            token = str(row.get("access_token") or row.get("key") or "").strip()
+            token = str(row.get("key") or row.get("access_token") or "").strip()
             if not token:
                 result.invalid += 1
                 result.items.append(
-                    ImportItemResult(index, "invalid", message="access_token required")
+                    ImportItemResult(index, "invalid", message="key or access_token required")
                 )
                 continue
 

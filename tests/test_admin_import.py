@@ -31,7 +31,7 @@ def test_bulk_import_preview_and_apply(tmp_path: Path, monkeypatch):
     payload = {
         "accounts": [
             {
-                "access_token": "bulk-access-token",
+                "key": "bulk-access-token",
                 "refresh_token": "bulk-refresh-token",
                 "email": "Bulk@Example.com",
                 "password": "must-be-ignored",

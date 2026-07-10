@@ -69,7 +69,7 @@ func TestImportValidAccountEntersReadyPool(t *testing.T) {
 
 	result, err := service.Import(context.Background(), admin.ImportRequest{
 		Accounts: []admin.ImportAccount{{
-			AccessToken:  "access-token",
+			Key:          "access-token",
 			RefreshToken: "refresh-token",
 			Email:        "User@Example.com",
 		}},
@@ -98,7 +98,7 @@ func TestImportAuthenticationFailureEntersUnavailablePool(t *testing.T) {
 	})
 
 	_, err := service.Import(context.Background(), admin.ImportRequest{
-		Accounts: []admin.ImportAccount{{AccessToken: "bad-token"}},
+		Accounts: []admin.ImportAccount{{Key: "bad-token"}},
 	})
 	if err != nil {
 		t.Fatalf("import: %v", err)
@@ -116,7 +116,7 @@ func TestImportPreviewDoesNotPersist(t *testing.T) {
 
 	result, err := service.Import(context.Background(), admin.ImportRequest{
 		DryRun:   true,
-		Accounts: []admin.ImportAccount{{AccessToken: "preview-token"}},
+		Accounts: []admin.ImportAccount{{Key: "preview-token"}},
 	})
 	if err != nil {
 		t.Fatalf("preview: %v", err)
@@ -131,7 +131,7 @@ func TestImportValidatorInfrastructureErrorStopsImport(t *testing.T) {
 	service := admin.NewService(repository, validator{err: errors.New("network down")})
 
 	_, err := service.Import(context.Background(), admin.ImportRequest{
-		Accounts: []admin.ImportAccount{{AccessToken: "token"}},
+		Accounts: []admin.ImportAccount{{Key: "token"}},
 	})
 	if err == nil {
 		t.Fatal("expected validator error")
@@ -153,8 +153,8 @@ func TestImportUpdatesExistingEmailAndAddsToScheduler(t *testing.T) {
 
 	result, err := service.Import(context.Background(), admin.ImportRequest{
 		Accounts: []admin.ImportAccount{{
-			AccessToken: "new-token",
-			Email:       "USER@example.com",
+			Key:   "new-token",
+			Email: "USER@example.com",
 		}},
 	})
 	if err != nil {
@@ -171,7 +171,7 @@ func TestImportUpdatesExistingEmailAndAddsToScheduler(t *testing.T) {
 	}
 }
 
-func TestImportRejectsMissingAccessToken(t *testing.T) {
+func TestImportRejectsMissingKey(t *testing.T) {
 	repository := &memoryRepository{}
 	service := admin.NewService(repository, validator{})
 	result, err := service.Import(context.Background(), admin.ImportRequest{
@@ -254,5 +254,30 @@ func TestRecoverMissingAccountReturnsError(t *testing.T) {
 	service := admin.NewService(&memoryRepository{}, validator{})
 	if _, err := service.Recover(context.Background(), "missing"); err == nil {
 		t.Fatal("missing account should fail")
+	}
+}
+
+
+func TestImportAcceptsAccessTokenAlias(t *testing.T) {
+	repository := &memoryRepository{}
+	service := admin.NewService(repository, validator{})
+
+	result, err := service.Import(context.Background(), admin.ImportRequest{
+		Accounts: []admin.ImportAccount{{
+			AccessToken:  "legacy-access",
+			RefreshToken: "legacy-refresh",
+			Email:        "alias@example.com",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Added != 1 || repository.saves != 1 {
+		t.Fatalf("result = %#v saves=%d", result, repository.saves)
+	}
+	for _, item := range repository.accounts {
+		if item.AccessToken != "legacy-access" {
+			t.Fatalf("account = %#v", item)
+		}
 	}
 }

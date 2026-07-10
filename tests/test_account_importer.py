@@ -13,11 +13,11 @@ def test_import_preview_is_non_mutating_and_reports_invalid_rows(tmp_path: Path)
     result = importer.import_accounts(
         [
             {
-                "access_token": "access-valid-1",
+                "key": "access-valid-1",
                 "refresh_token": "refresh-valid-1",
                 "email": "User@Example.com",
             },
-            {"access_token": "", "email": "invalid@example.com"},
+            {"key": "", "email": "invalid@example.com"},
         ],
         dry_run=True,
     )
@@ -35,7 +35,7 @@ def test_import_deduplicates_by_issuer_and_email(tmp_path: Path):
     first = importer.import_accounts(
         [
             {
-                "access_token": "access-first",
+                "key": "access-first",
                 "refresh_token": "refresh-first",
                 "email": "User@Example.com",
                 "oidc_issuer": "https://auth.x.ai/",
@@ -45,7 +45,7 @@ def test_import_deduplicates_by_issuer_and_email(tmp_path: Path):
     second = importer.import_accounts(
         [
             {
-                "access_token": "access-second",
+                "key": "access-second",
                 "refresh_token": "refresh-second",
                 "email": "user@example.com",
                 "oidc_issuer": "https://auth.x.ai",
@@ -64,13 +64,31 @@ def test_import_skip_conflict_policy_preserves_existing_account(tmp_path: Path):
     repository = SQLiteAccountRepository(tmp_path / "grok2api.db")
     importer = AccountImporter(repository)
     importer.import_accounts(
-        [{"access_token": "first", "email": "user@example.com"}]
+        [{"key": "first", "email": "user@example.com"}]
     )
 
     result = importer.import_accounts(
-        [{"access_token": "second", "email": "user@example.com"}],
+        [{"key": "second", "email": "user@example.com"}],
         conflict_policy="skip",
     )
 
     assert result.skipped == 1
     assert repository.list_accounts()[0].key == "first"
+
+
+def test_import_accepts_access_token_alias(tmp_path: Path):
+    repository = SQLiteAccountRepository(tmp_path / "grok2api.db")
+    importer = AccountImporter(repository)
+
+    result = importer.import_accounts(
+        [
+            {
+                "access_token": "legacy-access",
+                "refresh_token": "legacy-refresh",
+                "email": "alias@example.com",
+            }
+        ]
+    )
+
+    assert result.added == 1
+    assert repository.list_accounts()[0].key == "legacy-access"

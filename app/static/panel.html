@@ -232,10 +232,10 @@
         <div class="card" style="margin-top:1rem">
           <h2>批量导入账号</h2>
           <p class="muted" style="font-size:.84rem;line-height:1.5">
-            支持账号数组、单个账号对象，或含 <span class="mono">accounts</span> 数组的旧号池 JSON。
+            支持 key / access_token；账号数组、单个对象、{accounts:[]}、auth.json map、旧号池 JSON。
             密码字段会被忽略，不进入 SQLite。
           </p>
-          <textarea id="accountImportInput" spellcheck="false" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea>
+          <textarea id="accountImportInput" spellcheck="false" placeholder='[{"key":"...","refresh_token":"..."}] 或 auth.json map / access_token 也兼容'></textarea>
           <div class="row" style="margin-top:.65rem">
             <select id="accountImportConflict">
               <option value="merge">冲突时合并</option>
@@ -480,17 +480,51 @@
       } catch (e) { toast(e.message || String(e)); }
     };
 
+    function normalizeImportAccounts(raw) {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      let accounts;
+      if (Array.isArray(parsed)) {
+        accounts = parsed;
+      } else if (Array.isArray(parsed?.accounts)) {
+        accounts = parsed.accounts;
+      } else if (parsed && typeof parsed === "object") {
+        const values = Object.values(parsed);
+        if (
+          values.length &&
+          values.every(
+            (v) =>
+              v &&
+              typeof v === "object" &&
+              !Array.isArray(v) &&
+              ("key" in v || "access_token" in v || "refresh_token" in v)
+          )
+        ) {
+          accounts = values;
+        } else {
+          accounts = [parsed];
+        }
+      } else {
+        throw new Error("JSON 必须是账号对象、数组、{accounts:[]} 或 auth.json map");
+      }
+      return accounts.map((item, index) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          throw new Error(`accounts[${index}] 不是对象`);
+        }
+        const key = String(item.key || item.access_token || "").trim();
+        const out = { ...item };
+        if (key) {
+          out.key = key;
+          if (!out.access_token) out.access_token = key;
+        }
+        return out;
+      });
+    }
+
     function importPayload() {
       const raw = $("accountImportInput").value.trim();
       if (!raw) throw new Error("请输入账号 JSON");
-      const parsed = JSON.parse(raw);
-      let accounts;
-      if (Array.isArray(parsed)) accounts = parsed;
-      else if (Array.isArray(parsed?.accounts)) accounts = parsed.accounts;
-      else if (parsed && typeof parsed === "object") accounts = [parsed];
-      else throw new Error("JSON 必须是账号对象或数组");
       return {
-        accounts,
+        accounts: normalizeImportAccounts(raw),
         conflict_policy: $("accountImportConflict").value,
       };
     }

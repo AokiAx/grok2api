@@ -61,7 +61,8 @@ var ErrAccountNotFound = errors.New("account not found")
 
 type ImportAccount struct {
 	ID           string `json:"id"`
-	AccessToken  string `json:"access_token"`
+	Key          string `json:"key"`
+	AccessToken  string `json:"access_token"` // legacy alias for key
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"`
 	Email        string `json:"email"`
@@ -106,13 +107,16 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 
 	result := ImportResult{Applied: !request.DryRun}
 	for index, input := range request.Accounts {
-		token := strings.TrimSpace(input.AccessToken)
+		token := strings.TrimSpace(input.Key)
+		if token == "" {
+			token = strings.TrimSpace(input.AccessToken)
+		}
 		if token == "" {
 			result.Invalid++
 			result.Items = append(result.Items, ImportItem{
 				Index:   index,
 				Status:  "invalid",
-				Message: "access_token required",
+				Message: "key or access_token required",
 			})
 			continue
 		}

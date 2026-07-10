@@ -654,12 +654,12 @@
         <div class="toolbar">
           <div>
             <h2 style="margin:0;color:var(--text);font-size:14px">导入凭证</h2>
-            <div class="meta">先预览，再写入</div>
+            <div class="meta">兼容 key / access_token；支持数组、{accounts:[]}、auth.json map。先预览，再写入</div>
           </div>
         </div>
         <div class="stack">
           <label for="input">账号 JSON</label>
-          <textarea id="input" spellcheck="false" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea>
+          <textarea id="input" spellcheck="false" placeholder='[{"key":"...","refresh_token":"..."}] 或 auth.json map / access_token 也兼容'></textarea>
           <div class="row">
             <button type="button" class="btn" id="previewButton">预览</button>
             <button type="button" class="btn primary" id="importButton">导入</button>
@@ -1087,10 +1087,51 @@
       await refresh();
     }
 
+    function normalizeImportAccounts(raw) {
+      let parsed = raw;
+      if (typeof raw === 'string') parsed = JSON.parse(raw);
+      let accounts;
+      if (Array.isArray(parsed)) {
+        accounts = parsed;
+      } else if (Array.isArray(parsed?.accounts)) {
+        accounts = parsed.accounts;
+      } else if (parsed && typeof parsed === 'object') {
+        const values = Object.values(parsed);
+        // auth.json / auth_from_*.json map: values look like account objects
+        if (
+          values.length &&
+          values.every(
+            (v) =>
+              v &&
+              typeof v === 'object' &&
+              !Array.isArray(v) &&
+              ('key' in v || 'access_token' in v || 'refresh_token' in v)
+          )
+        ) {
+          accounts = values;
+        } else {
+          accounts = [parsed];
+        }
+      } else {
+        throw new Error('JSON 必须是账号对象、数组、{accounts:[]} 或 auth.json map');
+      }
+      return accounts.map((item, index) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          throw new Error(`accounts[${index}] 不是对象`);
+        }
+        const key = String(item.key || item.access_token || '').trim();
+        const out = { ...item };
+        if (key) {
+          out.key = key;
+          if (!out.access_token) out.access_token = key;
+        }
+        return out;
+      });
+    }
+
     async function send(preview) {
       try {
-        let parsed = JSON.parse(byId('input').value);
-        if (!Array.isArray(parsed)) parsed = parsed.accounts || [parsed];
+        const parsed = normalizeImportAccounts(byId('input').value);
         const path = preview ? '/admin/api/accounts/import/preview' : '/admin/api/accounts/import';
         const response = await fetch(path, {
           method: 'POST',

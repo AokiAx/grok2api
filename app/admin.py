@@ -46,7 +46,8 @@ async def panel_meta() -> Any:
 class CliImportBody(BaseModel):
     """Import access/refresh tokens into CLI pool."""
 
-    access_token: str
+    key: str = ""
+    access_token: str = ""  # legacy alias for key
     refresh_token: str | None = None
     expires_in: int | None = None
     email: str = ""
@@ -79,11 +80,14 @@ async def list_cli_accounts(_: None = Depends(require_admin)) -> Any:
 async def add_cli_account(
     body: CliImportBody, _: None = Depends(require_admin)
 ) -> Any:
-    if not body.access_token.strip():
-        raise HTTPException(status_code=400, detail="access_token required")
+    token = (body.key or body.access_token).strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="key or access_token required")
+    payload = body.model_dump()
+    payload["key"] = token
     importer = AccountImporter(cli_pool.repository)
     result = importer.import_accounts(
-        [body.model_dump()],
+        [payload],
         conflict_policy="merge",
     )
     cli_pool.reload()

@@ -118,7 +118,7 @@ func TestAdminImportPreviewAndApply(t *testing.T) {
 		"",
 		api.WithAdmin(adminService, "panel-secret"),
 	)
-	body := `{"accounts":[{"access_token":"token","email":"user@example.com"}]}`
+	body := `{"accounts":[{"key":"token","email":"user@example.com"}]}`
 
 	preview := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/import/preview", strings.NewReader(body))
 	preview.Header.Set("x-api-key", "panel-secret")
