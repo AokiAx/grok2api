@@ -7,6 +7,10 @@ import (
 )
 
 // ChatToResponses converts an OpenAI Chat Completions body into a Responses body.
+//
+// Only fields accepted by the Grok /responses API are forwarded. OpenAI-specific
+// fields like tools, tool_choice, metadata, user, tool_resources are stripped
+// because the upstream Rust backend rejects unknown fields (serde untagged enum).
 func ChatToResponses(payload []byte) ([]byte, bool, error) {
 	var input map[string]any
 	if err := json.Unmarshal(payload, &input); err != nil {
@@ -20,13 +24,14 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 		"model":  model,
 		"stream": stream,
 	}
-	if messages, ok := input["messages"]; ok {
-		output["input"] = messages
+	if rawMessages, ok := input["messages"].([]any); ok {
+		output["input"] = sanitizeMessages(rawMessages)
 	}
 	if maxTokens := firstNumber(input, "max_tokens", "max_completion_tokens"); maxTokens != nil {
 		output["max_output_tokens"] = maxTokens
 	}
-	copyFields(output, input, "temperature", "top_p", "tools", "tool_choice", "metadata", "user", "tool_resources")
+	// Only forward fields the Grok Responses API actually accepts.
+	copyFields(output, input, "temperature", "top_p")
 	// Backend search / tool flags used by CLI-backed models.
 	for _, key := range []string{"backend_search", "supports_backend_search", "web_search", "include", "instructions"} {
 		if value, ok := input[key]; ok {
@@ -49,6 +54,60 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("encode responses request: %w", err)
 	}
 	return encoded, stream, nil
+}
+
+// sanitizeMessages strips OpenAI-specific fields from messages that the Grok
+// Responses API does not understand (tool_calls, tool_call_id, name, function).
+// Multimodal content arrays are flattened to plain text.
+func sanitizeMessages(messages []any) []any {
+	out := make([]any, 0, len(messages))
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		clean := map[string]any{
+			"role": msg["role"],
+		}
+		// Flatten content: array of content parts → concatenated text string.
+		switch content := msg["content"].(type) {
+		case string:
+			clean["content"] = content
+		case []any:
+			clean["content"] = flattenContentParts(content)
+		case nil:
+			// assistant messages with tool_calls may have nil content
+		default:
+			clean["content"] = fmt.Sprint(content)
+		}
+		out = append(out, clean)
+	}
+	return out
+}
+
+// flattenContentParts extracts text from OpenAI multimodal content arrays.
+func flattenContentParts(parts []any) string {
+	var b strings.Builder
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch part["type"] {
+		case "text":
+			if text, _ := part["text"].(string); text != "" {
+				b.WriteString(text)
+			}
+		case "image_url":
+			// skip images — Grok Responses API handles images differently
+		default:
+			// unknown part type — try to extract text field
+			if text, _ := part["text"].(string); text != "" {
+				b.WriteString(text)
+			}
+		}
+	}
+	return b.String()
 }
 
 // NormalizeChatRequest fills defaults and normalizes reasoning_effort aliases.

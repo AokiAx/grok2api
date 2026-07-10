@@ -95,6 +95,74 @@ func TestChatToResponsesPassesBackendSearch(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesStripsOpenAIToolFields(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"foo"}}],"tool_choice":"auto","metadata":{"a":1},"user":"u1","tool_resources":{}}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, key := range []string{"tools", "tool_choice", "metadata", "user", "tool_resources"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("field %q should be stripped but was present in: %s", key, out)
+		}
+	}
+}
+
+func TestChatToResponsesSanitizesToolMessages(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[` +
+		`{"role":"system","content":"you are helpful"},` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"foo","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"result"}` +
+		`],"stream":true}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	input, ok := payload["input"].([]any)
+	if !ok {
+		t.Fatalf("input is not array: %#v", payload["input"])
+	}
+	// assistant with nil content should still be present (but no tool_calls)
+	if len(input) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %#v", len(input), input)
+	}
+	for i, raw := range input {
+		msg := raw.(map[string]any)
+		if _, has := msg["tool_calls"]; has {
+			t.Fatalf("message[%d] still has tool_calls", i)
+		}
+		if _, has := msg["tool_call_id"]; has {
+			t.Fatalf("message[%d] still has tool_call_id", i)
+		}
+	}
+}
+
+func TestChatToResponsesFlattensMultimodalContent(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}]}]}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	input := payload["input"].([]any)
+	msg := input[0].(map[string]any)
+	if msg["content"] != "hello world" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}
+
 func TestNormalizeChatRequestFillsModelAndEffort(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"MAX"}`)
 	out, model, stream, err := compat.NormalizeChatRequest(body, "grok-4.5")
