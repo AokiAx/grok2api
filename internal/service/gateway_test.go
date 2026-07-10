@@ -234,3 +234,44 @@ func TestGenericRequestUsesSameRotationAndLeasePipeline(t *testing.T) {
 		t.Fatalf("saved = %#v", store.saved)
 	}
 }
+
+func TestAllQuotaOpensPoolCircuitUntilSchedulerChanges(t *testing.T) {
+	now := time.Now().UTC()
+	s := scheduler.New([]account.Account{ready("a"), ready("b")})
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"b": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+	}}
+	gateway := service.NewGateway(s, &fakeStore{}, upstream, service.WithQuotaRetry(time.Hour))
+
+	if _, err := gateway.Chat(context.Background(), []byte(`{}`), false); err == nil {
+		t.Fatal("all quota should fail")
+	}
+	status := gateway.CircuitStatus()
+	if !status.Open || status.RetryAt.Before(now.Add(50*time.Minute)) {
+		t.Fatalf("circuit = %#v", status)
+	}
+
+	upstream.responses["c"] = []*http.Response{response(200, `{"ok":true}`)}
+	s.Upsert(ready("c"))
+	result, err := gateway.Chat(context.Background(), []byte(`{}`), false)
+	if err != nil || result.Status != http.StatusOK {
+		t.Fatalf("request after scheduler change = %d %v", result.Status, err)
+	}
+	if gateway.CircuitStatus().Open {
+		t.Fatal("successful probe should close circuit")
+	}
+}
+
+func TestMixedFailuresDoNotOpenQuotaCircuit(t *testing.T) {
+	s := scheduler.New([]account.Account{ready("a"), ready("b")})
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"b": {response(401, `{"code":"invalid-token"}`)},
+	}}
+	gateway := service.NewGateway(s, &fakeStore{}, upstream)
+	_, _ = gateway.Chat(context.Background(), []byte(`{}`), false)
+	if gateway.CircuitStatus().Open {
+		t.Fatal("mixed quota/auth failures must not open quota circuit")
+	}
+}

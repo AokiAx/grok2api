@@ -169,3 +169,46 @@ func TestStatusAndEarliestRetry(t *testing.T) {
 		t.Fatalf("earliest retry = %s", s.EarliestRetry())
 	}
 }
+
+func TestDeleteRemovesAccountAndAdvancesRevision(t *testing.T) {
+	s := scheduler.New([]account.Account{readyAccount("a"), readyAccount("b")})
+	revision := s.Revision()
+	if !s.Delete("a") {
+		t.Fatal("delete should report existing account")
+	}
+	if s.Revision() <= revision {
+		t.Fatalf("revision did not advance: %d", s.Revision())
+	}
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if lease.Account().ID != "b" {
+		t.Fatalf("selected = %q", lease.Account().ID)
+	}
+	lease.Release()
+	if s.Delete("missing") {
+		t.Fatal("missing delete should be false")
+	}
+}
+
+func TestUpsertAndPromotionAdvanceRevision(t *testing.T) {
+	now := time.Now().UTC()
+	s := scheduler.New(nil)
+	initial := s.Revision()
+	s.Upsert(readyAccount("ready"))
+	if s.Revision() <= initial {
+		t.Fatal("upsert did not advance revision")
+	}
+	afterUpsert := s.Revision()
+	s.Upsert(account.Account{
+		ID:                "quota",
+		Pool:              account.PoolUnavailable,
+		UnavailableReason: account.ReasonQuota,
+		RetryAt:           now.Add(-time.Second),
+	})
+	s.PromoteDue(now)
+	if s.Revision() <= afterUpsert {
+		t.Fatal("promotion did not advance revision")
+	}
+}

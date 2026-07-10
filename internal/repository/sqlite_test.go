@@ -206,3 +206,30 @@ func TestAccountCount(t *testing.T) {
 		t.Fatalf("count = %d, %v; want 1", got, err)
 	}
 }
+
+func TestDeleteAccountRemovesStoredCredential(t *testing.T) {
+	ctx := context.Background()
+	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "accounts.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	now := time.Now().UTC()
+	item := account.Account{
+		ID: "delete-me", AccessToken: "token", Pool: account.PoolReady,
+		CreatedAt: now, UpdatedAt: now, MaxActive: 1,
+	}
+	if err := repo.SaveAccount(ctx, item); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := repo.DeleteAccount(ctx, item.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+}

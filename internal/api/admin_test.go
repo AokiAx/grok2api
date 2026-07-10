@@ -14,8 +14,10 @@ import (
 )
 
 type fakeAdmin struct {
-	accounts []account.Account
-	request  admin.ImportRequest
+	accounts  []account.Account
+	request   admin.ImportRequest
+	deleted   string
+	recovered string
 }
 
 func (a *fakeAdmin) List(context.Context) ([]account.Account, error) {
@@ -25,6 +27,16 @@ func (a *fakeAdmin) List(context.Context) ([]account.Account, error) {
 func (a *fakeAdmin) Import(_ context.Context, request admin.ImportRequest) (admin.ImportResult, error) {
 	a.request = request
 	return admin.ImportResult{Added: len(request.Accounts), Applied: !request.DryRun}, nil
+}
+
+func (a *fakeAdmin) Delete(_ context.Context, id string) error {
+	a.deleted = id
+	return nil
+}
+
+func (a *fakeAdmin) Recover(_ context.Context, id string) (account.Account, error) {
+	a.recovered = id
+	return account.Account{ID: id, Pool: account.PoolReady}, nil
 }
 
 func TestAdminListNeverReturnsTokens(t *testing.T) {
@@ -99,5 +111,26 @@ func TestPanelRouteIsEmbedded(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "Ready Pool") {
 		t.Fatal("Go panel content missing")
+	}
+}
+
+func TestAdminDeleteAndRecoverRoutes(t *testing.T) {
+	adminService := &fakeAdmin{}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(adminService, "secret"))
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/admin/api/cli-accounts/account-1", nil)
+	deleteRequest.Header.Set("Authorization", "Bearer secret")
+	deleteRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteRecorder, deleteRequest)
+	if deleteRecorder.Code != http.StatusOK || adminService.deleted != "account-1" {
+		t.Fatalf("delete status=%d id=%q", deleteRecorder.Code, adminService.deleted)
+	}
+
+	recoverRequest := httptest.NewRequest(http.MethodPost, "/admin/api/cli-accounts/account-1/recover", nil)
+	recoverRequest.Header.Set("Authorization", "Bearer secret")
+	recoverRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recoverRecorder, recoverRequest)
+	if recoverRecorder.Code != http.StatusOK || adminService.recovered != "account-1" {
+		t.Fatalf("recover status=%d id=%q", recoverRecorder.Code, adminService.recovered)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
@@ -12,14 +13,20 @@ import (
 type memoryRepository struct {
 	accounts map[string]account.Account
 	saves    int
+	deletes  int
 }
 
 type memorySink struct {
-	items []account.Account
+	items   []account.Account
+	deleted []string
 }
 
 func (s *memorySink) Upsert(item account.Account) {
 	s.items = append(s.items, item)
+}
+
+func (s *memorySink) Delete(id string) {
+	s.deleted = append(s.deleted, id)
 }
 
 func (r *memoryRepository) ListAccounts(context.Context) ([]account.Account, error) {
@@ -36,6 +43,12 @@ func (r *memoryRepository) SaveAccount(_ context.Context, item account.Account) 
 	}
 	r.accounts[item.ID] = item
 	r.saves++
+	return nil
+}
+
+func (r *memoryRepository) DeleteAccount(_ context.Context, id string) error {
+	delete(r.accounts, id)
+	r.deletes++
 	return nil
 }
 
@@ -168,5 +181,70 @@ func TestImportRejectsMissingAccessToken(t *testing.T) {
 	}
 	if result.Invalid != 1 || repository.saves != 0 {
 		t.Fatalf("result = %#v saves=%d", result, repository.saves)
+	}
+}
+
+func TestDeleteRemovesAccountFromRepositoryAndScheduler(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"account-1": {ID: "account-1", Pool: account.PoolReady},
+	}}
+	sink := &memorySink{}
+	service := admin.NewService(repository, validator{}, admin.WithSink(sink))
+
+	if err := service.Delete(context.Background(), "account-1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if repository.deletes != 1 || len(repository.accounts) != 0 {
+		t.Fatalf("repository = %#v deletes=%d", repository.accounts, repository.deletes)
+	}
+	if len(sink.deleted) != 1 || sink.deleted[0] != "account-1" {
+		t.Fatalf("sink deleted = %#v", sink.deleted)
+	}
+}
+
+func TestRecoverValidatesUnavailableAccountBeforeReturningReady(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"account-1": {
+			ID:                "account-1",
+			AccessToken:       "token",
+			Pool:              account.PoolUnavailable,
+			UnavailableReason: account.ReasonQuota,
+			RetryAt:           time.Now().Add(time.Hour),
+		},
+	}}
+	sink := &memorySink{}
+	service := admin.NewService(repository, validator{}, admin.WithSink(sink))
+
+	item, err := service.Recover(context.Background(), "account-1")
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if item.Pool != account.PoolReady || item.UnavailableReason != "" || !item.RetryAt.IsZero() {
+		t.Fatalf("account = %#v", item)
+	}
+	if len(sink.items) != 1 || sink.items[0].Pool != account.PoolReady {
+		t.Fatalf("sink = %#v", sink.items)
+	}
+}
+
+func TestRecoverKeepsRejectedCredentialUnavailable(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"account-1": {ID: "account-1", AccessToken: "bad", Pool: account.PoolUnavailable},
+	}}
+	service := admin.NewService(repository, validator{reason: account.ReasonAuth}, admin.WithSink(&memorySink{}))
+
+	item, err := service.Recover(context.Background(), "account-1")
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if item.Pool != account.PoolUnavailable || item.UnavailableReason != account.ReasonAuth {
+		t.Fatalf("account = %#v", item)
+	}
+}
+
+func TestRecoverMissingAccountReturnsError(t *testing.T) {
+	service := admin.NewService(&memoryRepository{}, validator{})
+	if _, err := service.Recover(context.Background(), "missing"); err == nil {
+		t.Fatal("missing account should fail")
 	}
 }
