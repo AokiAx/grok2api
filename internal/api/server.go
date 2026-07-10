@@ -14,7 +14,7 @@ import (
 
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
-	"github.com/AokiAx/grok2api/internal/compat"
+	"github.com/AokiAx/grok2api/internal/bridge"
 	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/register"
 	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
@@ -53,6 +53,7 @@ type Server struct {
 	defaultModel     string
 	modelCatalog     *upstream.Catalog
 	preferResponses  bool
+	bridge           *bridge.Pipeline
 	admin            AdminService
 	adminKey         string
 	registerJobs     RegisterJobService
@@ -132,6 +133,12 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	}
 	for _, option := range options {
 		option(server)
+	}
+	server.bridge = &bridge.Pipeline{
+		Gateway:         gateway,
+		Catalog:         server.modelCatalog,
+		DefaultModel:    server.defaultModel,
+		PreferResponses: server.preferResponses,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -493,94 +500,9 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	body, model, clientStream, err := compat.NormalizeChatRequest(body, s.defaultModel)
+	result, err := s.bridge.Chat(request.Context(), body)
 	if err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
-		return
-	}
-
-	// Prefer /responses for catalog models so free-quota headers, prompt-cache,
-	// and native backend_search (WebSearch) stay aligned with the Grok CLI path.
-	if s.preferResponses && s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
-		responsesBody, _, convertErr := compat.ChatToResponses(body)
-		if convertErr != nil {
-			writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
-			return
-		}
-		if info, ok := s.modelCatalog.Get(model); ok {
-			if ensured, ensureErr := compat.EnsureBackendSearch(responsesBody, info.SupportsBackendSearch); ensureErr == nil {
-				responsesBody = ensured
-			}
-		}
-		// Strip client-added fields that Grok does not accept.
-		if stripped, stripErr := compat.StripUnknownResponsesFields(responsesBody); stripErr == nil {
-			responsesBody = stripped
-		}
-		// Always request upstream SSE so free-quota headers and aggregation stay consistent.
-		// ChatToResponses preserves client stream:false; without forcing true the gateway
-		// treats a JSON body as SSE and non-stream clients get empty completions.
-		if forced, forceErr := compat.SetJSONStreamFlag(responsesBody, true); forceErr == nil {
-			responsesBody = forced
-		}
-		result, reqErr := s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
-		if reqErr != nil {
-			s.writeGatewayError(writer, reqErr)
-			return
-		}
-		if result.Status >= http.StatusBadRequest {
-			if result.Stream != nil {
-				data, readErr := io.ReadAll(result.Stream)
-				_ = result.Stream.Close()
-				if readErr == nil {
-					result.Body = data
-					result.Stream = nil
-				}
-			}
-			s.writeResult(writer, result)
-			return
-		}
-		if clientStream {
-			if result.Stream == nil {
-				writeOpenAIError(writer, http.StatusBadGateway, "Upstream stream missing")
-				return
-			}
-			result.Stream = compat.NewResponsesToChatStream(result.Stream, model)
-			if result.Header == nil {
-				result.Header = make(http.Header)
-			}
-			result.Header.Del("Content-Length")
-			result.Header.Set("Content-Type", "text/event-stream")
-			s.writeResult(writer, result)
-			return
-		}
-		if result.Stream != nil {
-			aggregated, aggErr := compat.AggregateResponsesStream(result.Stream, model)
-			if aggErr != nil {
-				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
-				return
-			}
-			result.Body = aggregated
-			result.Stream = nil
-		} else {
-			converted, convErr := compat.ResponsesToChat(result.Body)
-			if convErr != nil {
-				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
-				return
-			}
-			result.Body = converted
-		}
-		if result.Header == nil {
-			result.Header = make(http.Header)
-		}
-		result.Header.Del("Content-Length")
-		result.Header.Set("Content-Type", "application/json")
-		s.writeResult(writer, result)
-		return
-	}
-
-	result, err := s.gateway.Chat(request.Context(), body, clientStream)
-	if err != nil {
-		s.writeGatewayError(writer, err)
+		s.writeBridgeError(writer, err)
 		return
 	}
 	s.writeResult(writer, result)
@@ -701,132 +623,17 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
-	body, stream, ok := s.normalizedJSONBody(writer, request)
-	if !ok {
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
+	if err != nil {
+		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if normalized, _, _, err := compat.NormalizeChatRequest(body, s.defaultModel); err == nil {
-		var payload map[string]any
-		if json.Unmarshal(normalized, &payload) == nil {
-			if _, hasInput := payload["input"]; !hasInput {
-				if messages, ok := payload["messages"]; ok {
-					payload["input"] = messages
-					delete(payload, "messages")
-				}
-			}
-			if maxTokens, ok := payload["max_tokens"]; ok {
-				if _, exists := payload["max_output_tokens"]; !exists {
-					payload["max_output_tokens"] = maxTokens
-				}
-				delete(payload, "max_tokens")
-			}
-			// Expand Codex namespace tools; keep function tools for agent clients.
-			if tools := compat.NormalizeResponsesTools(payload["tools"], compat.MaxUpstreamTools); len(tools) > 0 {
-				payload["tools"] = tools
-			}
-			if choice, exists := payload["tool_choice"]; exists && choice != nil {
-				payload["tool_choice"] = compat.NormalizeResponsesToolChoice(choice)
-			}
-			if encoded, err := json.Marshal(payload); err == nil {
-				body = encoded
-			}
-		}
-	}
-	// Default-on native WebSearch for models that advertise it.
-	model := requestModel(body, s.defaultModel)
-	if s.modelCatalog != nil {
-		if info, ok := s.modelCatalog.Get(model); ok {
-			if ensured, ensureErr := compat.EnsureBackendSearch(body, info.SupportsBackendSearch); ensureErr == nil {
-				body = ensured
-			}
-		}
-	}
-	// Strip client-added fields that Grok does not accept.
-	if stripped, err := compat.StripUnknownResponsesFields(body); err == nil {
-		body = stripped
-	}
-	if !stream {
-		if s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
-			// Force upstream SSE so extractCompletedResponse receives real events
-			// (body stream:false would otherwise yield a bare JSON body).
-			if forced, forceErr := compat.SetJSONStreamFlag(body, true); forceErr == nil {
-				body = forced
-			}
-			result, err := s.gateway.Request(request.Context(), http.MethodPost, "/responses", body, true)
-			if err != nil {
-				s.writeGatewayError(writer, err)
-				return
-			}
-			if result.Status >= 400 {
-				s.writeResult(writer, result)
-				return
-			}
-			if result.Stream != nil {
-				data, err := io.ReadAll(result.Stream)
-				_ = result.Stream.Close()
-				if err != nil {
-					writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
-					return
-				}
-				if completed := extractCompletedResponse(data); len(completed) > 0 {
-					result.Body = completed
-				} else {
-					result.Body = data
-				}
-				result.Stream = nil
-				if result.Header == nil {
-					result.Header = make(http.Header)
-				}
-				result.Header.Del("Content-Length")
-				result.Header.Set("Content-Type", "application/json")
-			}
-			s.writeResult(writer, result)
-			return
-		}
-	}
-	result, err := s.gateway.Request(
-		request.Context(),
-		http.MethodPost,
-		"/responses",
-		body,
-		stream,
-	)
+	result, err := s.bridge.Responses(request.Context(), body)
 	if err != nil {
-		s.writeGatewayError(writer, err)
+		s.writeBridgeError(writer, err)
 		return
 	}
 	s.writeResult(writer, result)
-}
-
-func extractCompletedResponse(sseOrJSON []byte) []byte {
-	text := string(sseOrJSON)
-	if !strings.Contains(text, "event:") && json.Valid(sseOrJSON) {
-		return sseOrJSON
-	}
-	var last []byte
-	for _, block := range strings.Split(text, "\n\n") {
-		for _, line := range strings.Split(block, "\n") {
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "" || data == "[DONE]" {
-				continue
-			}
-			var payload map[string]any
-			if json.Unmarshal([]byte(data), &payload) != nil {
-				continue
-			}
-			if payload["type"] == "response.completed" {
-				if response, ok := payload["response"].(map[string]any); ok {
-					if encoded, err := json.Marshal(response); err == nil {
-						last = encoded
-					}
-				}
-			}
-		}
-	}
-	return last
 }
 
 func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
@@ -839,172 +646,24 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	openAIRequest, stream, err := compat.AnthropicToOpenAI(body, s.defaultModel)
+	result, err := s.bridge.Messages(request.Context(), body)
 	if err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid Anthropic request")
+		s.writeBridgeError(writer, err)
 		return
 	}
-	// Prefer the same responses backend as OpenAI chat for catalog models so
-	// free-quota headers / prompt-cache / native backend_search stay consistent.
-	model := requestModel(openAIRequest, s.defaultModel)
-	var result service.ChatResult
-	if s.preferResponses && s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
-		responsesBody, _, convertErr := compat.ChatToResponses(openAIRequest)
-		if convertErr != nil {
-			writeOpenAIError(writer, http.StatusBadRequest, "Invalid Anthropic request")
-			return
-		}
-		if info, ok := s.modelCatalog.Get(model); ok {
-			if ensured, ensureErr := compat.EnsureBackendSearch(responsesBody, info.SupportsBackendSearch); ensureErr == nil {
-				responsesBody = ensured
-			}
-		}
-		// Strip client-added fields that Grok does not accept.
-		if stripped, stripErr := compat.StripUnknownResponsesFields(responsesBody); stripErr == nil {
-			responsesBody = stripped
-		}
-		// Match chat path: always request upstream SSE for aggregation/streaming.
-		if forced, forceErr := compat.SetJSONStreamFlag(responsesBody, true); forceErr == nil {
-			responsesBody = forced
-		}
-		result, err = s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
-		if err != nil {
-			s.writeGatewayError(writer, err)
-			return
-		}
-		if result.Status >= http.StatusBadRequest {
-			if result.Stream != nil {
-				data, readErr := io.ReadAll(result.Stream)
-				_ = result.Stream.Close()
-				if readErr == nil {
-					result.Body = data
-					result.Stream = nil
-				}
-			}
-			s.writeResult(writer, result)
-			return
-		}
-		if stream {
-			if result.Stream == nil {
-				writeOpenAIError(writer, http.StatusBadGateway, "Upstream stream missing")
-				return
-			}
-			// responses SSE -> chat SSE -> anthropic SSE
-			chatStream := compat.NewResponsesToChatStream(result.Stream, model)
-			result.Stream = compat.NewAnthropicStream(chatStream, model)
-			if result.Header == nil {
-				result.Header = make(http.Header)
-			}
-			result.Header.Del("Content-Length")
-			result.Header.Set("Content-Type", "text/event-stream")
-			s.writeResult(writer, result)
-			return
-		}
-		if result.Stream != nil {
-			aggregated, aggErr := compat.AggregateResponsesStream(result.Stream, model)
-			if aggErr != nil {
-				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream stream")
-				return
-			}
-			result.Body = aggregated
-			result.Stream = nil
-		} else {
-			convertedChat, convErr := compat.ResponsesToChat(result.Body)
-			if convErr != nil {
-				writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
-				return
-			}
-			result.Body = convertedChat
-		}
-		converted, convErr := compat.OpenAIToAnthropic(result.Body)
-		if convErr != nil {
-			writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
-			return
-		}
-		result.Body = converted
-		if result.Header == nil {
-			result.Header = make(http.Header)
-		}
-		result.Header.Del("Content-Length")
-		result.Header.Set("Content-Type", "application/json")
-		s.writeResult(writer, result)
-		return
-	}
-
-	result, err = s.gateway.Chat(request.Context(), openAIRequest, stream)
-	if err != nil {
-		s.writeGatewayError(writer, err)
-		return
-	}
-	if result.Status >= http.StatusBadRequest {
-		s.writeResult(writer, result)
-		return
-	}
-	if stream {
-		if result.Stream == nil {
-			writeOpenAIError(writer, http.StatusBadGateway, "Upstream stream missing")
-			return
-		}
-		result.Stream = compat.NewAnthropicStream(
-			result.Stream,
-			requestModel(openAIRequest, s.defaultModel),
-		)
-		if result.Header == nil {
-			result.Header = make(http.Header)
-		}
-		result.Header.Del("Content-Length")
-		result.Header.Set("Content-Type", "text/event-stream")
-		s.writeResult(writer, result)
-		return
-	}
-	converted, err := compat.OpenAIToAnthropic(result.Body)
-	if err != nil {
-		writeOpenAIError(writer, http.StatusBadGateway, "Invalid upstream response")
-		return
-	}
-	result.Body = converted
-	if result.Header == nil {
-		result.Header = make(http.Header)
-	}
-	result.Header.Del("Content-Length")
-	result.Header.Set("Content-Type", "application/json")
 	s.writeResult(writer, result)
 }
 
-func (s *Server) normalizedJSONBody(
-	writer http.ResponseWriter,
-	request *http.Request,
-) ([]byte, bool, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
-	if err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
-		return nil, false, false
+func (s *Server) writeBridgeError(writer http.ResponseWriter, err error) {
+	if bridgeErr, ok := bridge.AsError(err); ok {
+		status := http.StatusBadGateway
+		if bridgeErr.Class == bridge.ClassInvalidRequest {
+			status = http.StatusBadRequest
+		}
+		writeOpenAIError(writer, status, bridgeErr.Message)
+		return
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid JSON body")
-		return nil, false, false
-	}
-	if model, ok := payload["model"].(string); !ok || strings.TrimSpace(model) == "" {
-		payload["model"] = s.defaultModel
-	}
-	stream, _ := payload["stream"].(bool)
-	body, err = json.Marshal(payload)
-	if err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request payload")
-		return nil, false, false
-	}
-	return body, stream, true
-}
-
-func requestModel(payload []byte, fallback string) string {
-	var request struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(payload, &request); err != nil || request.Model == "" {
-		return fallback
-	}
-	return request.Model
+	s.writeGatewayError(writer, err)
 }
 
 func (s *Server) writeGatewayError(writer http.ResponseWriter, err error) {
