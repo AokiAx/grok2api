@@ -91,6 +91,21 @@ func (s *Scheduler) Status() (int, int, map[account.UnavailableReason]int) {
 	return ready, unavailable, reasons
 }
 
+// ActiveByID returns in-memory lease counts keyed by account ID.
+// Active is intentionally not persisted; admin views must merge this snapshot.
+func (s *Scheduler) ActiveByID() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int, len(s.accounts))
+	for id, item := range s.accounts {
+		if item == nil || item.Active <= 0 {
+			continue
+		}
+		out[id] = item.Active
+	}
+	return out
+}
+
 func (s *Scheduler) EarliestRetry() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()

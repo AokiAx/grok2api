@@ -40,6 +40,12 @@ type StatusProvider interface {
 	PoolStatus() PoolStatus
 }
 
+// LiveLeaseProvider exposes in-memory lease counts for admin views.
+// Optional: when absent, active concurrency falls back to zero from SQLite.
+type LiveLeaseProvider interface {
+	ActiveByID() map[string]int
+}
+
 type Server struct {
 	gateway          Gateway
 	status           StatusProvider
@@ -181,6 +187,13 @@ func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Merge live scheduler lease counts. Active is memory-only and not in SQLite.
+	if live, ok := s.status.(LiveLeaseProvider); ok {
+		activeByID := live.ActiveByID()
+		for index := range accounts {
+			accounts[index].Active = activeByID[accounts[index].ID]
+		}
 	}
 	public := make([]map[string]any, 0, len(accounts))
 	for _, item := range accounts {

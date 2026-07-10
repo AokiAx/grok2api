@@ -311,3 +311,54 @@ func TestRegisterRoutesUnauthorized(t *testing.T) {
 		}
 	}
 }
+
+type liveStatus struct {
+	fakeStatus
+	active map[string]int
+}
+
+func (s liveStatus) ActiveByID() map[string]int {
+	return s.active
+}
+
+func TestAdminListMergesLiveActiveLeases(t *testing.T) {
+	adminService := &fakeAdmin{accounts: []account.Account{
+		{ID: "a", Email: "a@example.com", Pool: account.PoolReady, MaxActive: 1, Active: 0},
+		{ID: "b", Email: "b@example.com", Pool: account.PoolReady, MaxActive: 1, Active: 0},
+	}}
+	server := api.NewServer(
+		&fakeGateway{},
+		liveStatus{active: map[string]int{"a": 1}},
+		"",
+		api.WithAdmin(adminService, "panel-secret"),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/admin/api/cli-accounts", nil)
+	request.Header.Set("Authorization", "Bearer panel-secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Accounts []struct {
+			ID     string `json:"id"`
+			Active int    `json:"active"`
+		} `json:"accounts"`
+		Summary struct {
+			ActiveLeases int `json:"active_leases"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[string]int{}
+	for _, item := range payload.Accounts {
+		byID[item.ID] = item.Active
+	}
+	if byID["a"] != 1 || byID["b"] != 0 {
+		t.Fatalf("active by id = %#v", byID)
+	}
+	if payload.Summary.ActiveLeases != 1 {
+		t.Fatalf("active_leases = %d", payload.Summary.ActiveLeases)
+	}
+}

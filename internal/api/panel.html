@@ -552,9 +552,9 @@
           <div class="stat-note">有 refresh token</div>
         </div>
         <div class="card">
-          <div class="stat-label">Free 额度汇总</div>
+          <div class="stat-label">Free Token 汇总</div>
           <div class="stat-value amber" id="quotaUsage">—</div>
-          <div class="stat-note" id="quotaNote">成功请求后从响应头回写</div>
+          <div class="stat-note" id="quotaNote">token 剩余/已用（响应头）</div>
         </div>
         <div class="card">
           <div class="stat-label">Quota Circuit</div>
@@ -844,15 +844,16 @@
 
     const percent = (value, total) => total > 0 ? Math.round(value / total * 100) : 0;
     // Free quota is stored as used/limit from x-ratelimit headers.
+    // Prefer tokens when upstream sends token counters; otherwise request counters.
     const quotaText = (actual, limit) => {
       if (!(limit > 0)) return '—';
       const remaining = Math.max(0, limit - (actual || 0));
-      return `${number.format(remaining)} 剩余 · ${number.format(actual || 0)}/${number.format(limit)}`;
+      return `${number.format(remaining)} tok 剩余 · ${number.format(actual || 0)}/${number.format(limit)}`;
     };
     const quotaNoteText = (actual, limit) => {
-      if (!(limit > 0)) return 'free 额度需成功请求后从响应头回写';
+      if (!(limit > 0)) return 'free token 额度需成功请求后从响应头回写';
       const remaining = Math.max(0, limit - (actual || 0));
-      return `剩余 ${number.format(remaining)} · 已用 ${percent(actual || 0, limit)}%`;
+      return `剩余 ${number.format(remaining)} tokens · 已用 ${percent(actual || 0, limit)}%`;
     };
     const timeText = value => {
       if (!value || String(value).startsWith('0001-')) return '—';

@@ -234,3 +234,19 @@ func TestRecordUsageUpdatesQuotaAndSuccessTime(t *testing.T) {
 		t.Fatalf("item=%#v", item)
 	}
 }
+
+func TestActiveByIDReturnsLiveLeaseCounts(t *testing.T) {
+	s := scheduler.New([]account.Account{readyAccount("a"), readyAccount("b")})
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	active := s.ActiveByID()
+	if active[lease.Account().ID] != 1 {
+		t.Fatalf("active = %#v", active)
+	}
+	lease.Release()
+	if len(s.ActiveByID()) != 0 {
+		t.Fatalf("active after release = %#v", s.ActiveByID())
+	}
+}

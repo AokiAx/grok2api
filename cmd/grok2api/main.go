@@ -236,6 +236,10 @@ func (p poolStatusProvider) PoolStatus() api.PoolStatus {
 	}
 }
 
+func (p poolStatusProvider) ActiveByID() map[string]int {
+	return p.scheduler.ActiveByID()
+}
+
 func runRegister(
 	ctx context.Context,
 	output io.Writer,
