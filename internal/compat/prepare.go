@@ -26,18 +26,24 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 		return nil, "", false, fmt.Errorf("decode responses request: %w", err)
 	}
 	if _, hasInput := input["input"]; !hasInput {
-		if messages, ok := input["messages"]; ok {
-			if rawMessages, ok := messages.([]any); ok {
-				input["input"] = sanitizeMessages(rawMessages)
-			} else {
-				input["input"] = messages
+		if messages, ok := input["messages"].([]any); ok {
+			items, instructions := ChatMessagesToResponsesInput(messages)
+			input["input"] = items
+			if strings.TrimSpace(stringValue(input["instructions"])) == "" && instructions != "" {
+				input["instructions"] = instructions
 			}
+			delete(input, "messages")
+		} else if messages, ok := input["messages"]; ok {
+			input["input"] = messages
 			delete(input, "messages")
 		}
 	} else if rawMessages, ok := input["input"].([]any); ok {
-		// Sanitize chat-like message arrays that clients put under input.
 		if looksLikeChatMessages(rawMessages) {
-			input["input"] = sanitizeMessages(rawMessages)
+			items, instructions := ChatMessagesToResponsesInput(rawMessages)
+			input["input"] = items
+			if strings.TrimSpace(stringValue(input["instructions"])) == "" && instructions != "" {
+				input["instructions"] = instructions
+			}
 		}
 	}
 	if maxTokens, ok := input["max_tokens"]; ok {
@@ -60,7 +66,6 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 	if choice, exists := input["tool_choice"]; exists && choice != nil {
 		input["tool_choice"] = NormalizeResponsesToolChoice(choice)
 	}
-	// Promote OpenAI-style search signals the same way ChatToResponses does.
 	if _, ok := input["web_search_options"]; ok {
 		if _, exists := input["backend_search"]; !exists {
 			input["backend_search"] = true
@@ -136,28 +141,16 @@ func ExtractCompletedResponse(sseOrJSON []byte) []byte {
 		return sseOrJSON
 	}
 	var last []byte
-	for _, block := range strings.Split(text, "\n\n") {
-		for _, line := range strings.Split(block, "\n") {
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "" || data == "[DONE]" {
-				continue
-			}
-			var payload map[string]any
-			if json.Unmarshal([]byte(data), &payload) != nil {
-				continue
-			}
-			if payload["type"] == "response.completed" {
-				if response, ok := payload["response"].(map[string]any); ok {
-					if encoded, err := json.Marshal(response); err == nil {
-						last = encoded
-					}
+	_ = IterateSSEBytes(sseOrJSON, func(event SSEEvent) error {
+		if event.Type == "response.completed" {
+			if response, ok := event.Payload["response"].(map[string]any); ok {
+				if encoded, err := json.Marshal(response); err == nil {
+					last = encoded
 				}
 			}
 		}
-	}
+		return nil
+	})
 	return last
 }
 
@@ -174,8 +167,6 @@ func looksLikeChatMessages(items []any) bool {
 		if role == "" {
 			return false
 		}
-		// Responses input items often use type=message|input_text without free-form roles
-		// in mixed arrays; treat role-bearing objects as chat messages.
 		if typ := strings.TrimSpace(stringValue(object["type"])); typ != "" && typ != "message" {
 			if _, hasContent := object["content"]; !hasContent {
 				return false

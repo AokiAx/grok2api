@@ -212,7 +212,7 @@ func TestChatToResponsesPreservesToolsAndStripsUnsafeFields(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesSanitizesToolMessages(t *testing.T) {
+func TestChatToResponsesMapsToolLoopToResponsesItems(t *testing.T) {
 	body := []byte(`{"model":"grok-4.5","messages":[` +
 		`{"role":"system","content":"you are helpful"},` +
 		`{"role":"user","content":"hi"},` +
@@ -227,20 +227,58 @@ func TestChatToResponsesSanitizesToolMessages(t *testing.T) {
 	if err := json.Unmarshal(out, &payload); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if payload["instructions"] != "you are helpful" {
+		t.Fatalf("instructions=%#v", payload["instructions"])
+	}
 	input, ok := payload["input"].([]any)
 	if !ok {
 		t.Fatalf("input is not array: %#v", payload["input"])
 	}
-	if len(input) != 4 {
-		t.Fatalf("expected 4 messages, got %d: %#v", len(input), input)
+	// system → instructions; remaining: user, function_call, function_call_output
+	if len(input) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %#v", len(input), input)
 	}
-	assistant := input[2].(map[string]any)
-	if _, has := assistant["tool_calls"]; !has {
-		t.Fatalf("assistant tool_calls should be preserved: %#v", assistant)
+	call := input[1].(map[string]any)
+	if call["type"] != "function_call" || call["name"] != "foo" || call["call_id"] != "call_1" {
+		t.Fatalf("function_call=%#v", call)
 	}
-	toolMsg := input[3].(map[string]any)
-	if toolMsg["tool_call_id"] != "call_1" {
-		t.Fatalf("tool_call_id = %#v", toolMsg["tool_call_id"])
+	outItem := input[2].(map[string]any)
+	if outItem["type"] != "function_call_output" || outItem["call_id"] != "call_1" || outItem["output"] != "result" {
+		t.Fatalf("function_call_output=%#v", outItem)
+	}
+}
+
+func TestResponsesToChatExtractsFunctionCalls(t *testing.T) {
+	body := []byte(`{
+		"id":"resp_tools",
+		"model":"grok-4.5",
+		"status":"completed",
+		"output":[
+			{"type":"function_call","call_id":"call_9","name":"lookup","arguments":"{\"q\":\"x\"}"}
+		],
+		"usage":{"input_tokens":1,"output_tokens":2}
+	}`)
+	out, err := compat.ResponsesToChat(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	choice := payload["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason=%#v", choice["finish_reason"])
+	}
+	message := choice["message"].(map[string]any)
+	calls := message["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("tool_calls=%#v", message["tool_calls"])
+	}
+	call := calls[0].(map[string]any)
+	fn := call["function"].(map[string]any)
+	if call["id"] != "call_9" || fn["name"] != "lookup" || fn["arguments"] != `{"q":"x"}` {
+		t.Fatalf("call=%#v", call)
 	}
 }
 

@@ -31,76 +31,43 @@ func AggregateResponsesStream(stream io.ReadCloser, model string) ([]byte, error
 		textBuilder strings.Builder
 		finalBody   []byte
 		responseID  string
+		toolCalls   []any
 	)
 
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-	var eventName string
-	var dataLines []string
-	flush := func() error {
-		if len(dataLines) == 0 {
-			eventName = ""
+	err = IterateSSEBytes(raw, func(event SSEEvent) error {
+		if event.Data == "[DONE]" || event.Payload == nil {
 			return nil
 		}
-		data := strings.Join(dataLines, "\n")
-		dataLines = nil
-		currentEvent := eventName
-		eventName = ""
-		if data == "[DONE]" {
-			return nil
-		}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(data), &payload); err != nil {
-			return nil
-		}
-		typeName := stringValue(payload["type"])
-		if typeName == "" {
-			typeName = currentEvent
-		}
-		switch typeName {
+		switch event.Type {
 		case "response.output_text.delta":
-			textBuilder.WriteString(stringValue(payload["delta"]))
+			textBuilder.WriteString(stringValue(event.Payload["delta"]))
 		case "response.completed":
-			if response, ok := payload["response"].(map[string]any); ok {
-				encoded, err := json.Marshal(response)
-				if err == nil {
+			if response, ok := event.Payload["response"].(map[string]any); ok {
+				if encoded, err := json.Marshal(response); err == nil {
 					finalBody = encoded
 				}
 				if id := stringValue(response["id"]); id != "" {
 					responseID = id
 				}
 			}
+		case "response.output_item.done", "response.output_item.added":
+			if item, ok := event.Payload["item"].(map[string]any); ok {
+				if call := responsesItemToChatToolCall(item); call != nil {
+					// Prefer done events; for added, only keep if we do not already have it.
+					toolCalls = upsertToolCall(toolCalls, call)
+				}
+			}
 		default:
-			if id := stringValue(payload["id"]); id != "" && strings.HasPrefix(id, "resp_") {
+			if id := stringValue(event.Payload["id"]); id != "" && strings.HasPrefix(id, "resp_") {
 				responseID = id
 			}
-			if delta := stringValue(payload["delta"]); delta != "" && strings.Contains(typeName, "output_text") {
+			if delta := stringValue(event.Payload["delta"]); delta != "" && strings.Contains(event.Type, "output_text") {
 				textBuilder.WriteString(delta)
 			}
 		}
 		return nil
-	}
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			if err := flush(); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
-			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		}
-	}
-	if err := flush(); err != nil {
-		return nil, err
-	}
-	if err := scanner.Err(); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("read responses stream: %w", err)
 	}
 
@@ -118,11 +85,41 @@ func AggregateResponsesStream(stream io.ReadCloser, model string) ([]byte, error
 		"output_text": textBuilder.String(),
 		"status":      "completed",
 	}
+	if len(toolCalls) > 0 {
+		// Reconstruct function_call items so ResponsesToChat emits tool_calls.
+		output := make([]any, 0, len(toolCalls))
+		for _, rawCall := range toolCalls {
+			call, _ := rawCall.(map[string]any)
+			fn, _ := call["function"].(map[string]any)
+			output = append(output, map[string]any{
+				"type":      "function_call",
+				"call_id":   stringValue(call["id"]),
+				"name":      stringValue(fn["name"]),
+				"arguments": stringValue(fn["arguments"]),
+			})
+		}
+		synthetic["output"] = output
+	}
 	encoded, err := json.Marshal(synthetic)
 	if err != nil {
 		return nil, err
 	}
 	return ResponsesToChat(encoded)
+}
+
+func upsertToolCall(existing []any, call map[string]any) []any {
+	id := stringValue(call["id"])
+	if id == "" {
+		return append(existing, call)
+	}
+	for i, raw := range existing {
+		item, _ := raw.(map[string]any)
+		if stringValue(item["id"]) == id {
+			existing[i] = call
+			return existing
+		}
+	}
+	return append(existing, call)
 }
 
 // tryResponsesJSONBody converts a non-SSE Responses JSON body when present.
@@ -131,7 +128,6 @@ func tryResponsesJSONBody(raw []byte) ([]byte, bool) {
 	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
 		return nil, false
 	}
-	// SSE frames always contain "event:" or "data:" prefixes; pure JSON does not.
 	if bytes.Contains(trimmed, []byte("\nevent:")) || bytes.HasPrefix(trimmed, []byte("event:")) ||
 		bytes.Contains(trimmed, []byte("\ndata:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
 		return nil, false
@@ -140,7 +136,6 @@ func tryResponsesJSONBody(raw []byte) ([]byte, bool) {
 	if err := json.Unmarshal(trimmed, &envelope); err != nil {
 		return nil, false
 	}
-	// Accept both bare response objects and {type,response} wrappers.
 	if typ := stringValue(envelope["type"]); typ == "response.completed" {
 		if nested, ok := envelope["response"].(map[string]any); ok {
 			encoded, err := json.Marshal(nested)
@@ -165,42 +160,30 @@ func tryResponsesJSONBody(raw []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// SetJSONStreamFlag forces the stream field on a JSON object payload.
-func SetJSONStreamFlag(payload []byte, stream bool) ([]byte, error) {
-	var input map[string]any
-	if err := json.Unmarshal(payload, &input); err != nil {
-		return nil, fmt.Errorf("decode json body: %w", err)
-	}
-	if existing, ok := input["stream"].(bool); ok && existing == stream {
-		return payload, nil
-	}
-	input["stream"] = stream
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("encode json body: %w", err)
-	}
-	return encoded, nil
-}
-
-// ResponsesToChatStream converts Responses SSE into OpenAI Chat Completions SSE.
+// ResponsesToChatStream converts Responses SSE into OpenAI Chat Completions SSE,
+// including function/tool call deltas for agent clients.
 type ResponsesToChatStream struct {
-	source  io.ReadCloser
-	model   string
-	reader  *bufio.Reader
-	pending []byte
-	once    sync.Once
-	err     error
-	done    bool
-	started bool
-	id      string
+	source     io.ReadCloser
+	model      string
+	reader     *bufio.Reader
+	pending    []byte
+	once       sync.Once
+	err        error
+	done       bool
+	started    bool
+	id         string
+	toolIndex  map[string]int
+	nextToolIx int
+	sawTools   bool
 }
 
 func NewResponsesToChatStream(source io.ReadCloser, model string) *ResponsesToChatStream {
 	return &ResponsesToChatStream{
-		source: source,
-		model:  model,
-		reader: bufio.NewReader(source),
-		id:     "chatcmpl_" + randomID(20),
+		source:    source,
+		model:     model,
+		reader:    bufio.NewReader(source),
+		id:        "chatcmpl_" + randomID(20),
+		toolIndex: map[string]int{},
 	}
 }
 
@@ -234,11 +217,15 @@ func (s *ResponsesToChatStream) pull() error {
 	if s.done {
 		return io.EOF
 	}
-	eventName, data, err := readSSEEvent(s.reader)
+	event, err := ReadSSEEvent(s.reader)
 	if err != nil {
 		if err == io.EOF {
 			if !s.done {
-				s.queueChunk("", "stop")
+				finish := "stop"
+				if s.sawTools {
+					finish = "tool_calls"
+				}
+				s.queueContentChunk("", finish)
 				s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
 				s.done = true
 				return nil
@@ -247,41 +234,106 @@ func (s *ResponsesToChatStream) pull() error {
 		}
 		return err
 	}
-	if data == "[DONE]" {
-		s.queueChunk("", "stop")
+	if event.Data == "[DONE]" {
+		finish := "stop"
+		if s.sawTools {
+			finish = "tool_calls"
+		}
+		s.queueContentChunk("", finish)
 		s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
 		s.done = true
 		return nil
 	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(data), &payload); err != nil {
-		return nil
-	}
-	typeName := stringValue(payload["type"])
-	if typeName == "" {
-		typeName = eventName
-	}
-	switch typeName {
+	switch event.Type {
 	case "response.created", "response.in_progress":
 		if !s.started {
-			s.queueChunk("", "")
+			s.queueContentChunk("", "")
 			s.started = true
 		}
 	case "response.output_text.delta":
 		if !s.started {
-			s.queueChunk("", "")
+			s.queueContentChunk("", "")
 			s.started = true
 		}
-		s.queueChunk(stringValue(payload["delta"]), "")
+		s.queueContentChunk(stringValue(event.Payload["delta"]), "")
+	case "response.output_item.added":
+		if item, ok := event.Payload["item"].(map[string]any); ok {
+			s.emitToolCallStart(item)
+		}
+	case "response.function_call_arguments.delta":
+		s.emitToolCallArgumentsDelta(event.Payload)
+	case "response.output_item.done":
+		if item, ok := event.Payload["item"].(map[string]any); ok {
+			// Ensure name/id were emitted even if added was missed.
+			s.emitToolCallStart(item)
+		}
 	case "response.completed":
-		s.queueChunk("", "stop")
+		finish := "stop"
+		if s.sawTools {
+			finish = "tool_calls"
+		}
+		s.queueContentChunk("", finish)
 		s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
 		s.done = true
 	}
 	return nil
 }
 
-func (s *ResponsesToChatStream) queueChunk(delta string, finish string) {
+func (s *ResponsesToChatStream) emitToolCallStart(item map[string]any) {
+	typ := strings.ToLower(strings.TrimSpace(stringValue(item["type"])))
+	if typ != "function_call" && typ != "tool_call" && typ != "custom_tool_call" {
+		return
+	}
+	call := responsesItemToChatToolCall(item)
+	if call == nil {
+		return
+	}
+	callID := stringValue(call["id"])
+	if _, exists := s.toolIndex[callID]; exists {
+		return
+	}
+	if !s.started {
+		s.queueContentChunk("", "")
+		s.started = true
+	}
+	index := s.nextToolIx
+	s.toolIndex[callID] = index
+	s.nextToolIx++
+	s.sawTools = true
+	fn, _ := call["function"].(map[string]any)
+	s.queueToolCallChunk(index, callID, stringValue(fn["name"]), stringValue(fn["arguments"]), false)
+}
+
+func (s *ResponsesToChatStream) emitToolCallArgumentsDelta(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	delta := stringValue(payload["delta"])
+	if delta == "" {
+		return
+	}
+	callID := firstNonEmptyString(payload["call_id"], payload["item_id"], payload["id"])
+	index, ok := s.toolIndex[callID]
+	if !ok {
+		// Unknown call — allocate a slot.
+		index = s.nextToolIx
+		if callID == "" {
+			callID = "call_" + randomID(8)
+		}
+		s.toolIndex[callID] = index
+		s.nextToolIx++
+		s.sawTools = true
+		if !s.started {
+			s.queueContentChunk("", "")
+			s.started = true
+		}
+		s.queueToolCallChunk(index, callID, "", delta, true)
+		return
+	}
+	s.queueToolCallChunk(index, "", "", delta, true)
+}
+
+func (s *ResponsesToChatStream) queueContentChunk(delta string, finish string) {
 	choice := map[string]any{
 		"index": 0,
 		"delta": map[string]any{},
@@ -296,6 +348,40 @@ func (s *ResponsesToChatStream) queueChunk(delta string, finish string) {
 	} else {
 		choice["finish_reason"] = nil
 	}
+	s.queueChoice(choice)
+}
+
+func (s *ResponsesToChatStream) queueToolCallChunk(index int, id, name, arguments string, argumentsOnly bool) {
+	toolCall := map[string]any{
+		"index": index,
+	}
+	if id != "" {
+		toolCall["id"] = id
+		toolCall["type"] = "function"
+	}
+	function := map[string]any{}
+	if name != "" {
+		function["name"] = name
+	}
+	if arguments != "" {
+		function["arguments"] = arguments
+	}
+	if len(function) > 0 {
+		toolCall["function"] = function
+	}
+	// argumentsOnly still needs function.arguments for OpenAI stream clients.
+	if argumentsOnly && arguments != "" {
+		toolCall["function"] = map[string]any{"arguments": arguments}
+	}
+	choice := map[string]any{
+		"index":         0,
+		"delta":         map[string]any{"tool_calls": []any{toolCall}},
+		"finish_reason": nil,
+	}
+	s.queueChoice(choice)
+}
+
+func (s *ResponsesToChatStream) queueChoice(choice map[string]any) {
 	payload := map[string]any{
 		"id":      s.id,
 		"object":  "chat.completion.chunk",
@@ -312,46 +398,4 @@ func (s *ResponsesToChatStream) queueChunk(delta string, finish string) {
 	builder.Write(encoded)
 	builder.WriteString("\n\n")
 	s.pending = append(s.pending, builder.Bytes()...)
-}
-
-func readSSEEvent(reader *bufio.Reader) (eventName string, data string, err error) {
-	var dataLines []string
-	for {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil && len(line) == 0 {
-			if len(dataLines) > 0 {
-				return eventName, strings.Join(dataLines, "\n"), nil
-			}
-			return "", "", readErr
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			if len(dataLines) == 0 && eventName == "" {
-				if readErr != nil {
-					return "", "", readErr
-				}
-				continue
-			}
-			return eventName, strings.Join(dataLines, "\n"), nil
-		}
-		if strings.HasPrefix(line, "event:") {
-			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		}
-		if readErr != nil {
-			return eventName, strings.Join(dataLines, "\n"), nil
-		}
-	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

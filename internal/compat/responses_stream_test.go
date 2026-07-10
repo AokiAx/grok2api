@@ -62,3 +62,36 @@ func TestSetJSONStreamFlagForcesTrue(t *testing.T) {
 		t.Fatalf("stream=%#v", payload["stream"])
 	}
 }
+
+func TestResponsesToChatStreamEmitsToolCallDeltas(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","call_id":"call_1","delta":"{\"q\":"}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","call_id":"call_1","delta":"\"x\"}"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]}}`,
+		``,
+	}, "\n")
+	stream := compat.NewResponsesToChatStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	_ = stream.Close()
+	body := string(data)
+	if !strings.Contains(body, `"tool_calls"`) {
+		t.Fatalf("missing tool_calls: %s", body)
+	}
+	if !strings.Contains(body, `"name":"lookup"`) {
+		t.Fatalf("missing name: %s", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("missing tool_calls finish: %s", body)
+	}
+}
