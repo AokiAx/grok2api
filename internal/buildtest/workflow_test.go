@@ -61,7 +61,7 @@ func TestImageWorkflowPublishesSignedMultiArchitectureGHCRImage(t *testing.T) {
 		"docker/build-push-action",
 		"actions/attest-build-provenance",
 		"cosign sign",
-		"aquasecurity/trivy-action",
+		"aquasecurity/trivy-action@v0.36.0",
 		"packages: write",
 		"id-token: write",
 	)
