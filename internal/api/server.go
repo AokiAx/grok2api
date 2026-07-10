@@ -718,6 +718,9 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 			if tools := compat.NormalizeResponsesTools(payload["tools"], compat.MaxUpstreamTools); len(tools) > 0 {
 				payload["tools"] = tools
 			}
+			if choice, exists := payload["tool_choice"]; exists && choice != nil {
+				payload["tool_choice"] = compat.NormalizeResponsesToolChoice(choice)
+			}
 			if encoded, err := json.Marshal(payload); err == nil {
 				body = encoded
 			}

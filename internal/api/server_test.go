@@ -420,6 +420,50 @@ func TestBillingAndResponsesProxyThroughAccountGateway(t *testing.T) {
 	}
 }
 
+func TestResponsesRouteFlattensFunctionToolsAndChoice(t *testing.T) {
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"id":"resp_1","object":"response"}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/responses",
+			strings.NewReader(`{
+				"model":"grok-4.5",
+				"input":"inspect",
+				"tools":[{"type":"function","function":{"name":"Inspect"}}],
+				"tool_choice":{"type":"function","function":{"name":"Inspect"}}
+			}`),
+		),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode forwarded: %v", err)
+	}
+	tool := forwarded["tools"].([]any)[0].(map[string]any)
+	if tool["name"] != "Inspect" {
+		t.Fatalf("tool name=%#v payload=%#v", tool["name"], forwarded)
+	}
+	if _, ok := tool["parameters"].(map[string]any); !ok {
+		t.Fatalf("top-level parameters missing: %#v", tool)
+	}
+	if _, exists := tool["function"]; exists {
+		t.Fatalf("nested function leaked: %#v", tool)
+	}
+	choice := forwarded["tool_choice"].(map[string]any)
+	if choice["name"] != "Inspect" {
+		t.Fatalf("tool choice not flattened: %#v", choice)
+	}
+}
+
 func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
 	// Anthropic messages for catalog models go through /responses (same as OpenAI chat).
 	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"pong\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"

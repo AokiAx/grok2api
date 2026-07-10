@@ -99,7 +99,7 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 		output["tools"] = tools
 	}
 	if choice, ok := input["tool_choice"]; ok && choice != nil {
-		output["tool_choice"] = choice
+		output["tool_choice"] = NormalizeResponsesToolChoice(choice)
 	}
 	// OpenAI-style web_search_options -> backend_search enablement signal.
 	if _, ok := input["web_search_options"]; ok {
@@ -171,6 +171,124 @@ func hasWebSearchTool(raw any) bool {
 	return false
 }
 
+type toolDefinition struct {
+	Type        string
+	Name        string
+	Description string
+	Parameters  any
+	Strict      any
+	Raw         map[string]any
+}
+
+func parseToolDefinition(tool map[string]any) (toolDefinition, bool) {
+	typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+	if typeName == "" {
+		if _, hasFunction := tool["function"]; hasFunction || strings.TrimSpace(stringValue(tool["name"])) != "" {
+			typeName = "function"
+		}
+	}
+	if typeName != "function" {
+		if typeName == "" {
+			return toolDefinition{}, false
+		}
+		return toolDefinition{Type: typeName, Raw: cloneMap(tool)}, true
+	}
+
+	function, _ := tool["function"].(map[string]any)
+	name := firstNonEmptyString(tool["name"], function["name"])
+	if name == "" {
+		return toolDefinition{}, false
+	}
+	parameters := firstNonNil(
+		tool["parameters"],
+		tool["input_schema"],
+		function["parameters"],
+		function["input_schema"],
+	)
+	if parameters == nil {
+		parameters = emptyObjectSchema()
+	}
+	return toolDefinition{
+		Type:        "function",
+		Name:        name,
+		Description: firstNonEmptyString(tool["description"], function["description"]),
+		Parameters:  parameters,
+		Strict:      firstNonNil(tool["strict"], function["strict"]),
+	}, true
+}
+
+func (definition toolDefinition) responseTool() map[string]any {
+	if definition.Type != "function" {
+		return cloneMap(definition.Raw)
+	}
+	tool := map[string]any{
+		"type":       "function",
+		"name":       definition.Name,
+		"parameters": definition.Parameters,
+	}
+	if definition.Description != "" {
+		tool["description"] = definition.Description
+	}
+	if definition.Strict != nil {
+		tool["strict"] = definition.Strict
+	}
+	return tool
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		if result := strings.TrimSpace(stringValue(value)); result != "" {
+			return result
+		}
+	}
+	return ""
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func emptyObjectSchema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+}
+
+// NormalizeResponsesToolChoice converts Chat Completions function selection
+// into the flat shape required by the Responses API.
+func NormalizeResponsesToolChoice(raw any) any {
+	choice, ok := raw.(map[string]any)
+	if !ok {
+		return raw
+	}
+	if !strings.EqualFold(strings.TrimSpace(stringValue(choice["type"])), "function") {
+		return cloneMap(choice)
+	}
+	function, _ := choice["function"].(map[string]any)
+	name := firstNonEmptyString(choice["name"], function["name"])
+	if name == "" {
+		return cloneMap(choice)
+	}
+	return map[string]any{
+		"type": "function",
+		"name": name,
+	}
+}
+
 // NormalizeResponsesTools adapts client tool lists for strict Responses backends.
 //
 // Policy:
@@ -186,34 +304,18 @@ func NormalizeResponsesTools(raw any, maxTools int) []any {
 	}
 	out := make([]any, 0, len(tools))
 	seen := map[string]struct{}{}
-	appendTool := func(tool map[string]any) {
+	appendTool := func(definition toolDefinition) {
 		if maxTools > 0 && len(out) >= maxTools {
 			return
 		}
-		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
-		name := strings.TrimSpace(stringValue(tool["name"]))
-		if name == "" {
-			if fn, ok := tool["function"].(map[string]any); ok {
-				name = strings.TrimSpace(stringValue(fn["name"]))
-			}
-		}
-		if name != "" {
-			key := typeName + "\x00" + name
+		if definition.Name != "" {
+			key := definition.Type + "\x00" + definition.Name
 			if _, exists := seen[key]; exists {
 				return
 			}
 			seen[key] = struct{}{}
 		}
-		// Strict Responses backends require function.parameters.
-		if fn, ok := tool["function"].(map[string]any); ok {
-			if _, has := fn["parameters"]; !has {
-				fn["parameters"] = map[string]any{
-					"type":       "object",
-					"properties": map[string]any{},
-				}
-			}
-		}
-		out = append(out, tool)
+		out = append(out, definition.responseTool())
 	}
 
 	for _, item := range tools {
@@ -226,55 +328,21 @@ func NormalizeResponsesTools(raw any, maxTools int) []any {
 		case "namespace":
 			nested, _ := tool["tools"].([]any)
 			for _, child := range nested {
-				fnTool, ok := child.(map[string]any)
+				childTool, ok := child.(map[string]any)
 				if !ok {
 					continue
 				}
-				childType := strings.ToLower(strings.TrimSpace(stringValue(fnTool["type"])))
-				if childType == "" {
-					childType = "function"
-				}
-				if childType != "function" {
+				definition, valid := parseToolDefinition(childTool)
+				if !valid || definition.Type != "function" {
 					continue
 				}
-				flat := map[string]any{}
-				for k, v := range fnTool {
-					flat[k] = v
-				}
-				flat["type"] = "function"
-				if strings.TrimSpace(stringValue(flat["name"])) == "" {
-					if fn, ok := flat["function"].(map[string]any); ok {
-						if n := strings.TrimSpace(stringValue(fn["name"])); n != "" {
-							flat["name"] = n
-						}
-					}
-				}
-				appendTool(flat)
+				appendTool(definition)
 			}
-		case "", "function":
-			cloned := map[string]any{}
-			for k, v := range tool {
-				cloned[k] = v
-			}
-			if typeName == "" {
-				if _, hasFn := cloned["function"]; hasFn || strings.TrimSpace(stringValue(cloned["name"])) != "" {
-					cloned["type"] = "function"
-				} else {
-					continue
-				}
-			}
-			// Ensure top-level name for strict Responses backends.
-			if strings.TrimSpace(stringValue(cloned["name"])) == "" {
-				if fn, ok := cloned["function"].(map[string]any); ok {
-					if n := strings.TrimSpace(stringValue(fn["name"])); n != "" {
-						cloned["name"] = n
-					}
-				}
-			}
-			appendTool(cloned)
 		default:
-			// Keep known and unknown non-namespace tools as-is.
-			appendTool(tool)
+			definition, valid := parseToolDefinition(tool)
+			if valid {
+				appendTool(definition)
+			}
 		}
 	}
 	if len(out) == 0 {

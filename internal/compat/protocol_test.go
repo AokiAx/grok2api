@@ -489,3 +489,27 @@ func TestNormalizeResponsesToolsFlattensNamespaceChildren(t *testing.T) {
 		t.Fatalf("nested namespace function leaked: %#v", tool)
 	}
 }
+
+func TestChatToResponsesFlattensFunctionToolChoice(t *testing.T) {
+	chat := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"inspect"}],
+		"tool_choice":{"type":"function","function":{"name":"Inspect"}}
+	}`)
+
+	responses, _, err := compat.ChatToResponses(chat)
+	if err != nil {
+		t.Fatalf("chat to responses: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(responses, &payload); err != nil {
+		t.Fatalf("decode responses: %v", err)
+	}
+	choice := payload["tool_choice"].(map[string]any)
+	if choice["type"] != "function" || choice["name"] != "Inspect" {
+		t.Fatalf("choice not flattened: %#v", choice)
+	}
+	if _, exists := choice["function"]; exists {
+		t.Fatalf("nested function choice leaked: %#v", choice)
+	}
+}
