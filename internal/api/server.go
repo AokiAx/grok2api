@@ -16,6 +16,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/bridge"
 	"github.com/AokiAx/grok2api/internal/config"
+	"github.com/AokiAx/grok2api/internal/intercept"
 	"github.com/AokiAx/grok2api/internal/register"
 	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/service"
@@ -54,6 +55,7 @@ type Server struct {
 	modelCatalog     *upstream.Catalog
 	preferResponses  bool
 	bridge           *bridge.Pipeline
+	tracer           *intercept.Tracer
 	admin            AdminService
 	adminKey         string
 	registerJobs     RegisterJobService
@@ -80,6 +82,13 @@ func WithModelCatalog(catalog *upstream.Catalog) Option {
 func WithPreferResponses(enabled bool) Option {
 	return func(server *Server) {
 		server.preferResponses = enabled
+	}
+}
+
+// WithDebugTrace enables the temporary request interceptor (JSONL + slog).
+func WithDebugTrace(tracer *intercept.Tracer) Option {
+	return func(server *Server) {
+		server.tracer = tracer
 	}
 }
 
@@ -168,7 +177,12 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		mux.HandleFunc("GET /admin/api/register/settings", server.registerSettingsGet)
 		mux.HandleFunc("PUT /admin/api/register/settings", server.registerSettingsPut)
 	}
-	server.handler = mux
+	var handler http.Handler = mux
+	if server.tracer != nil && server.tracer.Enabled() {
+		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.
+		handler = intercept.Middleware(server.tracer, mux)
+	}
+	server.handler = handler
 	return server
 }
 

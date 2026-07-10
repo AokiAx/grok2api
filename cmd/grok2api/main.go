@@ -20,6 +20,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/api"
 	"github.com/AokiAx/grok2api/internal/config"
+	"github.com/AokiAx/grok2api/internal/intercept"
 	"github.com/AokiAx/grok2api/internal/register"
 	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/repository"
@@ -154,6 +155,21 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		service.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 	)
+	// Optional temporary interceptor: logs client + upstream stages for protocol debugging.
+	var apiGateway api.Gateway = gateway
+	var tracer *intercept.Tracer
+	if settings.DebugTrace {
+		traceDir := settings.DebugTraceDir
+		if strings.TrimSpace(traceDir) == "" {
+			traceDir = filepath.Join(settings.DataDir, "traces")
+		}
+		tracer = intercept.New(intercept.Options{
+			Enabled: true,
+			Dir:     traceDir,
+		})
+		apiGateway = &intercept.TraceGateway{Inner: gateway, Tracer: tracer}
+		slog.Warn("debug_trace enabled; writing JSONL traces", "dir", traceDir)
+	}
 	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
 	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
 	if err != nil {
@@ -161,14 +177,20 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	}
 	registerPipeline := register.NewPipelineFromSource(registerStore, adminService)
 	registerJobs := register.NewJobManagerFromSource(registerStore, registerPipeline)
-	handler := api.NewServer(
-		gateway,
-		poolStatusProvider{scheduler: pool},
-		settings.APIKey,
+	serverOptions := []api.Option{
 		api.WithDefaultModel(settings.DefaultModel),
 		api.WithAdmin(adminService, settings.AdminKey()),
 		api.WithRegisterJobs(registerJobs),
 		api.WithRegisterSettings(registerStore),
+	}
+	if tracer != nil {
+		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
+	}
+	handler := api.NewServer(
+		apiGateway,
+		poolStatusProvider{scheduler: pool},
+		settings.APIKey,
+		serverOptions...,
 	).Handler()
 	server := &http.Server{
 		Addr:              settings.Address(),

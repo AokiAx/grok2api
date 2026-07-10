@@ -23,6 +23,8 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GROK2API_PORT", "9999")
 	t.Setenv("GROK2API_DEFAULT_MODEL", "grok-env")
 	t.Setenv("GROK2API_APP_KEY", "env-admin")
+	t.Setenv("GROK2API_DEBUG_TRACE", "true")
+	t.Setenv("GROK2API_DEBUG_TRACE_DIR", "/tmp/g2a-traces")
 
 	got, err := config.Load(path)
 	if err != nil {
@@ -39,6 +41,12 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	}
 	if got.AppKey != "env-admin" {
 		t.Fatalf("app key = %q", got.AppKey)
+	}
+	if !got.DebugTrace {
+		t.Fatal("expected DebugTrace from env")
+	}
+	if got.DebugTraceDir != "/tmp/g2a-traces" {
+		t.Fatalf("DebugTraceDir=%q", got.DebugTraceDir)
 	}
 }
 
