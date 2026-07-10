@@ -162,28 +162,38 @@ func tryResponsesJSONBody(raw []byte) ([]byte, bool) {
 
 // ResponsesToChatStream converts Responses SSE into OpenAI Chat Completions SSE,
 // including function/tool call deltas for agent clients.
+//
+// OpenAI streaming contract (critical for Cursor/Claude Code):
+//  1. First tool chunk: {index, id, type, function:{name, arguments:""}}
+//  2. Later chunks: same index, only function.arguments as incremental deltas
+//  3. Never invent a second index for the same call (empty {} + real args = invalid params)
 type ResponsesToChatStream struct {
-	source     io.ReadCloser
-	model      string
-	reader     *bufio.Reader
-	pending    []byte
-	once       sync.Once
-	err        error
-	done       bool
-	started    bool
-	id         string
-	toolIndex  map[string]int
-	nextToolIx int
-	sawTools   bool
+	source       io.ReadCloser
+	model        string
+	reader       *bufio.Reader
+	pending      []byte
+	once         sync.Once
+	err          error
+	done         bool
+	started      bool
+	id           string
+	toolByCallID map[string]int
+	toolByOutIdx map[int]int
+	nextToolIx   int
+	sawTools     bool
+	// argsEmitted tracks whether any arguments delta was sent for a tool index.
+	argsEmitted map[int]bool
 }
 
 func NewResponsesToChatStream(source io.ReadCloser, model string) *ResponsesToChatStream {
 	return &ResponsesToChatStream{
-		source:    source,
-		model:     model,
-		reader:    bufio.NewReader(source),
-		id:        "chatcmpl_" + randomID(20),
-		toolIndex: map[string]int{},
+		source:       source,
+		model:        model,
+		reader:       bufio.NewReader(source),
+		id:           "chatcmpl_" + randomID(20),
+		toolByCallID: map[string]int{},
+		toolByOutIdx: map[int]int{},
+		argsEmitted:  map[int]bool{},
 	}
 }
 
@@ -244,6 +254,7 @@ func (s *ResponsesToChatStream) pull() error {
 		s.done = true
 		return nil
 	}
+	outIdx := intValue(event.Payload["output_index"])
 	switch event.Type {
 	case "response.created", "response.in_progress":
 		if !s.started {
@@ -258,14 +269,15 @@ func (s *ResponsesToChatStream) pull() error {
 		s.queueContentChunk(stringValue(event.Payload["delta"]), "")
 	case "response.output_item.added":
 		if item, ok := event.Payload["item"].(map[string]any); ok {
-			s.emitToolCallStart(item)
+			s.emitToolCallStart(item, outIdx)
 		}
 	case "response.function_call_arguments.delta":
-		s.emitToolCallArgumentsDelta(event.Payload)
+		s.emitToolCallArgumentsDelta(event.Payload, outIdx)
+	case "response.function_call_arguments.done":
+		// Arguments already streamed via deltas; nothing to emit.
 	case "response.output_item.done":
 		if item, ok := event.Payload["item"].(map[string]any); ok {
-			// Ensure name/id were emitted even if added was missed.
-			s.emitToolCallStart(item)
+			s.emitToolCallDone(item, outIdx)
 		}
 	case "response.completed":
 		finish := "stop"
@@ -279,17 +291,29 @@ func (s *ResponsesToChatStream) pull() error {
 	return nil
 }
 
-func (s *ResponsesToChatStream) emitToolCallStart(item map[string]any) {
+func isFunctionCallItem(item map[string]any) bool {
 	typ := strings.ToLower(strings.TrimSpace(stringValue(item["type"])))
-	if typ != "function_call" && typ != "tool_call" && typ != "custom_tool_call" {
+	return typ == "function_call" || typ == "tool_call" || typ == "custom_tool_call"
+}
+
+func (s *ResponsesToChatStream) emitToolCallStart(item map[string]any, outputIndex int) {
+	if !isFunctionCallItem(item) {
 		return
 	}
-	call := responsesItemToChatToolCall(item)
-	if call == nil {
+	callID, name, _ := functionCallFields(item)
+	if name == "" && callID == "" {
 		return
 	}
-	callID := stringValue(call["id"])
-	if _, exists := s.toolIndex[callID]; exists {
+	if callID == "" {
+		callID = "call_" + randomID(12)
+	}
+	if _, exists := s.toolByCallID[callID]; exists {
+		// Already started; still map output_index if missing.
+		if outputIndex >= 0 {
+			if idx, ok := s.toolByCallID[callID]; ok {
+				s.toolByOutIdx[outputIndex] = idx
+			}
+		}
 		return
 	}
 	if !s.started {
@@ -297,40 +321,163 @@ func (s *ResponsesToChatStream) emitToolCallStart(item map[string]any) {
 		s.started = true
 	}
 	index := s.nextToolIx
-	s.toolIndex[callID] = index
 	s.nextToolIx++
+	s.toolByCallID[callID] = index
+	if outputIndex >= 0 {
+		s.toolByOutIdx[outputIndex] = index
+	}
 	s.sawTools = true
-	fn, _ := call["function"].(map[string]any)
-	s.queueToolCallChunk(index, callID, stringValue(fn["name"]), stringValue(fn["arguments"]))
+	// Start frame: id + name only. Arguments come from deltas (never invent "{}").
+	s.queueToolCallChunk(index, callID, name, "", true)
 }
 
-func (s *ResponsesToChatStream) emitToolCallArgumentsDelta(payload map[string]any) {
+func (s *ResponsesToChatStream) emitToolCallArgumentsDelta(payload map[string]any, outputIndex int) {
 	if payload == nil {
 		return
 	}
-	delta := stringValue(payload["delta"])
+	delta := jsonString(payload["delta"])
+	if delta == "" {
+		// Some backends put the fragment under "arguments".
+		delta = jsonString(payload["arguments"])
+	}
 	if delta == "" {
 		return
 	}
-	callID := firstNonEmptyString(payload["call_id"], payload["item_id"], payload["id"])
-	index, ok := s.toolIndex[callID]
+	index, ok := s.resolveToolIndex(payload, outputIndex)
 	if !ok {
-		// Unknown call — allocate a slot.
-		index = s.nextToolIx
+		// Late delta without a prior added item: open a slot with whatever id we have.
+		callID := firstNonEmptyString(payload["call_id"], payload["item_id"])
 		if callID == "" {
-			callID = "call_" + randomID(8)
+			callID = "call_" + randomID(12)
 		}
-		s.toolIndex[callID] = index
-		s.nextToolIx++
-		s.sawTools = true
 		if !s.started {
 			s.queueContentChunk("", "")
 			s.started = true
 		}
-		s.queueToolCallChunk(index, callID, "", delta)
+		index = s.nextToolIx
+		s.nextToolIx++
+		s.toolByCallID[callID] = index
+		if outputIndex >= 0 {
+			s.toolByOutIdx[outputIndex] = index
+		}
+		s.sawTools = true
+		s.queueToolCallChunk(index, callID, "", "", true)
+	}
+	s.queueToolCallChunk(index, "", "", delta, false)
+	s.argsEmitted[index] = true
+}
+
+func (s *ResponsesToChatStream) emitToolCallDone(item map[string]any, outputIndex int) {
+	if !isFunctionCallItem(item) {
 		return
 	}
-	s.queueToolCallChunk(index, "", "", delta)
+	callID, name, arguments := functionCallFields(item)
+	if callID == "" && name == "" {
+		return
+	}
+	index, ok := s.resolveToolIndex(item, outputIndex)
+	if !ok {
+		// Missed added event entirely — emit a complete start + args once.
+		if callID == "" {
+			callID = "call_" + randomID(12)
+		}
+		if !s.started {
+			s.queueContentChunk("", "")
+			s.started = true
+		}
+		index = s.nextToolIx
+		s.nextToolIx++
+		s.toolByCallID[callID] = index
+		if outputIndex >= 0 {
+			s.toolByOutIdx[outputIndex] = index
+		}
+		s.sawTools = true
+		s.queueToolCallChunk(index, callID, name, "", true)
+		if arguments != "" {
+			s.queueToolCallChunk(index, "", "", arguments, false)
+			s.argsEmitted[index] = true
+		}
+		return
+	}
+	// If no argument deltas arrived, flush the final arguments once.
+	if !s.argsEmitted[index] && arguments != "" {
+		s.queueToolCallChunk(index, "", "", arguments, false)
+		s.argsEmitted[index] = true
+	}
+}
+
+func (s *ResponsesToChatStream) resolveToolIndex(payload map[string]any, outputIndex int) (int, bool) {
+	if callID := firstNonEmptyString(payload["call_id"], payload["item_id"]); callID != "" {
+		if idx, ok := s.toolByCallID[callID]; ok {
+			return idx, true
+		}
+	}
+	// item may carry call_id under nested fields
+	if callID := firstNonEmptyString(payload["call_id"]); callID != "" {
+		if idx, ok := s.toolByCallID[callID]; ok {
+			return idx, true
+		}
+	}
+	if outputIndex >= 0 {
+		if idx, ok := s.toolByOutIdx[outputIndex]; ok {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func functionCallFields(item map[string]any) (callID, name, arguments string) {
+	callID = firstNonEmptyString(item["call_id"])
+	// Prefer call_id over generic id (item id may be fc_* while call_id is call-*).
+	if callID == "" {
+		// Only fall back to id when it looks like a call id.
+		if id := stringValue(item["id"]); strings.HasPrefix(id, "call") || strings.HasPrefix(id, "fc_") {
+			callID = id
+		}
+	}
+	name = firstNonEmptyString(item["name"], item["tool_name"])
+	if name == "" {
+		if fn, ok := item["function"].(map[string]any); ok {
+			name = stringValue(fn["name"])
+		}
+	}
+	arguments = jsonString(item["arguments"])
+	if arguments == "" {
+		arguments = jsonString(item["input"])
+	}
+	if arguments == "" {
+		if fn, ok := item["function"].(map[string]any); ok {
+			arguments = jsonString(fn["arguments"])
+		}
+	}
+	return callID, name, arguments
+}
+
+func jsonString(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	case json.Number:
+		return typed.String()
+	case map[string]any, []any:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	default:
+		// Avoid fmt.Sprint(map) which produces invalid tool parameters.
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return strings.TrimSpace(fmt.Sprint(typed))
+		}
+		// Numbers/bools become valid JSON tokens; fine as argument fragments.
+		return string(encoded)
+	}
 }
 
 func (s *ResponsesToChatStream) queueContentChunk(delta string, finish string) {
@@ -351,19 +498,26 @@ func (s *ResponsesToChatStream) queueContentChunk(delta string, finish string) {
 	s.queueChoice(choice)
 }
 
-func (s *ResponsesToChatStream) queueToolCallChunk(index int, id, name, arguments string) {
+// queueToolCallChunk emits one OpenAI tool_calls delta.
+// startFrame=true includes id/type/name; later frames should only carry arguments.
+func (s *ResponsesToChatStream) queueToolCallChunk(index int, id, name, arguments string, startFrame bool) {
 	toolCall := map[string]any{
 		"index": index,
 	}
-	if id != "" {
-		toolCall["id"] = id
+	if startFrame {
+		if id != "" {
+			toolCall["id"] = id
+		}
 		toolCall["type"] = "function"
 	}
 	function := map[string]any{}
 	if name != "" {
 		function["name"] = name
 	}
-	if arguments != "" {
+	if startFrame {
+		// OpenAI clients expect arguments key present on the first frame.
+		function["arguments"] = arguments
+	} else if arguments != "" {
 		function["arguments"] = arguments
 	}
 	if len(function) > 0 {

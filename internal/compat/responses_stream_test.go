@@ -64,18 +64,22 @@ func TestSetJSONStreamFlagForcesTrue(t *testing.T) {
 }
 
 func TestResponsesToChatStreamEmitsToolCallDeltas(t *testing.T) {
+	// Mirrors live Grok SSE: added (name, empty args) → arguments.delta (full JSON) → done.
 	sse := strings.Join([]string{
 		`event: response.output_item.added`,
-		`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"Read","arguments":""}}`,
 		``,
 		`event: response.function_call_arguments.delta`,
-		`data: {"type":"response.function_call_arguments.delta","call_id":"call_1","delta":"{\"q\":"}`,
+		`data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"file_path\":\"/tmp/t\",\"limit\":10}"}`,
 		``,
-		`event: response.function_call_arguments.delta`,
-		`data: {"type":"response.function_call_arguments.delta","call_id":"call_1","delta":"\"x\"}"}`,
+		`event: response.function_call_arguments.done`,
+		`data: {"type":"response.function_call_arguments.done","output_index":1}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"file_path\":\"/tmp/t\",\"limit\":10}"}}`,
 		``,
 		`event: response.completed`,
-		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"file_path\":\"/tmp/t\",\"limit\":10}"}]}}`,
 		``,
 	}, "\n")
 	stream := compat.NewResponsesToChatStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
@@ -88,11 +92,65 @@ func TestResponsesToChatStreamEmitsToolCallDeltas(t *testing.T) {
 	if !strings.Contains(body, `"tool_calls"`) {
 		t.Fatalf("missing tool_calls: %s", body)
 	}
-	if !strings.Contains(body, `"name":"lookup"`) {
+	if !strings.Contains(body, `"name":"Read"`) {
 		t.Fatalf("missing name: %s", body)
 	}
 	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
 		t.Fatalf("missing tool_calls finish: %s", body)
+	}
+	// Reconstruct OpenAI-style tool call accumulation by index.
+	type toolAcc struct {
+		id, name, args string
+	}
+	acc := map[int]*toolAcc{}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk map[string]any
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		choices, _ := chunk["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		choice, _ := choices[0].(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+		calls, _ := delta["tool_calls"].([]any)
+		for _, raw := range calls {
+			tc, _ := raw.(map[string]any)
+			idx := int(tc["index"].(float64))
+			if acc[idx] == nil {
+				acc[idx] = &toolAcc{}
+			}
+			if id, _ := tc["id"].(string); id != "" {
+				acc[idx].id = id
+			}
+			fn, _ := tc["function"].(map[string]any)
+			if n, _ := fn["name"].(string); n != "" {
+				acc[idx].name = n
+			}
+			if a, _ := fn["arguments"].(string); a != "" {
+				acc[idx].args += a
+			}
+		}
+	}
+	if len(acc) != 1 {
+		t.Fatalf("expected single tool index, got %d body=%s", len(acc), body)
+	}
+	t0 := acc[0]
+	if t0.name != "Read" || !strings.Contains(t0.args, "file_path") || t0.args == "{}" {
+		t.Fatalf("reconstructed tool=%+v body=%s", t0, body)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(t0.args), &parsed); err != nil {
+		t.Fatalf("arguments must be valid JSON, got %q: %v", t0.args, err)
 	}
 }
 

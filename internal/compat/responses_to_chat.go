@@ -117,31 +117,16 @@ func extractResponsesContent(response map[string]any) (text string, toolCalls []
 }
 
 func responsesItemToChatToolCall(item map[string]any) map[string]any {
-	name := firstNonEmptyString(item["name"], item["tool_name"])
-	if name == "" {
-		if fn, ok := item["function"].(map[string]any); ok {
-			name = stringValue(fn["name"])
-		}
-	}
+	callID, name, arguments := functionCallFields(item)
 	if name == "" {
 		return nil
 	}
-	callID := firstNonEmptyString(item["call_id"], item["id"])
 	if callID == "" {
 		callID = "call_" + randomID(12)
 	}
-	arguments := firstNonEmptyString(item["arguments"], item["input"])
 	if arguments == "" {
-		if fn, ok := item["function"].(map[string]any); ok {
-			arguments = stringValue(fn["arguments"])
-		}
-	}
-	if arguments == "" {
-		// Some backends put structured args under "parameters".
 		if params := item["parameters"]; params != nil {
-			if encoded, err := json.Marshal(params); err == nil {
-				arguments = string(encoded)
-			}
+			arguments = jsonString(params)
 		}
 	}
 	if arguments == "" {

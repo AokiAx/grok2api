@@ -105,7 +105,7 @@ func chatToolCallToFunctionCall(raw any) map[string]any {
 	if callID == "" {
 		callID = "call_" + randomID(12)
 	}
-	arguments := firstNonEmptyString(call["arguments"], function["arguments"])
+	arguments := jsonString(firstNonNil(call["arguments"], function["arguments"]))
 	if arguments == "" {
 		arguments = "{}"
 	}
