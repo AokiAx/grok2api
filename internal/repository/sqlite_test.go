@@ -233,3 +233,106 @@ func TestDeleteAccountRemovesStoredCredential(t *testing.T) {
 		t.Fatalf("accounts = %#v", accounts)
 	}
 }
+
+func TestOpenSQLiteMigratesPythonV1AccountTable(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "python-v1.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("open fixture sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		INSERT INTO app_meta(key, value) VALUES('schema_version', '1');
+		CREATE TABLE cli_accounts (
+			id TEXT PRIMARY KEY,
+			identity_key TEXT NOT NULL UNIQUE,
+			key TEXT NOT NULL,
+			refresh_token TEXT,
+			expires_at TEXT,
+			oidc_issuer TEXT NOT NULL,
+			oidc_client_id TEXT NOT NULL,
+			email TEXT NOT NULL DEFAULT '',
+			user_id TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			request_count INTEGER NOT NULL DEFAULT 0,
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			cooldown_until REAL,
+			created_at REAL NOT NULL,
+			updated_at REAL NOT NULL,
+			disabled_reason TEXT NOT NULL DEFAULT ''
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create Python v1 schema: %v", err)
+	}
+	now := time.Now().UTC()
+	rows := []struct {
+		id             string
+		enabled        int
+		failCount      int
+		cooldownUntil  any
+		disabledReason string
+	}{
+		{id: "ready", enabled: 1},
+		{id: "quota", enabled: 0, failCount: 5, disabledReason: "subscription:free-usage-exhausted"},
+		{id: "auth", enabled: 0, failCount: 5, disabledReason: "invalid-token"},
+		{id: "cooldown", enabled: 1, cooldownUntil: now.Add(10 * time.Minute).Unix()},
+	}
+	for _, row := range rows {
+		_, err := db.Exec(`INSERT INTO cli_accounts (
+			id, identity_key, key, refresh_token, expires_at, oidc_issuer,
+			oidc_client_id, email, user_id, enabled, request_count, fail_count,
+			cooldown_until, created_at, updated_at, disabled_reason
+		) VALUES (?, ?, ?, '', '', 'https://auth.x.ai', 'client', ?, '', ?, 0, ?, ?, ?, ?, ?)`,
+			row.id,
+			"id:"+row.id,
+			"token-"+row.id,
+			row.id+"@example.com",
+			row.enabled,
+			row.failCount,
+			row.cooldownUntil,
+			now.Add(-time.Hour).Unix(),
+			now.Unix(),
+			row.disabledReason,
+		)
+		if err != nil {
+			t.Fatalf("insert %s: %v", row.id, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture sqlite: %v", err)
+	}
+
+	repo, err := repository.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open migrated sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list migrated accounts: %v", err)
+	}
+	if len(accounts) != len(rows) {
+		t.Fatalf("account count = %d; want %d", len(accounts), len(rows))
+	}
+	byID := make(map[string]account.Account, len(accounts))
+	for _, item := range accounts {
+		byID[item.ID] = item
+	}
+	if byID["ready"].Pool != account.PoolReady {
+		t.Fatalf("ready = %#v", byID["ready"])
+	}
+	if byID["quota"].UnavailableReason != account.ReasonQuota || byID["quota"].RetryAt.IsZero() {
+		t.Fatalf("quota = %#v", byID["quota"])
+	}
+	if byID["auth"].UnavailableReason != account.ReasonAuth {
+		t.Fatalf("auth = %#v", byID["auth"])
+	}
+	if byID["cooldown"].UnavailableReason != account.ReasonCooldown || byID["cooldown"].RetryAt.IsZero() {
+		t.Fatalf("cooldown = %#v", byID["cooldown"])
+	}
+	if repo.SchemaVersion(ctx) != 2 {
+		t.Fatalf("schema version = %d", repo.SchemaVersion(ctx))
+	}
+}
