@@ -130,7 +130,49 @@ func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"count":    len(accounts),
 		"accounts": public,
+		"summary":  summarizeAccounts(accounts),
 	})
+}
+
+type accountSummary struct {
+	TotalAccounts       int            `json:"total_accounts"`
+	ReadyAccounts       int            `json:"ready_accounts"`
+	UnavailableAccounts int            `json:"unavailable_accounts"`
+	ActiveLeases        int            `json:"active_leases"`
+	MaxActive           int            `json:"max_active"`
+	TotalRequests       int64          `json:"total_requests"`
+	RefreshableAccounts int            `json:"refreshable_accounts"`
+	QuotaActual         int64          `json:"quota_actual"`
+	QuotaLimit          int64          `json:"quota_limit"`
+	Reasons             map[string]int `json:"reasons"`
+}
+
+func summarizeAccounts(accounts []account.Account) accountSummary {
+	summary := accountSummary{
+		TotalAccounts: len(accounts),
+		Reasons:       make(map[string]int),
+	}
+	for _, item := range accounts {
+		if item.Pool == account.PoolReady {
+			summary.ReadyAccounts++
+		} else {
+			summary.UnavailableAccounts++
+			summary.Reasons[string(item.UnavailableReason)]++
+		}
+		summary.ActiveLeases += item.Active
+		maxActive := item.MaxActive
+		if maxActive <= 0 {
+			maxActive = 1
+		}
+		summary.MaxActive += maxActive
+		summary.TotalRequests += item.RequestCount
+		if item.RefreshToken != "" {
+			summary.RefreshableAccounts++
+		}
+		summary.QuotaActual += item.QuotaActual
+		summary.QuotaLimit += item.QuotaLimit
+	}
+	return summary
 }
 
 func publicAccount(item account.Account) map[string]any {

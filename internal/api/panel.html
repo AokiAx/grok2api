@@ -3,45 +3,109 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>grok2api Go</title>
+  <title>grok2api · 账号池</title>
   <style>
-    body{font:14px system-ui;background:#0b1020;color:#e8edf7;margin:0}main{max-width:1100px;margin:auto;padding:24px}
-    h1{font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#141c30;border:1px solid #2a3653;border-radius:12px;padding:16px}
-    .value{font-size:30px;font-weight:700}.muted{color:#91a0bd}textarea,input,button{box-sizing:border-box;background:#0e1628;color:#fff;border:1px solid #34415f;border-radius:8px;padding:10px}textarea{width:100%;min-height:150px}button{cursor:pointer;margin-right:8px}pre{white-space:pre-wrap;overflow:auto}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #28344f;text-align:left}
+    :root{color-scheme:dark;--bg:#090d14;--surface:#111722;--surface-2:#161e2c;--border:#273244;--text:#edf2f8;--muted:#8c9aaf;--green:#51d88a;--amber:#f2b84b;--red:#ff6b78;--blue:#69a7ff;--radius:14px}
+    *{box-sizing:border-box}html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}button,input,textarea,select{font:inherit}main{width:min(1380px,100%);margin:auto;padding:28px}
+    header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}.eyebrow{margin:0 0 5px;color:var(--blue);font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}h1{margin:0;font-size:28px;line-height:1.15;letter-spacing:-.03em;text-wrap:balance}h2{margin:0;font-size:16px;letter-spacing:-.01em}.subhead{margin:6px 0 0;color:var(--muted);text-wrap:pretty}.live{display:flex;align-items:center;gap:9px;color:var(--muted);white-space:nowrap}.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px rgba(81,216,138,.1)}.dot.error{background:var(--red);box-shadow:0 0 0 5px rgba(255,107,120,.1)}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.metric,.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 14px 38px rgba(0,0,0,.18)}.metric{min-height:112px;padding:17px 18px;position:relative;overflow:hidden}.metric::after{content:"";position:absolute;inset:auto 0 0;height:2px;background:var(--tone,var(--blue));opacity:.75}.metric-label{color:var(--muted);font-size:12px;font-weight:650;letter-spacing:.04em;text-transform:uppercase}.metric-value{margin-top:10px;font-size:28px;font-weight:750;line-height:1;font-variant-numeric:tabular-nums}.metric-note{margin-top:9px;color:var(--muted);font-size:12px}.tone-green{--tone:var(--green)}.tone-amber{--tone:var(--amber)}.tone-red{--tone:var(--red)}
+    .dashboard-row{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr);gap:12px;margin-top:12px}.panel{padding:18px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.panel-note{color:var(--muted);font-size:12px}.pool-track{display:flex;height:13px;border-radius:99px;overflow:hidden;background:#202938}.pool-ready{background:var(--green)}.pool-unavailable{background:var(--red)}.pool-legend{display:flex;gap:18px;margin-top:11px;color:var(--muted);font-size:12px}.pool-legend b{color:var(--text);font-variant-numeric:tabular-nums}.reason-list{display:grid;gap:10px}.reason-row{display:grid;grid-template-columns:92px minmax(0,1fr) 38px;align-items:center;gap:10px}.reason-label{color:var(--muted);overflow:hidden;text-overflow:ellipsis}.reason-track{height:8px;border-radius:99px;background:#202938;overflow:hidden}.reason-fill{height:100%;border-radius:inherit;background:var(--amber);transition-property:width;transition-duration:220ms;transition-timing-function:ease-out}.reason-count{text-align:right;font-variant-numeric:tabular-nums}.empty{color:var(--muted);padding:8px 0}
+    .accounts-panel{margin-top:12px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.filters{display:flex;gap:8px;flex-wrap:wrap}input,textarea,select{color:var(--text);background:#0d131d;border:1px solid var(--border);border-radius:9px;outline:none;transition-property:border-color,box-shadow;transition-duration:150ms}input:focus,textarea:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(105,167,255,.13)}input,select{height:40px;padding:0 12px}#search{width:min(280px,70vw)}.table-wrap{overflow:auto;margin:0 -18px -18px;padding:0 18px 8px}table{width:100%;min-width:960px;border-collapse:collapse}th{padding:11px 9px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.06em;text-align:left;text-transform:uppercase;border-bottom:1px solid var(--border)}td{padding:12px 9px;border-bottom:1px solid rgba(39,50,68,.7);vertical-align:middle}tbody tr:hover{background:rgba(105,167,255,.035)}.num{font-variant-numeric:tabular-nums}.account-name{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{display:inline-flex;align-items:center;min-height:26px;padding:3px 9px;border-radius:99px;font-size:12px;font-weight:650}.badge.ready{color:var(--green);background:rgba(81,216,138,.1)}.badge.unavailable{color:var(--red);background:rgba(255,107,120,.1)}
+    button{min-height:40px;padding:0 13px;color:var(--text);background:#192233;border:1px solid #344158;border-radius:9px;cursor:pointer;font-weight:650;transition-property:transform,background-color,border-color;transition-duration:140ms;transition-timing-function:ease-out}button:hover{background:#212d40;border-color:#465673}button:active{transform:scale(.97)}button.primary{background:#245da8;border-color:#3371c5}button.danger{color:#ffabb2;background:rgba(255,107,120,.08);border-color:rgba(255,107,120,.28)}.actions{display:flex;gap:6px}.actions button{min-height:34px;padding:0 10px;font-size:12px}
+    .import-panel{margin-top:12px}.import-grid{display:grid;grid-template-columns:260px minmax(0,1fr);gap:14px}.stack{display:grid;align-content:start;gap:9px}.field-label{color:var(--muted);font-size:12px;font-weight:650}textarea{width:100%;min-height:172px;padding:12px;resize:vertical;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace}.button-row{display:flex;gap:8px;flex-wrap:wrap}pre{min-height:54px;margin:12px 0 0;padding:12px;background:#0b1018;border:1px solid var(--border);border-radius:10px;color:#b8c5d7;white-space:pre-wrap;overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+    @media(max-width:900px){main{padding:18px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-row,.import-grid{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}.live{white-space:normal}}@media(max-width:520px){main{padding:12px}.metrics{grid-template-columns:1fr 1fr;gap:8px}.metric{min-height:100px;padding:14px}.metric-value{font-size:23px}.panel{padding:14px}.table-wrap{margin:0 -14px -14px;padding:0 14px 6px}}
   </style>
 </head>
 <body><main>
-  <h1>grok2api Go</h1><p class="muted">Ready Pool / Unavailable Pool</p>
-  <div class="grid"><div class="card"><div class="muted">Ready Pool</div><div class="value" id="ready">-</div></div><div class="card"><div class="muted">Unavailable Pool</div><div class="value" id="unavailable">-</div></div><div class="card"><div class="muted">Quota Circuit</div><div class="value" id="circuit">-</div></div></div>
-  <div class="card" style="margin-top:12px"><h2>账号</h2><table><thead><tr><th>账号</th><th>Pool</th><th>原因</th><th>重试时间</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
-  <div class="card" style="margin-top:12px"><h2>导入授权凭证</h2><input id="key" type="password" placeholder="面板密码" style="width:100%;margin-bottom:8px"><textarea id="input" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea><p><button onclick="send(true)">预览</button><button onclick="send(false)">导入</button></p><pre id="output"></pre></div>
+  <header>
+    <div><p class="eyebrow">Account operations</p><h1>grok2api 账号池</h1><p class="subhead">Ready 简单轮询 · 不可用账号按原因隔离 · 15 秒自动刷新</p></div>
+    <div class="live"><span class="dot" id="healthDot"></span><span id="connectionState">正在连接</span><span>·</span><span id="lastUpdated">尚未更新</span></div>
+  </header>
+
+  <section class="metrics" aria-label="账号池统计">
+    <article class="metric"><div class="metric-label">总账号</div><div class="metric-value" id="totalAccounts">—</div><div class="metric-note">当前持久化账号</div></article>
+    <article class="metric tone-green"><div class="metric-label">Ready Pool</div><div class="metric-value" id="ready">—</div><div class="metric-note">可参与轮询</div></article>
+    <article class="metric tone-red"><div class="metric-label">Unavailable Pool</div><div class="metric-value" id="unavailable">—</div><div class="metric-note">已从选号中隔离</div></article>
+    <article class="metric"><div class="metric-label">累计请求</div><div class="metric-value" id="totalRequests">—</div><div class="metric-note">所有账号请求计数</div></article>
+    <article class="metric"><div class="metric-label">在途并发</div><div class="metric-value" id="activeLeases">—</div><div class="metric-note">占用 / 总并发槽</div></article>
+    <article class="metric"><div class="metric-label">可自动刷新</div><div class="metric-value" id="refreshableAccounts">—</div><div class="metric-note">具有 refresh token</div></article>
+    <article class="metric tone-amber"><div class="metric-label">额度汇总</div><div class="metric-value" id="quotaUsage">—</div><div class="metric-note" id="quotaNote">上游未报告额度</div></article>
+    <article class="metric"><div class="metric-label">Quota Circuit</div><div class="metric-value" id="circuit">—</div><div class="metric-note" id="circuitNote">全池额度熔断</div></article>
+  </section>
+
+  <section class="dashboard-row">
+    <article class="panel">
+      <div class="panel-head"><h2>池分布</h2><span class="panel-note" id="poolPercent">—</span></div>
+      <div class="pool-track" aria-label="Ready 与 Unavailable 比例"><div class="pool-ready" id="readyBar"></div><div class="pool-unavailable" id="unavailableBar"></div></div>
+      <div class="pool-legend"><span>Ready <b id="readyLegend">—</b></span><span>Unavailable <b id="unavailableLegend">—</b></span></div>
+    </article>
+    <article class="panel">
+      <div class="panel-head"><h2>不可用原因</h2><span class="panel-note">实时分类</span></div>
+      <div class="reason-list" id="reasonBars"><div class="empty">暂无不可用账号</div></div>
+    </article>
+  </section>
+
+  <section class="panel accounts-panel">
+    <div class="panel-head toolbar">
+      <div><h2>账号明细</h2><div class="panel-note" id="visibleCount">—</div></div>
+      <div class="filters"><input id="search" type="search" placeholder="搜索账号或错误码"><select id="poolFilter"><option value="all">全部池</option><option value="ready">Ready</option><option value="unavailable">Unavailable</option></select></div>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>账号</th><th>状态</th><th>原因 / 错误</th><th>请求</th><th>并发</th><th>额度</th><th>重试时间</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
+  </section>
+
+  <section class="panel import-panel">
+    <div class="panel-head"><h2>导入授权凭证</h2><span class="panel-note">先预览，再写入</span></div>
+    <div class="import-grid">
+      <div class="stack"><label class="field-label" for="key">面板密码</label><input id="key" type="password" autocomplete="current-password" placeholder="panel_password"><div class="button-row"><button id="previewButton">预览</button><button class="primary" id="importButton">导入</button></div></div>
+      <div><label class="field-label" for="input">账号 JSON</label><textarea id="input" spellcheck="false" placeholder='[{"access_token":"...","refresh_token":"...","email":"user@example.com"}]'></textarea></div>
+    </div>
+    <pre id="output">等待操作</pre>
+  </section>
+
   <script>
     const byId=id=>document.getElementById(id);
-    const auth=()=>{const v=byId('key').value;return v?{'Authorization':'Bearer '+v}:{} };
-    const cell=(row,value)=>{const td=document.createElement('td');td.textContent=value??'';row.appendChild(td);return td};
+    const state={accounts:[]};
+    const number=new Intl.NumberFormat('zh-CN');
+    const reasonNames={quota:'额度耗尽',auth:'认证失效',cooldown:'限流冷却',validating:'等待验证',disabled:'人工禁用'};
+    const auth=()=>{const value=byId('key').value;return value?{'Authorization':'Bearer '+value}:{} };
+    const cell=(row,value,className='')=>{const td=document.createElement('td');td.textContent=value??'';if(className)td.className=className;row.appendChild(td);return td};
+    const percent=(value,total)=>total>0?Math.round(value/total*100):0;
+    const quotaText=(actual,limit)=>limit>0?`${number.format(actual)} / ${number.format(limit)}`:'—';
+    const timeText=value=>{if(!value||String(value).startsWith('0001-'))return '—';const date=new Date(value);return Number.isNaN(date.getTime())?'—':date.toLocaleString('zh-CN',{hour12:false})};
+
+    function renderSummary(summary,health){
+      const total=summary.total_accounts||0,ready=summary.ready_accounts||0,unavailable=summary.unavailable_accounts||0;
+      byId('totalAccounts').textContent=number.format(total);byId('ready').textContent=number.format(ready);byId('unavailable').textContent=number.format(unavailable);
+      byId('totalRequests').textContent=number.format(summary.total_requests||0);byId('activeLeases').textContent=`${number.format(summary.active_leases||0)} / ${number.format(summary.max_active||0)}`;
+      byId('refreshableAccounts').textContent=number.format(summary.refreshable_accounts||0);byId('quotaUsage').textContent=quotaText(summary.quota_actual||0,summary.quota_limit||0);
+      byId('quotaNote').textContent=summary.quota_limit>0?`已使用 ${percent(summary.quota_actual,summary.quota_limit)}%`:'上游未报告额度';
+      const open=Boolean(health.quota_circuit?.open);byId('circuit').textContent=open?'OPEN':'CLOSED';byId('circuit').style.color=open?'var(--red)':'var(--green)';byId('circuitNote').textContent=open?`恢复 ${timeText(health.quota_circuit.retry_at)}`:'全池额度熔断未触发';
+      const readyPercent=percent(ready,total),unavailablePercent=total>0?100-readyPercent:0;byId('readyBar').style.width=`${readyPercent}%`;byId('unavailableBar').style.width=`${unavailablePercent}%`;byId('readyLegend').textContent=number.format(ready);byId('unavailableLegend').textContent=number.format(unavailable);byId('poolPercent').textContent=`Ready ${readyPercent}%`;
+      renderReasons(summary.reasons||{},unavailable);
+    }
+
+    function renderReasons(reasons,total){
+      const root=byId('reasonBars');root.replaceChildren();const entries=Object.entries(reasons).filter(([,count])=>count>0).sort((a,b)=>b[1]-a[1]);
+      if(!entries.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='暂无不可用账号';root.appendChild(empty);return}
+      for(const [reason,count] of entries){const row=document.createElement('div');row.className='reason-row';const label=document.createElement('div');label.className='reason-label';label.textContent=reasonNames[reason]||reason;const track=document.createElement('div');track.className='reason-track';const fill=document.createElement('div');fill.className='reason-fill';fill.style.width=`${percent(count,total)}%`;track.appendChild(fill);const value=document.createElement('div');value.className='reason-count';value.textContent=number.format(count);row.append(label,track,value);root.appendChild(row)}
+    }
+
+    function renderAccounts(){
+      const query=byId('search').value.trim().toLowerCase(),pool=byId('poolFilter').value;const body=byId('accounts');body.replaceChildren();
+      const visible=state.accounts.filter(account=>(pool==='all'||account.pool===pool)&&(!query||[account.email,account.id,account.unavailable_reason,account.last_error_code].some(value=>String(value||'').toLowerCase().includes(query))));
+      byId('visibleCount').textContent=`显示 ${visible.length} / ${state.accounts.length}`;
+      for(const account of visible){const row=document.createElement('tr');cell(row,account.email||account.id,'account-name');const status=cell(row,'');const badge=document.createElement('span');badge.className=`badge ${account.pool}`;badge.textContent=account.pool==='ready'?'Ready':'Unavailable';status.appendChild(badge);cell(row,[reasonNames[account.unavailable_reason]||account.unavailable_reason,account.last_error_code].filter(Boolean).join(' · ')||'—');cell(row,number.format(account.request_count||0),'num');cell(row,`${account.active||0} / ${account.max_active||1}`,'num');cell(row,quotaText(account.quota_actual||0,account.quota_limit||0),'num');cell(row,timeText(account.retry_at),'num');const actions=cell(row,'','actions');const recover=document.createElement('button');recover.textContent='恢复验证';recover.onclick=()=>accountAction(account.id,'recover');const remove=document.createElement('button');remove.className='danger';remove.textContent='删除';remove.onclick=()=>accountAction(account.id,'delete');actions.append(recover,remove);body.appendChild(row)}
+      if(!visible.length){const row=document.createElement('tr');const empty=cell(row,'没有符合条件的账号');empty.colSpan=8;empty.className='empty';body.appendChild(row)}
+    }
+
     async function refresh(){
-      const h=await fetch('/health').then(r=>r.json());
-      byId('ready').textContent=h.account_pool.ready;
-      byId('unavailable').textContent=h.account_pool.unavailable;
-      byId('circuit').textContent=h.quota_circuit?.open?'OPEN':'closed';
-      const r=await fetch('/admin/api/cli-accounts',{headers:auth()});if(!r.ok)return;
-      const d=await r.json();const body=byId('accounts');body.replaceChildren();
-      for(const account of d.accounts){
-        const row=document.createElement('tr');
-        cell(row,account.email||account.id);cell(row,account.pool);cell(row,account.unavailable_reason);cell(row,account.retry_at);
-        const actions=cell(row,'');
-        const recover=document.createElement('button');recover.textContent='恢复验证';recover.onclick=()=>accountAction(account.id,'recover');actions.appendChild(recover);
-        const remove=document.createElement('button');remove.textContent='删除';remove.onclick=()=>accountAction(account.id,'delete');actions.appendChild(remove);
-        body.appendChild(row);
-      }
+      try{const healthResponse=await fetch('/health');if(!healthResponse.ok)throw new Error(`health ${healthResponse.status}`);const health=await healthResponse.json();const accountsResponse=await fetch('/admin/api/cli-accounts',{headers:auth()});if(!accountsResponse.ok)throw new Error(accountsResponse.status===401?'请输入正确的面板密码':`accounts ${accountsResponse.status}`);const data=await accountsResponse.json();state.accounts=data.accounts||[];renderSummary(data.summary||{},health);renderAccounts();byId('healthDot').classList.remove('error');byId('connectionState').textContent='服务正常';byId('lastUpdated').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`}
+      catch(error){byId('healthDot').classList.add('error');byId('connectionState').textContent=String(error.message||error);byId('lastUpdated').textContent='更新失败'}
     }
-    async function accountAction(id,action){
-      if(action==='delete'&&!confirm(`确认删除 ${id}？`))return;
-      const path=`/admin/api/cli-accounts/${encodeURIComponent(id)}${action==='recover'?'/recover':''}`;
-      const r=await fetch(path,{method:action==='recover'?'POST':'DELETE',headers:auth()});
-      const data=await r.json();byId('output').textContent=JSON.stringify(data,null,2);await refresh();
-    }
-    async function send(preview){try{let parsed=JSON.parse(byId('input').value);if(!Array.isArray(parsed))parsed=parsed.accounts||[parsed];const path=preview?'/admin/api/accounts/import/preview':'/admin/api/accounts/import';const r=await fetch(path,{method:'POST',headers:{...auth(),'Content-Type':'application/json'},body:JSON.stringify({accounts:parsed})});byId('output').textContent=JSON.stringify(await r.json(),null,2);await refresh()}catch(error){byId('output').textContent=String(error)}}
-    refresh();
+
+    async function accountAction(id,action){if(action==='delete'&&!confirm(`确认删除 ${id}？`))return;const path=`/admin/api/cli-accounts/${encodeURIComponent(id)}${action==='recover'?'/recover':''}`;const response=await fetch(path,{method:action==='recover'?'POST':'DELETE',headers:auth()});const data=await response.json();byId('output').textContent=JSON.stringify(data,null,2);await refresh()}
+    async function send(preview){try{let parsed=JSON.parse(byId('input').value);if(!Array.isArray(parsed))parsed=parsed.accounts||[parsed];const path=preview?'/admin/api/accounts/import/preview':'/admin/api/accounts/import';const response=await fetch(path,{method:'POST',headers:{...auth(),'Content-Type':'application/json'},body:JSON.stringify({accounts:parsed})});byId('output').textContent=JSON.stringify(await response.json(),null,2);await refresh()}catch(error){byId('output').textContent=String(error.message||error)}}
+    byId('previewButton').onclick=()=>send(true);byId('importButton').onclick=()=>send(false);byId('search').oninput=renderAccounts;byId('poolFilter').onchange=renderAccounts;byId('key').onchange=refresh;
+    refresh();setInterval(refresh,15000);
   </script>
 </main></body></html>
