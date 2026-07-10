@@ -257,7 +257,6 @@ func TestRecoverMissingAccountReturnsError(t *testing.T) {
 	}
 }
 
-
 func TestImportAcceptsAccessTokenAlias(t *testing.T) {
 	repository := &memoryRepository{}
 	service := admin.NewService(repository, validator{})
