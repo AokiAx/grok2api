@@ -1,191 +1,205 @@
 # grok2api
 
-把 **xAI Grok CLI 会话** 变成 **OpenAI / Anthropic 兼容 HTTP API** 的本地服务。
+用 Go 将 xAI Grok CLI 凭证转换为 OpenAI / Anthropic 兼容 HTTP API，并以两个逻辑号池管理账号：
 
-- 上游：`cli-chat-proxy.grok.com`（**不是** grok.com 网页 SSO 聊天）
-- 凭证：OIDC `access_token` + `refresh_token`（主存储 `data/grok2api.db`）
-- 面板：密码保护的 Web 管理台 `/panel`
+- `ready`：已验证可用，按简单环形轮询选号，不评分、不排序。
+- `unavailable`：暂不可用，并记录 `quota`、`auth`、`cooldown`、`validating` 或 `disabled` 原因。
+
+上游是 `cli-chat-proxy.grok.com`，不是 grok.com 网页 SSO。项目只支持导入和验证用户已授权的 CLI 凭证，不包含批量自动注册逻辑。
+
+## 当前架构
+
+```text
+HTTP API / 管理面板
+        │
+        ▼
+统一 Gateway（Chat / Models / Billing / Responses）
+        │
+        ▼
+Ready 环形轮询 ── 账号租约 ── Grok CLI 上游
+        │                         │
+        │      quota/auth/429     │
+        └──────────┬──────────────┘
+                   ▼
+          Unavailable + RetryAt
+                   │
+          到期恢复 / 人工恢复验证
+                   │
+                   └──────────────► Ready
+```
+
+账号状态和状态变更事件存放在 SQLite schema v2：`data/grok2api.db`。
 
 ## 快速开始
+
+要求 Go 1.25+。
 
 ```powershell
 git clone https://github.com/AokiAx/grok2api.git
 cd grok2api
-pip install -r requirements.txt
+Copy-Item config.example.json config.json
 
-# 配置
-copy config.example.json config.json
-# 建议设置 api_key / panel_password
+# 查看并执行数据迁移；输出 Ready/Unavailable 数量
+go run ./cmd/grok2api migrate --config config.json
 
-# 登录 CLI 凭证（需本机已安装 grok CLI，或浏览器 OIDC）
-python -m app login
-
-# 启动
-python run.py
-# → http://127.0.0.1:8787
-# → 面板 http://127.0.0.1:8787/panel
+# 启动服务
+go run ./cmd/grok2api serve --config config.json
 ```
 
-或：
-
-```powershell
-.\scripts\start.ps1
-```
-
-### 调用示例
-
-```powershell
-curl http://127.0.0.1:8787/health
-curl http://127.0.0.1:8787/v1/models -H "Authorization: Bearer YOUR_API_KEY"
-curl http://127.0.0.1:8787/v1/billing -H "Authorization: Bearer YOUR_API_KEY"
-
-curl http://127.0.0.1:8787/v1/chat/completions `
-  -H "Authorization: Bearer YOUR_API_KEY" `
-  -H "Content-Type: application/json" `
-  -d "{\"model\":\"grok-4.5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}"
-```
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="YOUR_API_KEY")
-r = client.chat.completions.create(
-    model="grok-4.5",
-    messages=[{"role": "user", "content": "hi"}],
-)
-print(r.choices[0].message.content)
-```
-
-未设置 `api_key` 时，客户端可用任意非空 Bearer。
-
-## 管理面板
+服务默认监听 `127.0.0.1:8787`，管理面板为：
 
 ```text
 http://127.0.0.1:8787/panel
 ```
 
-别名：`/manager`。
+也可先构建静态二进制：
 
-| 功能 | 说明 |
-|------|------|
-| 服务状态 | health / 版本 / 默认模型 |
-| CLI 号池 | 状态、并发、冷却、删除、批量导入预览与应用 |
-| 额度 | 调用 `/v1/billing` |
-| 最近请求 | 本地 usage 摘要 |
-| 网页对话 | 直连本机 `/v1/chat/completions`（支持流式） |
-
-**面板密码**（`config.json`）：
-
-```json
-"panel_password": "your-password",
-"api_key": "your-password",
-"app_key": "your-password"
+```powershell
+go build -trimpath -o grok2api.exe ./cmd/grok2api
+./grok2api.exe status --config config.json
+./grok2api.exe serve --config config.json
 ```
 
-优先级：`panel_password` → `app_key` → `api_key`；都空则面板不设密码。
+## 导入账号
+
+在 `/panel` 中粘贴已授权凭证，先“预览”，再“导入”：
+
+```json
+[
+  {
+    "access_token": "...",
+    "refresh_token": "...",
+    "email": "user@example.com",
+    "expires_in": 3600
+  }
+]
+```
+
+导入时会调用上游 `/models` 验证账号：
+
+- 验证成功：进入 `ready`。
+- 额度耗尽：进入 `unavailable(quota)` 并设置恢复时间。
+- 401/403：进入 `unavailable(auth)`。
+- 普通限流：进入 `unavailable(cooldown)`。
+- 验证基础设施异常：停止导入并返回错误，不把未知状态账号放入 Ready。
+
+管理面板支持删除账号和人工“恢复验证”。人工恢复同样先验证凭证，不会直接强制标记可用。
+
+## 额度耗尽后的流程
+
+1. 当前账号返回 rolling quota / `subscription:free-usage-exhausted`。
+2. 账号立即从 Ready 轮询中移除，保存 `quota_actual`、`quota_limit`、错误码和 `retry_at`。
+3. 当前请求继续尝试下一个 Ready 账号。
+4. 如果本轮所有账号都因额度耗尽失败，开启全池 quota 熔断并返回 `429 + Retry-After`。
+5. 号池发生变化（新账号导入、人工恢复、到期恢复）时，旧熔断自动失效，允许新一轮探测。
+6. `quota` / `cooldown` 到期后由恢复 worker 放回 Ready；`auth` 不会自动恢复，必须更新凭证或人工验证。
+
+不会回退读取单账号 `~/.grok/auth.json`，因此空池会返回结构化 429，而不是因缺失文件返回 503。
+
+## API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 两池数量、原因统计和 quota 熔断状态 |
+| GET | `/panel`、`/manager` | Go 管理面板 |
+| GET | `/v1/models` | 模型列表；上游不可达时返回静态兼容列表 |
+| GET | `/v1/billing` | 上游额度信息 |
+| POST | `/v1/chat/completions` | OpenAI Chat Completions，支持 SSE |
+| POST | `/chat/completions` | Chat Completions 别名 |
+| POST | `/v1/responses` | OpenAI Responses 透传，支持 SSE |
+| POST | `/v1/messages` | Anthropic Messages 转换，支持工具和 SSE |
+| GET | `/admin/api/cli-accounts` | 账号列表，不返回 token |
+| POST | `/admin/api/accounts/import/preview` | 导入预览 |
+| POST | `/admin/api/accounts/import` | 验证并导入 |
+| DELETE | `/admin/api/cli-accounts/{id}` | 删除账号 |
+| POST | `/admin/api/cli-accounts/{id}/recover` | 验证并尝试恢复账号 |
+
+调用示例：
+
+```powershell
+curl http://127.0.0.1:8787/v1/chat/completions `
+  -H "Authorization: Bearer YOUR_API_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"stream":false}'
+```
 
 ## 配置
 
-| 文件 | 说明 |
-|------|------|
-| **`config.json`** | 本地主配置（**勿提交**） |
-| `config.example.json` | 模板，含 `_help_*` 说明 |
-| `.env` | 可选，`GROK2API_*` 覆盖同名字段 |
+复制 [config.example.json](config.example.json) 为 `config.json`。环境变量 `GROK2API_*` 覆盖文件值。
 
-配置优先级：默认值 `< config.json < .env < 进程环境变量 < 显式启动参数`。
+管理密钥优先级：`panel_password` → `app_key` → `api_key`。`api_key` 非空时，所有 `/v1` 请求必须携带 Bearer 或 `x-api-key`。
 
-```powershell
-copy config.example.json config.json
-```
+关键恢复参数：
 
-## 凭证从哪来
+- `quota_retry_minutes`：额度耗尽后的首次重试间隔，默认 30 分钟。
+- `rate_retry_seconds`：普通 429 冷却时间，默认 45 秒。
+- `timeout_secs`：单次上游请求超时，默认 600 秒。
 
-| 方式 | 命令 / 操作 |
-|------|-------------|
-| 已有 access/refresh | 面板批量导入，支持预览、合并、替换或跳过冲突 |
-| 旧账号池 JSON | 写入 `data/cli_accounts.json` 后在面板点击“重载号池” |
-| 注册机 / mint | 新代码直接写入 SQLite；旧模块输出可增量同步 |
+## 数据迁移
 
-主号池：`data/grok2api.db`（git 忽略）。首次启动会备份并迁移旧
-`data/cli_accounts.json`；旧文件仍可作为外部进程的兼容交换格式。
-账号密码不会写入 SQLite。
+Go 服务首次打开数据库时会执行幂等迁移：
 
-### 选号策略
+- Python SQLite v1 `cli_accounts` → Go SQLite v2 `accounts`。
+- 当 v2 数据库为空时，兼容导入 `data/cli_accounts.json`。
+- Python 中已禁用且错误含 `usage-exhausted` 的账号迁移为 `unavailable(quota)`。
+- token/auth/401/403/refresh 错误迁移为 `unavailable(auth)`。
+- quota 账号会设置错峰恢复时间，避免同时打穿上游。
 
-`cli_pool_selection_strategy` 支持：
+迁移前仍应备份整个 `data/` 目录。`migrate` 和 `status` 命令只输出状态，不启动 HTTP 服务。
 
-| 策略 | 说明 |
-|------|------|
-| `balanced` | 默认；综合并发占用、连续失败、优先级、最近使用时间与请求数 |
-| `round_robin` | 严格按账号顺序轮询 |
-| `least_used` | 优先累计请求数更少的账号 |
-| `priority` | 优先管理员设置的高优先级账号 |
+## Docker / GHCR
 
-每个请求通过租约占用账号并发槽，异常、取消或流式断开时也会释放。
-`401/403/429` 会触发刷新、轮换或冷却；成功请求会恢复账号健康状态。
-
-## 项目结构
+GitHub Actions 构建并发布多架构镜像：
 
 ```text
-app/                 # 2api 服务（CLI only）
-  main.py            # 路由 / 面板
-  admin.py           # 号池管理 API
-  auth.py            # 单会话 auth.json
-  cli_pool.py        # 新号池服务的兼容导出
-  domain/            # 账号领域模型和身份规则
-  services/          # 选号租约、批量导入等应用服务
-  infrastructure/    # SQLite Repository 与旧 JSON 迁移
-  oauth_login.py     # login / refresh
-  oidc_mint.py       # 可选：密码/session → CLI OIDC
-  upstream.py        # cli-chat-proxy 客户端
-  static/panel.html  # 管理面板
-config.example.json
-run.py
-scripts/start.ps1
-tests/
-data/                # 运行时（本地，不入库）
+ghcr.io/aokiax/grok2api
 ```
 
-## 命令
-
-```text
-python -m app login [--method auto|refresh|browser|device|cli]
-python -m app status
-python -m app serve
-python -m app cli-pool [--delete id]
-python -m app mint-cli --email ... --password ... --turnstile ...
-```
-
-## 端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/health` | 状态 / 号池摘要 |
-| GET | `/panel` | 管理面板 |
-| GET | `/v1/models` | 模型列表 |
-| GET | `/v1/billing` | 上游额度 |
-| POST | `/v1/chat/completions` | OpenAI 对话 |
-| POST | `/v1/messages` | Anthropic 兼容 |
-| POST | `/v1/responses` | Responses 透传 |
-| GET/POST | `/admin/api/cli-accounts*` | 号池管理（需面板密码） |
-| POST | `/admin/api/accounts/import/preview` | 批量导入预览，不写入数据库 |
-| POST | `/admin/api/accounts/import` | 事务化批量导入账号 |
-
-## Docker
+支持 `linux/amd64`、`linux/arm64`，并包含 provenance、Cosign keyless 签名和 Trivy 高危扫描。
 
 ```powershell
-copy config.example.json config.json
-docker compose up -d --build
+Copy-Item config.example.json config.json
+docker compose up -d
 ```
 
-需自行挂载或注入凭证到 `data/`。
+或本地构建 Go 镜像：
+
+```powershell
+docker build -f Dockerfile.golang -t grok2api:go .
+```
+
+## GitHub 灰度部署
+
+`Deploy Go canary` workflow 默认把镜像部署到服务器回环端口 `8788`，使用生产数据副本；只有手动勾选 `promote` 才会切换 `8787`。
+
+GitHub `production` environment 需要：
+
+- `PRODUCTION_SSH_KEY`
+- `PRODUCTION_HOST`
+- `PRODUCTION_USER`
+- `GHCR_READ_TOKEN`
+
+推荐顺序：
+
+1. 推送分支，等待 CI 和 `Build Go image` 全部成功。
+2. 部署分支标签或 `sha-*` 到 8788。
+3. 检查 `/health`、`/v1/models`、面板账号数量及 Ready/Unavailable 原因。
+4. 使用测试请求验证轮询、429、SSE 和人工恢复。
+5. 确认数据副本无异常后，重新运行 workflow 并勾选 `promote`。
+
+## 验证
+
+```powershell
+go test ./...
+go test -race ./...
+go vet ./...
+pytest -q
+```
+
+CI 对 `internal/...` 执行 80% 覆盖率门禁，并保留 Python 旧实现回归测试，直到迁移完全结束。
 
 ## 说明
 
-- 本仓库只发布 **CLI 代理 + 面板**，不包含任何自动批量注册账号相关代码。
-- 免费 / 订阅额度以 xAI 上游策略为准；`/v1/billing` 在免费档可能 limit/used 均为 0，以实际对话是否 429 为准。
-- 请遵守 xAI 服务条款；仅限个人自用与学习。
-
-## License
-
-个人工具，按需自用。
+- 免费或订阅额度由 xAI 上游策略决定。
+- 本项目不对账号做评分；只区分可用与不可用，并在 Ready 中简单轮询。
+- 请仅使用自己有权使用的凭证，并遵守上游服务条款。

@@ -1,40 +1,24 @@
 {
-  "_readme": "复制为 config.json 后修改。以下划线开头的键仅作说明，加载时忽略。",
+  "_readme": "复制为 config.json；以下划线开头的字段仅作说明。",
 
-  "_comment_server": "===== 本地 2api 服务 =====",
   "host": "127.0.0.1",
   "port": 8787,
   "api_key": "",
   "app_key": "",
   "panel_password": "",
-  "_help_api_key": "非空则 /v1 客户端必须带 Authorization: Bearer <api_key>",
-  "_help_app_key": "管理 API 密钥；空则回退 api_key",
-  "_help_panel_password": "网页 /panel 登录密码；空则回退 app_key → api_key；都空则面板不设密码",
+  "_help_keys": "管理密钥优先级：panel_password -> app_key -> api_key。",
 
-  "_comment_cli": "===== 上游 CLI 代理（cli-chat-proxy）=====",
   "proxy_base_url": "https://cli-chat-proxy.grok.com/v1",
   "client_version": "0.2.93",
-  "auto_client_version": true,
-  "_help_auto_client_version": "true 时用本机 grok --version 覆盖 client_version，避免 426",
   "default_model": "grok-4.5",
-  "ensure_auth_on_start": true,
-  "stream_fallback": true,
-  "_help_stream_fallback": "非 stream 失败时改 stream 再聚合成完整 JSON",
-  "fold_reasoning": false,
-  "_help_fold_reasoning": "true 时把 reasoning_content 折进 content",
-  "cors_origins": "",
-  "_help_cors_origins": "逗号分隔；如 * 或 http://localhost:3000；空=关闭 CORS",
 
-  "_comment_data": "===== 数据 / 多账号 CLI 号池 =====",
   "data_dir": "data",
-  "cli_pool_rotate": true,
-  "_help_cli_pool_rotate": "多账号时轮询取 token",
   "cli_pool_max_concurrent": 1,
-  "_help_cli_pool_max_concurrent": "每个 CLI 账号允许的最大在途请求数；满了会自动选其它号",
   "cli_pool_acquire_timeout": 60,
-  "_help_cli_pool_acquire_timeout": "所有号并发都满时最长等待秒数",
-  "cli_pool_selection_strategy": "balanced",
-  "_help_cli_pool_selection_strategy": "balanced / round_robin / least_used / priority",
-  "cli_pool_flush_interval": 30,
-  "_help_cli_pool_flush_interval": "运行时请求计数批量写入 SQLite 的最短间隔秒数"
+  "quota_retry_minutes": 30,
+  "rate_retry_seconds": 45,
+  "timeout_secs": 600,
+
+  "_help_pool": "只有 ready / unavailable 两个逻辑池；Ready 使用简单环形轮询，不评分。",
+  "_help_migration": "首次打开 data/grok2api.db 时自动迁移 Python cli_accounts 和旧 cli_accounts.json。"
 }
