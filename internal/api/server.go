@@ -516,6 +516,12 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		if stripped, stripErr := compat.StripUnknownResponsesFields(responsesBody); stripErr == nil {
 			responsesBody = stripped
 		}
+		// Always request upstream SSE so free-quota headers and aggregation stay consistent.
+		// ChatToResponses preserves client stream:false; without forcing true the gateway
+		// treats a JSON body as SSE and non-stream clients get empty completions.
+		if forced, forceErr := compat.SetJSONStreamFlag(responsesBody, true); forceErr == nil {
+			responsesBody = forced
+		}
 		result, reqErr := s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
 		if reqErr != nil {
 			s.writeGatewayError(writer, reqErr)
@@ -741,6 +747,11 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 	}
 	if !stream {
 		if s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
+			// Force upstream SSE so extractCompletedResponse receives real events
+			// (body stream:false would otherwise yield a bare JSON body).
+			if forced, forceErr := compat.SetJSONStreamFlag(body, true); forceErr == nil {
+				body = forced
+			}
 			result, err := s.gateway.Request(request.Context(), http.MethodPost, "/responses", body, true)
 			if err != nil {
 				s.writeGatewayError(writer, err)
@@ -851,6 +862,10 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		// Strip client-added fields that Grok does not accept.
 		if stripped, stripErr := compat.StripUnknownResponsesFields(responsesBody); stripErr == nil {
 			responsesBody = stripped
+		}
+		// Match chat path: always request upstream SSE for aggregation/streaming.
+		if forced, forceErr := compat.SetJSONStreamFlag(responsesBody, true); forceErr == nil {
+			responsesBody = forced
 		}
 		result, err = s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
 		if err != nil {

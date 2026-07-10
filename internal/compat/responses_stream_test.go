@@ -1,6 +1,7 @@
 package compat_test
 
 import (
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -29,5 +30,35 @@ func TestResponsesToChatStreamConvertsDeltas(t *testing.T) {
 	body := string(data)
 	if !strings.Contains(body, `"content":"hi"`) || !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("body=%s", body)
+	}
+}
+
+func TestAggregateResponsesStreamAcceptsBareJSONBody(t *testing.T) {
+	raw := `{"id":"resp_json","model":"grok-4.5","object":"response","status":"completed","output_text":"PONG","usage":{"input_tokens":2,"output_tokens":1}}`
+	out, err := compat.AggregateResponsesStream(io.NopCloser(strings.NewReader(raw)), "grok-4.5")
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	content := payload["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
+	if content != "PONG" {
+		t.Fatalf("content=%#v body=%s", content, string(out))
+	}
+}
+
+func TestSetJSONStreamFlagForcesTrue(t *testing.T) {
+	out, err := compat.SetJSONStreamFlag([]byte(`{"model":"grok-4.5","stream":false,"input":[]}`), true)
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["stream"] != true {
+		t.Fatalf("stream=%#v", payload["stream"])
 	}
 }

@@ -165,11 +165,48 @@ func TestChatRoutesResponsesBackendAndEnablesSearch(t *testing.T) {
 	if forwarded["backend_search"] != true {
 		t.Fatalf("backend_search missing/false: %#v", forwarded)
 	}
+	if forwarded["stream"] != true {
+		t.Fatalf("expected upstream stream=true even for non-stream clients: %#v", forwarded)
+	}
 	if _, ok := forwarded["input"]; !ok {
 		t.Fatalf("expected responses input: %#v", forwarded)
 	}
 	if !strings.Contains(recorder.Body.String(), "searched") {
 		t.Fatalf("body=%s", recorder.Body.String())
+	}
+}
+
+func TestChatNonStreamAggregatesJSONBodyFallback(t *testing.T) {
+	// Simulate the production bug: gateway returns a non-SSE Responses JSON body
+	// because the upstream request carried stream:false.
+	jsonBody := `{"id":"resp_json","model":"grok-4.5","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"PONG"}]}],"usage":{"input_tokens":3,"output_tokens":1}}`
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+		Stream: io.NopCloser(strings.NewReader(jsonBody)),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/chat/completions",
+			strings.NewReader(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+		),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"content":"PONG"`) {
+		t.Fatalf("body=%s", recorder.Body.String())
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode forwarded: %v", err)
+	}
+	if forwarded["stream"] != true {
+		t.Fatalf("expected forced upstream stream=true: %#v", forwarded)
 	}
 }
 

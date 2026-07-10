@@ -11,8 +11,21 @@ import (
 )
 
 // AggregateResponsesStream reads a Responses SSE stream and returns Chat Completions JSON.
+//
+// If the body is a complete Responses JSON object (non-SSE) — which happens when
+// the upstream request accidentally carried stream:false while the gateway treated
+// the response as a stream — it falls back to ResponsesToChat so non-stream chat
+// clients never receive an empty completion.
 func AggregateResponsesStream(stream io.ReadCloser, model string) ([]byte, error) {
 	defer stream.Close()
+
+	raw, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, fmt.Errorf("read responses stream: %w", err)
+	}
+	if converted, ok := tryResponsesJSONBody(raw); ok {
+		return converted, nil
+	}
 
 	var (
 		textBuilder strings.Builder
@@ -20,7 +33,7 @@ func AggregateResponsesStream(stream io.ReadCloser, model string) ([]byte, error
 		responseID  string
 	)
 
-	scanner := bufio.NewScanner(stream)
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var eventName string
 	var dataLines []string
@@ -110,6 +123,63 @@ func AggregateResponsesStream(stream io.ReadCloser, model string) ([]byte, error
 		return nil, err
 	}
 	return ResponsesToChat(encoded)
+}
+
+// tryResponsesJSONBody converts a non-SSE Responses JSON body when present.
+func tryResponsesJSONBody(raw []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return nil, false
+	}
+	// SSE frames always contain "event:" or "data:" prefixes; pure JSON does not.
+	if bytes.Contains(trimmed, []byte("\nevent:")) || bytes.HasPrefix(trimmed, []byte("event:")) ||
+		bytes.Contains(trimmed, []byte("\ndata:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil, false
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return nil, false
+	}
+	// Accept both bare response objects and {type,response} wrappers.
+	if typ := stringValue(envelope["type"]); typ == "response.completed" {
+		if nested, ok := envelope["response"].(map[string]any); ok {
+			encoded, err := json.Marshal(nested)
+			if err != nil {
+				return nil, false
+			}
+			converted, err := ResponsesToChat(encoded)
+			if err != nil {
+				return nil, false
+			}
+			return converted, true
+		}
+	}
+	if _, hasOutput := envelope["output"]; hasOutput || stringValue(envelope["object"]) == "response" ||
+		stringValue(envelope["output_text"]) != "" || stringValue(envelope["status"]) != "" {
+		converted, err := ResponsesToChat(trimmed)
+		if err != nil {
+			return nil, false
+		}
+		return converted, true
+	}
+	return nil, false
+}
+
+// SetJSONStreamFlag forces the stream field on a JSON object payload.
+func SetJSONStreamFlag(payload []byte, stream bool) ([]byte, error) {
+	var input map[string]any
+	if err := json.Unmarshal(payload, &input); err != nil {
+		return nil, fmt.Errorf("decode json body: %w", err)
+	}
+	if existing, ok := input["stream"].(bool); ok && existing == stream {
+		return payload, nil
+	}
+	input["stream"] = stream
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode json body: %w", err)
+	}
+	return encoded, nil
 }
 
 // ResponsesToChatStream converts Responses SSE into OpenAI Chat Completions SSE.
