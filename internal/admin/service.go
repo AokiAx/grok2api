@@ -65,6 +65,8 @@ type ImportAccount struct {
 	AccessToken  string `json:"access_token"` // legacy alias for key
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"`
+	// ExpiresAt accepts ~/.grok/auth.json style absolute expiry (RFC3339 / RFC3339Nano).
+	ExpiresAt    string `json:"expires_at"`
 	Email        string `json:"email"`
 	OIDCIssuer   string `json:"oidc_issuer"`
 	OIDCClientID string `json:"oidc_client_id"`
@@ -122,30 +124,27 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 			continue
 		}
 		email := strings.ToLower(strings.TrimSpace(input.Email))
-		key := identity(email, input.UserID, token)
+		userID := strings.TrimSpace(input.UserID)
+		// ~/.grok/auth.json map keys look like issuer::client_id::user_id.
+		if userID == "" {
+			userID = userIDFromAuthMapKey(input.ID)
+		}
+		key := identity(email, userID, token)
 		previous, exists := byIdentity[key]
 		now := s.now().UTC()
-		id := strings.TrimSpace(input.ID)
-		if exists {
-			id = previous.ID
-		} else if id == "" && email != "" {
-			id = email
-		} else if id == "" {
-			digest := sha256.Sum256([]byte(token))
-			id = fmt.Sprintf("account-%x", digest[:8])
-		}
+		id := chooseImportID(input.ID, email, userID, token, previous, exists)
 
 		item := previous
 		item.ID = id
 		item.AccessToken = token
 		item.RefreshToken = firstNonEmpty(input.RefreshToken, previous.RefreshToken)
 		item.Email = firstNonEmpty(email, previous.Email)
-		item.UserID = firstNonEmpty(input.UserID, previous.UserID)
+		item.UserID = firstNonEmpty(userID, previous.UserID)
 		item.TeamID = firstNonEmpty(input.TeamID, previous.TeamID)
 		item.OIDCIssuer = firstNonEmpty(input.OIDCIssuer, previous.OIDCIssuer, "https://auth.x.ai")
 		item.OIDCClientID = firstNonEmpty(input.OIDCClientID, previous.OIDCClientID)
-		if input.ExpiresIn > 0 {
-			item.ExpiresAt = now.Add(time.Duration(input.ExpiresIn) * time.Second)
+		if expiresAt, ok := resolveExpiresAt(input, now); ok {
+			item.ExpiresAt = expiresAt
 		}
 		if item.MaxActive <= 0 {
 			item.MaxActive = 1
@@ -297,6 +296,61 @@ func identity(email, userID, token string) string {
 	}
 	digest := sha256.Sum256([]byte(token))
 	return fmt.Sprintf("token:%x", digest[:])
+}
+
+func chooseImportID(rawID, email, userID, token string, previous account.Account, exists bool) string {
+	if exists {
+		return previous.ID
+	}
+	id := strings.TrimSpace(rawID)
+	// Avoid using compound auth map keys (issuer::client::user) as stable IDs.
+	if isAuthMapKey(id) {
+		id = ""
+	}
+	if id != "" {
+		return id
+	}
+	if userID != "" {
+		return userID
+	}
+	if email != "" {
+		return email
+	}
+	digest := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("account-%x", digest[:8])
+}
+
+func isAuthMapKey(value string) bool {
+	parts := strings.Split(value, "::")
+	return len(parts) == 3 && strings.Contains(parts[0], "://")
+}
+
+func userIDFromAuthMapKey(value string) string {
+	parts := strings.Split(strings.TrimSpace(value), "::")
+	if len(parts) != 3 {
+		return ""
+	}
+	if !strings.Contains(parts[0], "://") {
+		return ""
+	}
+	return strings.TrimSpace(parts[2])
+}
+
+func resolveExpiresAt(input ImportAccount, now time.Time) (time.Time, bool) {
+	if input.ExpiresIn > 0 {
+		return now.Add(time.Duration(input.ExpiresIn) * time.Second), true
+	}
+	raw := strings.TrimSpace(input.ExpiresAt)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	// auth.json uses nanosecond RFC3339; also accept plain RFC3339.
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func firstNonEmpty(values ...string) string {

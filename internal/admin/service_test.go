@@ -291,3 +291,61 @@ func TestServiceList(t *testing.T) {
 		t.Fatalf("list=%#v err=%v", items, err)
 	}
 }
+
+func TestImportAuthMapKeyUsesUserIDAndExpiresAt(t *testing.T) {
+	repository := &memoryRepository{}
+	service := admin.NewService(repository, validator{})
+
+	result, err := service.Import(context.Background(), admin.ImportRequest{
+		Accounts: []admin.ImportAccount{{
+			ID:           "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828::user-123",
+			Key:          "access-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    "2026-07-10T17:06:19.000000000Z",
+			OIDCIssuer:   "https://auth.x.ai",
+			OIDCClientID: "b1a00492-073a-47ea-816f-4c329264a828",
+			UserID:       "user-123",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Added != 1 || repository.saves != 1 {
+		t.Fatalf("result=%#v saves=%d", result, repository.saves)
+	}
+	item := repository.accounts["user-123"]
+	if item.ID != "user-123" {
+		t.Fatalf("id=%q", item.ID)
+	}
+	if item.UserID != "user-123" {
+		t.Fatalf("user_id=%q", item.UserID)
+	}
+	if item.ExpiresAt.IsZero() || item.ExpiresAt.Year() != 2026 {
+		t.Fatalf("expires_at=%v", item.ExpiresAt)
+	}
+	if item.RefreshToken != "refresh-token" {
+		t.Fatalf("refresh=%q", item.RefreshToken)
+	}
+}
+
+func TestImportDerivesUserIDFromAuthMapKeyWhenMissing(t *testing.T) {
+	repository := &memoryRepository{}
+	service := admin.NewService(repository, validator{})
+
+	result, err := service.Import(context.Background(), admin.ImportRequest{
+		Accounts: []admin.ImportAccount{{
+			ID:  "https://auth.x.ai::client::uid-9",
+			Key: "token-9",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	item := repository.accounts["uid-9"]
+	if item.UserID != "uid-9" || item.ID != "uid-9" {
+		t.Fatalf("account=%#v", item)
+	}
+}

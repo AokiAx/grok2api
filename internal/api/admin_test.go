@@ -89,6 +89,10 @@ func TestAdminListNeverReturnsTokens(t *testing.T) {
 			RefreshableAccounts int            `json:"refreshable_accounts"`
 			QuotaActual         int64          `json:"quota_actual"`
 			QuotaLimit          int64          `json:"quota_limit"`
+			QuotaRemaining      int64          `json:"quota_remaining"`
+			ReadyQuotaRemaining int64          `json:"ready_quota_remaining"`
+			QuotaObserved       int            `json:"quota_observed_accounts"`
+			ReadyQuotaObserved  int            `json:"ready_quota_observed_accounts"`
 			Reasons             map[string]int `json:"reasons"`
 		} `json:"summary"`
 	}
@@ -104,6 +108,13 @@ func TestAdminListNeverReturnsTokens(t *testing.T) {
 	}
 	if summary.RefreshableAccounts != 2 || summary.QuotaActual != 110 || summary.QuotaLimit != 200 {
 		t.Fatalf("credential summary = %#v", summary)
+	}
+	// remaining = (100-20) + (100-90) = 90; ready remaining = 80
+	if summary.QuotaRemaining != 90 || summary.ReadyQuotaRemaining != 80 {
+		t.Fatalf("remaining summary = %#v", summary)
+	}
+	if summary.QuotaObserved != 2 || summary.ReadyQuotaObserved != 1 {
+		t.Fatalf("observed summary = %#v", summary)
 	}
 	if summary.Reasons["quota"] != 1 || summary.Reasons["auth"] != 1 {
 		t.Fatalf("reasons = %#v", summary.Reasons)
@@ -155,7 +166,7 @@ func TestPanelRouteIsEmbedded(t *testing.T) {
 		t.Fatal("Go panel content missing")
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, "恢复验证") || !strings.Contains(body, "importFile") || strings.Contains(body, "accounts.innerHTML") {
+	if !strings.Contains(body, "恢复验证") || !strings.Contains(body, "importFile") || !strings.Contains(body, "importOutput") || strings.Contains(body, "accounts.innerHTML") {
 		t.Fatal("account actions or safe table rendering missing")
 	}
 	for _, marker := range []string{

@@ -552,9 +552,9 @@
           <div class="stat-note">有 refresh token</div>
         </div>
         <div class="card">
-          <div class="stat-label">Free Token 汇总</div>
+          <div class="stat-label">Free Token 剩余</div>
           <div class="stat-value amber" id="quotaUsage">—</div>
-          <div class="stat-note" id="quotaNote">token 剩余/已用（响应头）</div>
+          <div class="stat-note" id="quotaNote">仅统计已观测账号</div>
         </div>
         <div class="card">
           <div class="stat-label">Quota Circuit</div>
@@ -654,28 +654,48 @@
         <div class="toolbar">
           <div>
             <h2 style="margin:0;color:var(--text);font-size:14px">导入凭证</h2>
-            <div class="meta">兼容 key / access_token；支持数组、{accounts:[]}、auth.json map。先预览，再写入</div>
+            <div class="meta">支持数组 / {accounts:[]} / ~/.grok/auth.json map。先预览，再验证写入</div>
+          </div>
+          <div class="row">
+            <button type="button" class="btn" id="clearImportButton">清空</button>
           </div>
         </div>
         <div class="stack">
           <label for="input">账号 JSON</label>
-          <textarea id="input" spellcheck="false" placeholder='[{"key":"...","refresh_token":"..."}] 或 auth.json map / access_token 也兼容'></textarea>
+          <textarea id="input" spellcheck="false" placeholder='[
+  {
+    "key": "ACCESS_TOKEN",
+    "refresh_token": "REFRESH_TOKEN",
+    "email": "user@example.com",
+    "expires_in": 3600,
+    "oidc_issuer": "https://auth.x.ai",
+    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
+  }
+]'></textarea>
           <div class="row" style="align-items:center;gap:8px;flex-wrap:wrap">
             <input id="importFile" type="file" accept=".json,.txt,application/json,text/plain" style="max-width:260px">
             <button type="button" class="btn" id="loadFileButton">从文件加载</button>
             <button type="button" class="btn" id="previewButton">预览</button>
             <button type="button" class="btn primary" id="importButton">导入</button>
           </div>
-          <div class="meta" id="importFileMeta">可选择 auth.json / auth_from_*.json / 账号数组 JSON，再预览或导入</div>
+          <div class="meta" id="importFileMeta">推荐带 refresh_token + oidc_issuer + oidc_client_id + user_id，便于自动恢复与去重</div>
+          <div class="help" style="margin-top:8px;line-height:1.55">
+            兼容格式：
+            <br>1) 数组：[{"key":"...","refresh_token":"..."}]
+            <br>2) 号池对象：{"accounts":[...]}
+            <br>3) auth.json map：{"issuer::client::user_id":{"key":"...","refresh_token":"...","user_id":"...","expires_at":"..."}}
+            <br>字段：access_token 可代替 key；expires_at / expires_in 均可；map 键里的 user_id 会自动提取。
+            <br>导入会先验证上游，不会直接把坏号塞进 Ready。大批量建议先预览。
+          </div>
         </div>
         <div class="stack" style="margin-top:12px">
           <label>输出</label>
-          <pre id="output">等待操作</pre>
+          <pre id="importOutput">等待操作</pre>
         </div>
       </div>
     </section>
 
-        <section class="view" id="view-settings">
+    <section class="view" id="view-settings">
       <div class="toolbar" style="margin-bottom:12px">
         <div>
           <h2 style="margin:0;color:var(--text);font-size:14px">注册配置</h2>
@@ -843,17 +863,41 @@
     };
 
     const percent = (value, total) => total > 0 ? Math.round(value / total * 100) : 0;
-    // Free quota is stored as used/limit from x-ratelimit headers.
-    // Prefer tokens when upstream sends token counters; otherwise request counters.
+    // Free quota is stored as used/limit from x-ratelimit headers (prefer tokens).
+    const compact = (value) => {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n)) return '0';
+      const abs = Math.abs(n);
+      if (abs >= 1e9) return `${(n / 1e9).toFixed(abs >= 1e10 ? 0 : 1)}B`;
+      if (abs >= 1e6) return `${(n / 1e6).toFixed(abs >= 1e7 ? 0 : 1)}M`;
+      if (abs >= 1e3) return `${(n / 1e3).toFixed(abs >= 1e4 ? 0 : 1)}K`;
+      return number.format(n);
+    };
     const quotaText = (actual, limit) => {
       if (!(limit > 0)) return '—';
       const remaining = Math.max(0, limit - (actual || 0));
-      return `${number.format(remaining)} tok 剩余 · ${number.format(actual || 0)}/${number.format(limit)}`;
+      return `${compact(remaining)} 剩余`;
     };
-    const quotaNoteText = (actual, limit) => {
-      if (!(limit > 0)) return 'free token 额度需成功请求后从响应头回写';
-      const remaining = Math.max(0, limit - (actual || 0));
-      return `剩余 ${number.format(remaining)} tokens · 已用 ${percent(actual || 0, limit)}%`;
+    const quotaDetailText = (actual, limit) => {
+      if (!(limit > 0)) return '未观测';
+      return `${compact(actual || 0)} / ${compact(limit)}`;
+    };
+    const summaryQuotaText = (summary) => {
+      const remaining = Number(summary.quota_remaining);
+      const limit = Number(summary.quota_limit || 0);
+      if (Number.isFinite(remaining) && limit > 0) return `${compact(remaining)} tok`;
+      return quotaText(summary.quota_actual || 0, limit);
+    };
+    const summaryQuotaNote = (summary) => {
+      const observed = Number(summary.quota_observed_accounts || 0);
+      const total = Number(summary.total_accounts || 0);
+      const limit = Number(summary.quota_limit || 0);
+      const used = Number(summary.quota_actual || 0);
+      const readyRemaining = Number(summary.ready_quota_remaining || 0);
+      if (!(limit > 0) || observed <= 0) {
+        return '尚无成功请求回写 token 额度';
+      }
+      return `Ready 可用 ${compact(readyRemaining)} · 已用 ${compact(used)}/${compact(limit)} · 观测 ${observed}/${total}`;
     };
     const timeText = value => {
       if (!value || String(value).startsWith('0001-')) return '—';
@@ -895,8 +939,8 @@
       byId('totalRequests').textContent = number.format(summary.total_requests || 0);
       byId('activeLeases').textContent = `${number.format(summary.active_leases || 0)} / ${number.format(summary.max_active || 0)}`;
       byId('refreshableAccounts').textContent = number.format(summary.refreshable_accounts || 0);
-      byId('quotaUsage').textContent = quotaText(summary.quota_actual || 0, summary.quota_limit || 0);
-      byId('quotaNote').textContent = quotaNoteText(summary.quota_actual || 0, summary.quota_limit || 0);
+      byId('quotaUsage').textContent = summaryQuotaText(summary || {});
+      byId('quotaNote').textContent = summaryQuotaNote(summary || {});
 
       const open = Boolean(health.quota_circuit?.open);
       byId('circuit').textContent = open ? 'OPEN' : 'CLOSED';
@@ -966,7 +1010,8 @@
         cell(row, [reasonNames[account.unavailable_reason] || account.unavailable_reason, account.last_error_code].filter(Boolean).join(' · ') || '—');
         cell(row, number.format(account.request_count || 0), 'mono');
         cell(row, `${account.active || 0} / ${account.max_active || 1}`, 'mono');
-        cell(row, quotaText(account.quota_actual || 0, account.quota_limit || 0), 'mono');
+        const quotaCell = cell(row, quotaText(account.quota_actual || 0, account.quota_limit || 0), 'mono');
+        quotaCell.title = quotaDetailText(account.quota_actual || 0, account.quota_limit || 0);
         cell(row, timeText(account.retry_at), 'mono');
         const actions = cell(row, '', 'actions');
         const recover = document.createElement('button');
@@ -1095,34 +1140,50 @@
         return;
       }
       const data = await response.json();
-      byId('output').textContent = JSON.stringify(data, null, 2);
+      setImportOutput(JSON.stringify(data, null, 2));
       await refresh();
     }
 
     function normalizeImportAccounts(raw) {
       let parsed = raw;
-      if (typeof raw === 'string') parsed = JSON.parse(raw);
+      if (typeof raw === 'string') {
+        // Strip UTF-8 BOM and common paste noise.
+        const cleaned = raw.replace(/^﻿/, '').trim();
+        if (!cleaned) throw new Error('内容为空');
+        try {
+          parsed = JSON.parse(cleaned);
+        } catch (error) {
+          throw new Error('JSON 解析失败：' + (error.message || error));
+        }
+      }
       let accounts;
       if (Array.isArray(parsed)) {
         accounts = parsed;
       } else if (Array.isArray(parsed?.accounts)) {
         accounts = parsed.accounts;
       } else if (parsed && typeof parsed === 'object') {
-        const values = Object.values(parsed);
-        // auth.json / auth_from_*.json map: values look like account objects
-        if (
-          values.length &&
-          values.every(
-            (v) =>
-              v &&
-              typeof v === 'object' &&
-              !Array.isArray(v) &&
-              ('key' in v || 'access_token' in v || 'refresh_token' in v)
-          )
-        ) {
-          accounts = values;
-        } else {
+        const entries = Object.entries(parsed);
+        const isAccount = (v) =>
+          v &&
+          typeof v === 'object' &&
+          !Array.isArray(v) &&
+          ('key' in v || 'access_token' in v || 'refresh_token' in v || 'user_id' in v);
+        if (entries.length && entries.every(([, v]) => isAccount(v))) {
+          // ~/.grok/auth.json / auth_from_*.json map
+          accounts = entries.map(([mapKey, item]) => {
+            const out = { ...item };
+            const parts = String(mapKey || '').split('::');
+            const mapUserID = (parts.length === 3 && parts[0].includes('://') && parts[2]) ? parts[2].trim() : '';
+            if (!out.email && mapKey.includes('@') && !mapUserID) out.email = mapKey;
+            if (!out.user_id && mapUserID) out.user_id = mapUserID;
+            if (!out.id && mapUserID) out.id = mapUserID;
+            else if (!out.id && mapKey.includes('@') && !mapUserID) out.id = mapKey;
+            return out;
+          });
+        } else if (isAccount(parsed)) {
           accounts = [parsed];
+        } else {
+          throw new Error('无法识别的对象格式：需要账号数组、{accounts:[]} 或 auth.json map');
         }
       } else {
         throw new Error('JSON 必须是账号对象、数组、{accounts:[]} 或 auth.json map');
@@ -1132,13 +1193,60 @@
           throw new Error(`accounts[${index}] 不是对象`);
         }
         const key = String(item.key || item.access_token || '').trim();
-        const out = { ...item };
-        if (key) {
-          out.key = key;
-          if (!out.access_token) out.access_token = key;
-        }
+        const out = {
+          key: key || undefined,
+          access_token: key || undefined,
+          refresh_token: item.refresh_token ? String(item.refresh_token).trim() : undefined,
+          email: item.email ? String(item.email).trim().toLowerCase() : undefined,
+          user_id: item.user_id ? String(item.user_id).trim() : undefined,
+          team_id: item.team_id ? String(item.team_id).trim() : undefined,
+          oidc_issuer: item.oidc_issuer ? String(item.oidc_issuer).trim() : undefined,
+          oidc_client_id: item.oidc_client_id ? String(item.oidc_client_id).trim() : undefined,
+          expires_in: Number.isFinite(Number(item.expires_in)) && Number(item.expires_in) > 0
+            ? Number(item.expires_in)
+            : undefined,
+          expires_at: item.expires_at ? String(item.expires_at).trim() : undefined,
+          id: item.id ? String(item.id).trim() : undefined,
+        };
+        Object.keys(out).forEach((field) => {
+          if (out[field] === undefined || out[field] === '') delete out[field];
+        });
         return out;
       });
+    }
+
+    function formatImportResult(data, preview) {
+      if (!data || typeof data !== 'object') return String(data);
+      const added = data.added || 0;
+      const updated = data.updated || 0;
+      const invalid = data.invalid || 0;
+      const applied = Boolean(data.applied);
+      const items = Array.isArray(data.items) ? data.items : [];
+      const lines = [
+        preview ? '预览结果（不落库、不验上游）' : (applied ? '导入完成（已验证并写入）' : '导入结果'),
+        `added=${added}  updated=${updated}  invalid=${invalid}  applied=${applied}  total_items=${items.length}`,
+      ];
+      const bad = items.filter((item) => item && (item.status === 'invalid' || item.message));
+      if (bad.length) {
+        lines.push('问题明细：');
+        for (const item of bad.slice(0, 40)) {
+          lines.push(`- #${item.index}: ${item.status || 'unknown'}${item.message ? ' · ' + item.message : ''}${item.account_id ? ' · ' + item.account_id : ''}`);
+        }
+        if (bad.length > 40) lines.push(`... 另有 ${bad.length - 40} 条`);
+      } else if (preview) {
+        lines.push('未发现格式 invalid。正式导入时仍会逐号验证上游。');
+      }
+      if (items.length && items.length <= 20) {
+        lines.push('', JSON.stringify(data, null, 2));
+      } else if (items.length) {
+        lines.push('', `（已省略 ${items.length} 条明细，仅显示汇总）`);
+      }
+      return lines.join('\n');
+    }
+
+    function setImportOutput(text) {
+      const node = byId('importOutput') || byId('output');
+      if (node) node.textContent = text;
     }
 
     async function loadImportFile() {
@@ -1150,20 +1258,32 @@
       }
       try {
         const text = await file.text();
-        // Validate/normalize early so user sees count before import.
         const accounts = normalizeImportAccounts(text);
-        byId('input').value = text;
+        // Write normalized array so auth map keys / aliases are ready to submit.
+        byId('input').value = JSON.stringify({ accounts }, null, 2);
+        const withRefresh = accounts.filter((a) => a.refresh_token).length;
+        const withUser = accounts.filter((a) => a.user_id).length;
         byId('importFileMeta').textContent =
-          `已加载 ${file.name} · ${accounts.length} 条 · ${(file.size / 1024).toFixed(1)} KB`;
-        byId('output').textContent = `文件已加载：${file.name}
-解析到 ${accounts.length} 条账号，可先预览再导入`;
+          `已加载 ${file.name} · ${accounts.length} 条 · ${(file.size / 1024).toFixed(1)} KB（已规范化）`;
+        setImportOutput(
+          `已解析 ${file.name}\n共 ${accounts.length} 条 · refresh ${withRefresh} · user_id ${withUser}\n建议先点“预览”，确认无 invalid 后再导入`
+        );
       } catch (error) {
         byId('importFileMeta').textContent = `读取失败：${error.message || error}`;
-        byId('output').textContent = String(error.message || error);
+        setImportOutput(String(error.message || error));
       }
     }
 
+    function clearImport() {
+      byId('input').value = '';
+      byId('importFile').value = '';
+      byId('importFileMeta').textContent = '已清空';
+      setImportOutput('等待操作');
+    }
+
     async function send(preview) {
+      const previewBtn = byId('previewButton');
+      const importBtn = byId('importButton');
       try {
         const source = byId('input').value.trim();
         if (!source) {
@@ -1173,9 +1293,20 @@
         if (!parsed.length) {
           throw new Error('未解析到可导入账号');
         }
-        byId('output').textContent = preview
-          ? `预览中… ${parsed.length} 条`
-          : `导入中… ${parsed.length} 条`;
+        const missingToken = parsed.filter((item) => !String(item.key || item.access_token || '').trim()).length;
+        if (missingToken) {
+          throw new Error(`有 ${missingToken} 条缺少 key/access_token`);
+        }
+        if (!preview && parsed.length > 50 && !confirm(`确认导入 ${parsed.length} 条账号？将逐号验证上游。`)) {
+          return;
+        }
+        previewBtn.disabled = true;
+        importBtn.disabled = true;
+        setImportOutput(
+          preview
+            ? `预览中… ${parsed.length} 条（dry-run，不落库）`
+            : `导入中… ${parsed.length} 条（会先验证上游）`
+        );
         const path = preview ? '/admin/api/accounts/import/preview' : '/admin/api/accounts/import';
         const response = await fetch(path, {
           method: 'POST',
@@ -1186,14 +1317,25 @@
           logout();
           return;
         }
-        const data = await response.json();
-        byId('output').textContent = JSON.stringify(data, null, 2);
+        const data = await response.json().catch(() => ({ error: { message: `HTTP ${response.status}` } }));
+        if (!response.ok) {
+          const message = (data && data.error && data.error.message) || data.message || `导入失败 (${response.status})`;
+          throw new Error(message);
+        }
+        setImportOutput(formatImportResult(data, preview));
+        byId('importFileMeta').textContent = preview
+          ? `预览完成 · ${parsed.length} 条 · invalid ${data.invalid || 0}`
+          : `导入完成 · added ${data.added || 0} · updated ${data.updated || 0} · invalid ${data.invalid || 0}`;
         if (!preview) {
           byId('importFile').value = '';
+          await refresh();
         }
-        await refresh();
       } catch (error) {
-        byId('output').textContent = String(error.message || error);
+        setImportOutput(String(error.message || error));
+        byId('importFileMeta').textContent = preview ? '预览失败' : '导入失败';
+      } finally {
+        previewBtn.disabled = false;
+        importBtn.disabled = false;
       }
     }
 
@@ -1247,7 +1389,8 @@
           logout();
           return;
         }
-        byId('output').textContent = JSON.stringify(await response.json(), null, 2);
+        const payload = await response.json();
+        byId('registerLogs').textContent = JSON.stringify(payload, null, 2);
         await refreshRegister();
       } finally {
         btn.disabled = false;
@@ -1443,7 +1586,8 @@ async function stopRegister() {
         logout();
         return;
       }
-      byId('output').textContent = JSON.stringify(await response.json(), null, 2);
+      const payload = await response.json();
+      byId('registerLogs').textContent = JSON.stringify(payload, null, 2);
       await refreshRegister();
     }
 
@@ -1485,6 +1629,7 @@ async function stopRegister() {
     byId('logoutButton').onclick = logout;
     byId('loadFileButton').onclick = () => loadImportFile();
     byId('importFile').onchange = () => loadImportFile();
+    if (byId('clearImportButton')) byId('clearImportButton').onclick = () => clearImport();
     byId('previewButton').onclick = () => send(true);
     byId('importButton').onclick = () => send(false);
     byId('search').oninput = renderAccounts;
