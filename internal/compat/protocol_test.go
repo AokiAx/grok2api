@@ -354,3 +354,36 @@ func TestNormalizeResponsesToolsSoftCapAndNestedFunctionName(t *testing.T) {
 		t.Fatalf("first=%#v", first)
 	}
 }
+
+func TestStripUnknownResponsesFieldsKeepsWhitelist(t *testing.T) {
+	input := []byte(`{"model":"grok-4.5","input":[],"stream":true,"backend_search":true,"external_web_access":true,"metadata":{"k":"v"},"user":"u1","tool_resources":{},"temperature":0.7}`)
+	out, err := compat.StripUnknownResponsesFields(input)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, key := range []string{"model", "input", "stream", "backend_search", "temperature"} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("allowed field %q missing", key)
+		}
+	}
+	for _, key := range []string{"external_web_access", "metadata", "user", "tool_resources"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("unexpected field %q present", key)
+		}
+	}
+}
+
+func TestStripUnknownResponsesFieldsNoopWhenClean(t *testing.T) {
+	input := []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"hi"}]}`)
+	out, err := compat.StripUnknownResponsesFields(input)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	if string(out) != string(input) {
+		t.Fatalf("expected noop, got %s", out)
+	}
+}

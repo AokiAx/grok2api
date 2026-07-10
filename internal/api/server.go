@@ -512,6 +512,10 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 				responsesBody = ensured
 			}
 		}
+		// Strip client-added fields that Grok does not accept.
+		if stripped, stripErr := compat.StripUnknownResponsesFields(responsesBody); stripErr == nil {
+			responsesBody = stripped
+		}
 		result, reqErr := s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
 		if reqErr != nil {
 			s.writeGatewayError(writer, reqErr)
@@ -714,12 +718,6 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 			if tools := compat.NormalizeResponsesTools(payload["tools"], compat.MaxUpstreamTools); len(tools) > 0 {
 				payload["tools"] = tools
 			}
-			// Drop a few non-tool OpenAI-only fields that are commonly rejected.
-			delete(payload, "metadata")
-			delete(payload, "user")
-			delete(payload, "tool_resources")
-			delete(payload, "web_search_options")
-			delete(payload, "external_web_access")
 			if encoded, err := json.Marshal(payload); err == nil {
 				body = encoded
 			}
@@ -733,6 +731,10 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 				body = ensured
 			}
 		}
+	}
+	// Strip client-added fields that Grok does not accept.
+	if stripped, err := compat.StripUnknownResponsesFields(body); err == nil {
+		body = stripped
 	}
 	if !stream {
 		if s.modelCatalog != nil && s.modelCatalog.Backend(model) == upstream.BackendResponses {
@@ -842,6 +844,10 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 			if ensured, ensureErr := compat.EnsureBackendSearch(responsesBody, info.SupportsBackendSearch); ensureErr == nil {
 				responsesBody = ensured
 			}
+		}
+		// Strip client-added fields that Grok does not accept.
+		if stripped, stripErr := compat.StripUnknownResponsesFields(responsesBody); stripErr == nil {
+			responsesBody = stripped
 		}
 		result, err = s.gateway.Request(request.Context(), http.MethodPost, "/responses", responsesBody, true)
 		if err != nil {

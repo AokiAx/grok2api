@@ -9,6 +9,51 @@ import (
 // MaxUpstreamTools soft-caps pathological agent payloads after namespace expansion.
 const MaxUpstreamTools = 512
 
+// responsesAllowedFields is the whitelist of fields accepted by the Grok
+// /responses endpoint. Anything not in this set is silently dropped to avoid
+// 422/400 rejections from client-added extras (external_web_access, metadata,
+// user, tool_resources, …).
+var responsesAllowedFields = map[string]struct{}{
+	"model":                   {},
+	"stream":                  {},
+	"input":                   {},
+	"max_output_tokens":       {},
+	"temperature":             {},
+	"top_p":                   {},
+	"tools":                   {},
+	"tool_choice":             {},
+	"backend_search":          {},
+	"supports_backend_search": {},
+	"web_search":              {},
+	"include":                 {},
+	"instructions":            {},
+	"reasoning_effort":        {},
+	"reasoning":               {},
+}
+
+// StripUnknownResponsesFields removes fields not in the Responses whitelist.
+func StripUnknownResponsesFields(payload []byte) ([]byte, error) {
+	var input map[string]any
+	if err := json.Unmarshal(payload, &input); err != nil {
+		return nil, fmt.Errorf("decode responses request: %w", err)
+	}
+	changed := false
+	for key := range input {
+		if _, ok := responsesAllowedFields[key]; !ok {
+			delete(input, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return payload, nil
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode responses request: %w", err)
+	}
+	return encoded, nil
+}
+
 // ChatToResponses converts an OpenAI Chat Completions body into a Responses body.
 //
 // Tools are kept. Codex-style {type:"namespace"} groups are expanded into nested
