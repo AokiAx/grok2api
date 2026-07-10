@@ -63,3 +63,25 @@ def test_repository_uses_wal_and_schema_version(tmp_path: Path):
     with sqlite3.connect(database) as connection:
         mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal"
+
+
+def test_repository_can_resync_accounts_written_by_legacy_process(tmp_path: Path):
+    legacy = tmp_path / "cli_accounts.json"
+    database = tmp_path / "grok2api.db"
+    _write_legacy_pool(legacy)
+    repo = SQLiteAccountRepository(database, legacy_json_path=legacy)
+    assert len(repo.list_accounts()) == 1
+
+    raw = json.loads(legacy.read_text(encoding="utf-8"))
+    raw["accounts"].append(
+        {
+            "id": "external@example.com",
+            "key": "access-token-external",
+            "refresh_token": "refresh-token-external",
+            "email": "external@example.com",
+        }
+    )
+    legacy.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert repo.sync_legacy_json() == 2
+    assert len(repo.list_accounts()) == 2
