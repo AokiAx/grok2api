@@ -179,3 +179,30 @@ func TestSaveAccountPersistsPoolTransitionAndEvent(t *testing.T) {
 		t.Fatalf("event count = %d; want 1", events)
 	}
 }
+
+func TestAccountCount(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "grok2api.db")
+	repo, err := repository.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	if got, err := repo.AccountCount(ctx); err != nil || got != 0 {
+		t.Fatalf("empty count = %d, %v", got, err)
+	}
+	now := time.Now().UTC()
+	if err := repo.SaveAccount(ctx, account.Account{
+		ID:          "ready",
+		AccessToken: "token",
+		Pool:        account.PoolReady,
+		MaxActive:   1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("save account: %v", err)
+	}
+	if got, err := repo.AccountCount(ctx); err != nil || got != 1 {
+		t.Fatalf("count = %d, %v; want 1", got, err)
+	}
+}

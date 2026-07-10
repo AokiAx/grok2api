@@ -15,11 +15,13 @@ import (
 )
 
 type fakeGateway struct {
-	result service.ChatResult
-	err    error
+	result  service.ChatResult
+	err     error
+	payload []byte
 }
 
-func (g *fakeGateway) Chat(_ context.Context, _ []byte, _ bool) (service.ChatResult, error) {
+func (g *fakeGateway) Chat(_ context.Context, payload []byte, _ bool) (service.ChatResult, error) {
+	g.payload = append([]byte(nil), payload...)
 	return g.result, g.err
 }
 
@@ -103,5 +105,35 @@ func TestChatStreamsSSEAndFlushesContent(t *testing.T) {
 	}
 	if recorder.Body.String() != "data: hello\n\ndata: [DONE]\n\n" {
 		t.Fatalf("body = %q", recorder.Body.String())
+	}
+}
+
+func TestChatAddsConfiguredDefaultModel(t *testing.T) {
+	gateway := &fakeGateway{result: service.ChatResult{
+		Status: http.StatusOK,
+		Header: make(http.Header),
+		Body:   []byte(`{"ok":true}`),
+	}}
+	server := api.NewServer(
+		gateway,
+		fakeStatus{},
+		"",
+		api.WithDefaultModel("grok-default"),
+	)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	var payload map[string]any
+	if err := json.Unmarshal(gateway.payload, &payload); err != nil {
+		t.Fatalf("decode forwarded payload: %v", err)
+	}
+	if payload["model"] != "grok-default" {
+		t.Fatalf("model = %v; want grok-default", payload["model"])
 	}
 }
