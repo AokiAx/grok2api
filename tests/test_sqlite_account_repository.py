@@ -88,6 +88,26 @@ def test_repository_can_resync_accounts_written_by_legacy_process(tmp_path: Path
     assert len(repo.list_accounts()) == 2
 
 
+def test_legacy_resync_preserves_database_runtime_health(tmp_path: Path):
+    legacy = tmp_path / "cli_accounts.json"
+    database = tmp_path / "grok2api.db"
+    _write_legacy_pool(legacy)
+    repo = SQLiteAccountRepository(database, legacy_json_path=legacy)
+    account = repo.list_accounts()[0]
+    account.request_count = 99
+    account.fail_count = 3
+    account.consecutive_failures = 2
+    repo.upsert(account)
+
+    repo.sync_legacy_json()
+
+    synced = repo.get(account.id)
+    assert synced is not None
+    assert synced.request_count == 99
+    assert synced.fail_count == 3
+    assert synced.consecutive_failures == 2
+
+
 def test_repository_closes_short_lived_connections(tmp_path: Path, monkeypatch):
     database = tmp_path / "grok2api.db"
     repo = SQLiteAccountRepository(database)

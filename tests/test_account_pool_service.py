@@ -145,3 +145,14 @@ def test_update_delete_and_runtime_flush(tmp_path: Path):
     pool.close()
     assert pool.delete(account.id) is True
     assert pool.delete(account.id) is False
+
+
+def test_success_on_healthy_account_does_not_write_database(tmp_path: Path):
+    pool = _pool(tmp_path)
+    _add(pool, "a@example.com")
+    database = tmp_path / "grok2api.db"
+    before = database.stat().st_mtime_ns
+
+    pool.report_success("a@example.com")
+
+    assert database.stat().st_mtime_ns == before
