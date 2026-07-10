@@ -205,6 +205,72 @@ func TestResponsesToChatStreamUnknownCallIDDelta(t *testing.T) {
 	}
 }
 
+func TestResponsesToChatStreamDoneWithoutDeltasUsesFinalArgs(t *testing.T) {
+	// Some backends skip arguments.delta and only send full args on output_item.done.
+	sse := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_x","name":"Lookup","arguments":""}}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_x","name":"Lookup","arguments":"{\"q\":\"hi\"}"}}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}`,
+		``,
+	}, "\n")
+	stream := compat.NewResponsesToChatStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	_ = stream.Close()
+	body := string(data)
+	if strings.Count(body, `"index":0`) < 1 {
+		t.Fatalf("expected tool index 0: %s", body)
+	}
+	if strings.Contains(body, `"index":1`) {
+		t.Fatalf("must not invent second tool index: %s", body)
+	}
+	if !strings.Contains(body, `\"q\":\"hi\"`) && !strings.Contains(body, `"q":"hi"`) {
+		// arguments appear escaped inside JSON string
+		if !strings.Contains(body, "hi") {
+			t.Fatalf("missing final args: %s", body)
+		}
+	}
+}
+
+func TestResponsesToChatObjectArgumentsBecomeJSONString(t *testing.T) {
+	// Upstream occasionally returns structured arguments objects.
+	body := []byte(`{
+		"id":"resp_obj",
+		"model":"grok-4.5",
+		"status":"completed",
+		"output":[{"type":"function_call","call_id":"call_1","name":"Read","arguments":{"file_path":"/tmp/a","limit":3}}]
+	}`)
+	out, err := compat.ResponsesToChat(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	msg := payload["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	call := msg["tool_calls"].([]any)[0].(map[string]any)
+	fn := call["function"].(map[string]any)
+	args, ok := fn["arguments"].(string)
+	if !ok {
+		t.Fatalf("arguments should be string, got %#v", fn["arguments"])
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		t.Fatalf("arguments not JSON: %q err=%v", args, err)
+	}
+	if parsed["file_path"] != "/tmp/a" {
+		t.Fatalf("parsed=%#v", parsed)
+	}
+}
+
 func TestAggregateResponsesStreamCompletedEnvelopeJSON(t *testing.T) {
 	raw := `{"type":"response.completed","response":{"id":"resp_wrap","model":"grok-4.5","status":"completed","output_text":"wrapped","usage":{"input_tokens":1,"output_tokens":1}}}`
 	out, err := compat.AggregateResponsesStream(io.NopCloser(strings.NewReader(raw)), "grok-4.5")
