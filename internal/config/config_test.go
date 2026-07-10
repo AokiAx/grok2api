@@ -15,12 +15,14 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 		"host":"127.0.0.1",
 		"port":8787,
 		"default_model":"grok-file",
-		"proxy_base_url":"https://example.test/v1"
+		"proxy_base_url":"https://example.test/v1",
+		"app_key":"file-admin"
 	}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	t.Setenv("GROK2API_PORT", "9999")
 	t.Setenv("GROK2API_DEFAULT_MODEL", "grok-env")
+	t.Setenv("GROK2API_APP_KEY", "env-admin")
 
 	got, err := config.Load(path)
 	if err != nil {
@@ -34,6 +36,29 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	}
 	if got.ProxyBaseURL != "https://example.test/v1" {
 		t.Fatalf("proxy URL = %q", got.ProxyBaseURL)
+	}
+	if got.AppKey != "env-admin" {
+		t.Fatalf("app key = %q", got.AppKey)
+	}
+}
+
+func TestAdminKeyPrecedence(t *testing.T) {
+	tests := []struct {
+		name   string
+		config config.Config
+		want   string
+	}{
+		{name: "panel password", config: config.Config{PanelPassword: "panel", AppKey: "app", APIKey: "api"}, want: "panel"},
+		{name: "app key", config: config.Config{AppKey: "app", APIKey: "api"}, want: "app"},
+		{name: "api key", config: config.Config{APIKey: "api"}, want: "api"},
+		{name: "open panel", config: config.Config{}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.config.AdminKey(); got != test.want {
+				t.Fatalf("admin key = %q; want %q", got, test.want)
+			}
+		})
 	}
 }
 
