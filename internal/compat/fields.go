@@ -103,6 +103,17 @@ func sanitizeResponsesMap(input map[string]any) bool {
 		}
 	}
 
+	// Codex multi-turn items (local_shell_call, item_reference, …) → Grok ModelInput.
+	if rawInput, ok := input["input"]; ok {
+		sanitized := SanitizeResponsesInput(rawInput)
+		before, _ := json.Marshal(rawInput)
+		after, _ := json.Marshal(sanitized)
+		if string(before) != string(after) {
+			input["input"] = sanitized
+			changed = true
+		}
+	}
+
 	for _, key := range codexRejectedFields {
 		if _, ok := input[key]; ok {
 			delete(input, key)

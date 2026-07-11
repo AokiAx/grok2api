@@ -48,6 +48,10 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 			}
 		}
 	}
+	// Always sanitize for Grok ModelInput (drops local_shell_call, item_reference, …).
+	if _, hasInput := input["input"]; hasInput {
+		input["input"] = SanitizeResponsesInput(input["input"])
+	}
 	if maxTokens, ok := input["max_tokens"]; ok {
 		if _, exists := input["max_output_tokens"]; !exists {
 			input["max_output_tokens"] = maxTokens

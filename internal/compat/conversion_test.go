@@ -426,6 +426,82 @@ func TestStripUnknownResponsesFieldsNoopWhenClean(t *testing.T) {
 	}
 }
 
+func TestSanitizeResponsesInputMapsCodexShellAndDropsUnsupported(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type": "message", "role": "user",
+			"content": []any{map[string]any{"type": "input_text", "text": "run"}},
+		},
+		map[string]any{
+			"type": "local_shell_call", "call_id": "c1",
+			"action": map[string]any{"type": "exec", "command": []any{"echo", "hi"}},
+		},
+		map[string]any{"type": "local_shell_call_output", "call_id": "c1", "output": "hi\n"},
+		map[string]any{"type": "item_reference", "id": "msg_x"},
+		map[string]any{"type": "web_search_call", "id": "ws1", "status": "completed"},
+		map[string]any{"type": "message", "role": "user", "content": nil},
+		map[string]any{
+			"type": "custom_tool_call", "call_id": "c2", "name": "apply_patch", "input": "{\"p\":1}",
+		},
+	}
+	out := compat.SanitizeResponsesInput(raw).([]any)
+	types := make([]string, 0, len(out))
+	for _, item := range out {
+		m := item.(map[string]any)
+		if typ := stringValueTest(m["type"]); typ != "" {
+			types = append(types, typ)
+		} else {
+			types = append(types, "message")
+		}
+	}
+	// local_shell → function_call + function_call_output; custom → function_call;
+	// null content message kept; item_reference/web_search_call dropped.
+	joined := strings.Join(types, ",")
+	if !strings.Contains(joined, "function_call") || !strings.Contains(joined, "function_call_output") {
+		t.Fatalf("types=%v", types)
+	}
+	if strings.Contains(joined, "local_shell") || strings.Contains(joined, "item_reference") || strings.Contains(joined, "web_search_call") {
+		t.Fatalf("unsupported types leaked: %v", types)
+	}
+	// null content coerced
+	foundEmpty := false
+	for _, item := range out {
+		m := item.(map[string]any)
+		if m["role"] == "user" && m["content"] == "" {
+			foundEmpty = true
+		}
+	}
+	if !foundEmpty {
+		t.Fatalf("expected coerced empty content message: %#v", out)
+	}
+
+	// Full finalize path must not 422-shape
+	body, _ := json.Marshal(map[string]any{
+		"model": "grok-4.5", "stream": false, "input": raw,
+		"external_web_access": false, "store": false,
+	})
+	finalized, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: true})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(finalized, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	encoded := string(finalized)
+	for _, bad := range []string{"local_shell_call", "item_reference", "web_search_call", "custom_tool_call"} {
+		if strings.Contains(encoded, bad) {
+			t.Fatalf("finalized still has %s: %s", bad, encoded)
+		}
+	}
+	_ = payload
+}
+
+func stringValueTest(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
 func TestNormalizeResponsesToolsSanitizesCodexWebSearchAndDropsLocalShell(t *testing.T) {
 	raw := []any{
 		map[string]any{
