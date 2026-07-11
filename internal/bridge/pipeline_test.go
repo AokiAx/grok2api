@@ -219,10 +219,12 @@ func TestPipelineInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestPipelineMessagesNativeFallback(t *testing.T) {
-	gateway := &fakeGateway{chat: service.ChatResult{
+func TestPipelineMessagesAlwaysUsesResponses(t *testing.T) {
+	// Anthropic path always hits /responses (no chat fallback), model passed through.
+	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"hi\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+	gateway := &fakeGateway{result: service.ChatResult{
 		Status: http.StatusOK,
-		Body:   []byte(`{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`),
+		Stream: io.NopCloser(strings.NewReader(sse)),
 	}}
 	pipeline := &bridge.Pipeline{
 		Gateway:         gateway,
@@ -233,8 +235,15 @@ func TestPipelineMessagesNativeFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("messages: %v", err)
 	}
-	if gateway.path != "/chat/completions" {
+	if gateway.path != "/responses" {
 		t.Fatalf("path=%s", gateway.path)
+	}
+	var forwarded map[string]any
+	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if forwarded["model"] != "grok-4.5" {
+		t.Fatalf("upstream model=%#v", forwarded["model"])
 	}
 	if !strings.Contains(string(result.Body), `"type":"message"`) {
 		t.Fatalf("body=%s", result.Body)

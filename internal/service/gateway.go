@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
+	"github.com/AokiAx/grok2api/internal/requestctx"
 	"github.com/AokiAx/grok2api/internal/scheduler"
 	"github.com/AokiAx/grok2api/internal/upstream"
 )
@@ -101,8 +102,9 @@ func (g *Gateway) Request(
 
 	attempted := 0
 	quotaFailures := 0
+	stickyKey := ComposeStickyKey(requestctx.StickyKey(ctx), PayloadAffinityKey(payload))
 	for range attempts {
-		lease, err := g.scheduler.Acquire(ctx)
+		lease, err := g.scheduler.AcquireSticky(ctx, stickyKey)
 		if err != nil {
 			if errors.Is(err, scheduler.ErrNoReadyAccount) {
 				return ChatResult{}, g.poolUnavailable()

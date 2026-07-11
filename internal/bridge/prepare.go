@@ -7,12 +7,20 @@ import (
 
 // prepared is the canonical /responses request after client conversion.
 type prepared struct {
-	Model        string
-	Body         []byte
-	ClientStream bool
-	Format       ClientFormat
-	// ChatBody is retained for PreferResponses=false fallback (native chat path).
+	// Model is the client-facing model id used in Body and response echo.
+	Model string
+	Body  []byte
+	// UpstreamModel is the model used for catalog hints (same as Model; no aliases).
+	UpstreamModel string
+	ClientStream  bool
+	Format        ClientFormat
+	// ChatBody is retained for PreferResponses=false Chat path only.
 	ChatBody []byte
+	// Session sticky id (Claude Code session → prompt_cache_key + x-grok-conv-id).
+	ConvID string
+	// Anthropic thinking bridge (CPA-style signature / summary blocks).
+	ThinkingEnabled bool
+	ThinkingDisplay string
 }
 
 func (p *Pipeline) useResponses(model string) bool {
@@ -46,29 +54,33 @@ func (p *Pipeline) prepareChat(body []byte) (prepared, error) {
 		return prepared{}, invalidRequest("Invalid JSON body", err)
 	}
 	return prepared{
-		Model:        model,
-		Body:         responsesBody,
-		ClientStream: stream,
-		Format:       FormatChat,
-		ChatBody:     chatBody,
+		Model:         model,
+		UpstreamModel: model,
+		Body:          responsesBody,
+		ClientStream:  stream,
+		Format:        FormatChat,
+		ChatBody:      chatBody,
 	}, nil
 }
 
-func (p *Pipeline) prepareAnthropic(body []byte) (prepared, error) {
-	responsesBody, model, stream, err := compat.PrepareResponsesFromAnthropic(body, p.defaultModel())
+func (p *Pipeline) prepareAnthropic(body []byte, convID string) (prepared, error) {
+	responsesBody, model, stream, err := compat.PrepareResponsesFromAnthropicWithOptions(body, compat.AnthropicToResponsesOptions{
+		DefaultModel: p.defaultModel(),
+		ConvID:       convID,
+	})
 	if err != nil {
 		return prepared{}, invalidRequest("Invalid Anthropic request", err)
 	}
-	chatBody, _, err := compat.AnthropicToOpenAI(body, p.defaultModel())
-	if err != nil {
-		return prepared{}, invalidRequest("Invalid Anthropic request", err)
-	}
+	thinkingEnabled, thinkingDisplay := compat.AnthropicThinkingBridge(body)
 	return prepared{
-		Model:        model,
-		Body:         responsesBody,
-		ClientStream: stream,
-		Format:       FormatAnthropic,
-		ChatBody:     chatBody,
+		Model:           model,
+		UpstreamModel:   model,
+		Body:            responsesBody,
+		ClientStream:    stream,
+		Format:          FormatAnthropic,
+		ConvID:          convID,
+		ThinkingEnabled: thinkingEnabled,
+		ThinkingDisplay: thinkingDisplay,
 	}, nil
 }
 
@@ -78,9 +90,10 @@ func (p *Pipeline) prepareResponses(body []byte) (prepared, error) {
 		return prepared{}, invalidRequest("Invalid JSON body", err)
 	}
 	return prepared{
-		Model:        model,
-		Body:         responsesBody,
-		ClientStream: stream,
-		Format:       FormatResponses,
+		Model:         model,
+		UpstreamModel: model,
+		Body:          responsesBody,
+		ClientStream:  stream,
+		Format:        FormatResponses,
 	}, nil
 }

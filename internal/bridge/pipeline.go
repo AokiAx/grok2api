@@ -68,7 +68,7 @@ func (p *Pipeline) Chat(ctx context.Context, body []byte) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if p.useResponses(req.Model) {
+	if p.useResponses(req.UpstreamModel) {
 		return p.executeResponses(ctx, req)
 	}
 	return p.executeNativeChat(ctx, req)
@@ -76,20 +76,24 @@ func (p *Pipeline) Chat(ctx context.Context, body []byte) (Result, error) {
 
 // Messages handles POST /v1/messages (Anthropic).
 //
-// Codex and some gateways POST Responses-shaped JSON to /v1/messages. Detect
-// that and handle as Responses so input/instructions/tools are not dropped.
-func (p *Pipeline) Messages(ctx context.Context, body []byte) (Result, error) {
+// Always uses the Grok /responses backend (direct Anthropic ↔ Responses).
+// Codex and some gateways POST Responses-shaped JSON to /v1/messages; those are
+// detected and handled as native Responses so input/tools are not dropped.
+//
+// convID is optional session sticky (Claude Code session header).
+func (p *Pipeline) Messages(ctx context.Context, body []byte, convID ...string) (Result, error) {
 	if compat.DetectPayload(body) == compat.KindResponses {
 		return p.Responses(ctx, body)
 	}
-	req, err := p.prepareAnthropic(body)
+	session := ""
+	if len(convID) > 0 {
+		session = strings.TrimSpace(convID[0])
+	}
+	req, err := p.prepareAnthropic(body, session)
 	if err != nil {
 		return Result{}, err
 	}
-	if p.useResponses(req.Model) {
-		return p.executeResponses(ctx, req)
-	}
-	return p.executeNativeChatAsAnthropic(ctx, req)
+	return p.executeResponses(ctx, req)
 }
 
 // Responses handles POST /v1/responses.
@@ -114,9 +118,13 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 	if p == nil || p.Gateway == nil {
 		return Result{}, badGateway("gateway unavailable", nil)
 	}
-	upstreamBody, err := compat.FinalizeResponsesUpstream(req.Body, p.hintsFor(req.Model))
+	upstreamBody, err := compat.FinalizeResponsesUpstream(req.Body, p.hintsFor(req.UpstreamModel))
 	if err != nil {
 		return Result{}, invalidRequest("Invalid request payload", err)
+	}
+
+	if conv := strings.TrimSpace(req.ConvID); conv != "" {
+		ctx = upstream.WithConvID(ctx, conv)
 	}
 
 	// Always consume SSE from upstream. Non-stream clients are aggregated in deliver.
@@ -136,15 +144,4 @@ func (p *Pipeline) executeNativeChat(ctx context.Context, req prepared) (Result,
 		return Result{}, err
 	}
 	return result, nil
-}
-
-func (p *Pipeline) executeNativeChatAsAnthropic(ctx context.Context, req prepared) (Result, error) {
-	result, err := p.Gateway.Chat(ctx, req.ChatBody, req.ClientStream)
-	if err != nil {
-		return Result{}, err
-	}
-	if result.Status >= http.StatusBadRequest {
-		return materializeErrorResult(result), nil
-	}
-	return deliverAnthropicFromChat(result, req.Model, req.ClientStream)
 }

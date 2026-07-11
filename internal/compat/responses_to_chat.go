@@ -38,7 +38,22 @@ func ResponsesToChat(payload []byte) ([]byte, error) {
 		outputTokens := intValue(rawUsage["output_tokens"])
 		usage["prompt_tokens"] = inputTokens
 		usage["completion_tokens"] = outputTokens
-		usage["total_tokens"] = inputTokens + outputTokens
+		if total := intValue(rawUsage["total_tokens"]); total > 0 {
+			usage["total_tokens"] = total
+		} else {
+			usage["total_tokens"] = inputTokens + outputTokens
+		}
+		// Pass through Grok prompt-cache metrics for chat clients / NewAPI.
+		if details, ok := rawUsage["input_tokens_details"].(map[string]any); ok {
+			usage["prompt_tokens_details"] = details
+			if cached := intValue(details["cached_tokens"]); cached > 0 {
+				// Common alias some dashboards look for.
+				usage["cached_tokens"] = cached
+			}
+		} else if cached := intValue(rawUsage["cached_tokens"]); cached > 0 {
+			usage["cached_tokens"] = cached
+			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
+		}
 	}
 
 	id := stringValue(response["id"])

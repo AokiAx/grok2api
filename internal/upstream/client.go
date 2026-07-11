@@ -135,6 +135,9 @@ func (c *Client) Request(
 	request.Header.Set("x-grok-client-version", c.clientVersion)
 	request.Header.Set("x-grok-model-override", model)
 	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
+	if convID := ConvIDFrom(ctx); convID != "" {
+		request.Header.Set("x-grok-conv-id", convID)
+	}
 	if len(payload) > 0 {
 		request.Header.Set("Content-Type", "application/json")
 	}

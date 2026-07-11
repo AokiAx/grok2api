@@ -339,18 +339,17 @@ func TestResponsesToChatHandlesCreatedAtNumber(t *testing.T) {
 	}
 }
 
-func TestOpenAIToAnthropicFromAggregatedResponses(t *testing.T) {
+func TestResponsesToAnthropicFromAggregatedResponses(t *testing.T) {
 	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"pong\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
-	out, err := compat.AggregateResponsesStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	anth, err := compat.AggregateResponsesToAnthropic(io.NopCloser(strings.NewReader(sse)), "claude-sonnet-5", false, "")
 	if err != nil {
-		t.Fatalf("aggregate: %v", err)
-	}
-	anth, err := compat.OpenAIToAnthropic(out)
-	if err != nil {
-		t.Fatalf("anthropic: %v out=%s", err, out)
+		t.Fatalf("aggregate anthropic: %v", err)
 	}
 	if !strings.Contains(string(anth), "pong") {
 		t.Fatalf("anth=%s", anth)
+	}
+	if !strings.Contains(string(anth), `"model":"claude-sonnet-5"`) {
+		t.Fatalf("want client model echo: %s", anth)
 	}
 }
 
@@ -672,13 +671,9 @@ func TestAnthropicToolsReachResponsesAsFlatFunctions(t *testing.T) {
 		}]
 	}`)
 
-	chat, _, err := compat.AnthropicToOpenAI(anthropic, "grok-4.5")
+	responses, _, _, err := compat.AnthropicToResponses(anthropic, "grok-4.5")
 	if err != nil {
-		t.Fatalf("anthropic to chat: %v", err)
-	}
-	responses, _, err := compat.ChatToResponses(chat)
-	if err != nil {
-		t.Fatalf("chat to responses: %v", err)
+		t.Fatalf("anthropic to responses: %v", err)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(responses, &payload); err != nil {

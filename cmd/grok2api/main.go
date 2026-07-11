@@ -142,6 +142,14 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		return err
 	}
 	pool := scheduler.New(accounts)
+	stickyTTL := time.Duration(settings.StickyTTLMinutes) * time.Minute
+	if stickyTTL <= 0 {
+		stickyTTL = 30 * time.Minute
+	}
+	pool.WithSticky(settings.StickyPool, stickyTTL)
+	if settings.StickyPool {
+		slog.Info("account pool sticky enabled", "ttl", stickyTTL.String())
+	}
 	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
 	upstreamClient := upstream.NewClient(
 		settings.ProxyBaseURL,

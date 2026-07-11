@@ -111,16 +111,16 @@ func PrepareResponsesFromChat(payload []byte, defaultModel string) ([]byte, stri
 }
 
 // PrepareResponsesFromAnthropic converts an Anthropic Messages body into a Responses body.
+// Uses a direct Anthropic → Responses path so thinking signatures, server web_search,
+// and image blocks are preserved (no Chat Completions intermediate hop).
 func PrepareResponsesFromAnthropic(payload []byte, defaultModel string) ([]byte, string, bool, error) {
-	openAIBody, stream, err := AnthropicToOpenAI(payload, defaultModel)
-	if err != nil {
-		return nil, "", false, err
-	}
-	responsesBody, model, _, err := PrepareResponsesFromChat(openAIBody, defaultModel)
-	if err != nil {
-		return nil, "", false, err
-	}
-	return responsesBody, model, stream, nil
+	return AnthropicToResponses(payload, defaultModel)
+}
+
+// PrepareResponsesFromAnthropicWithOptions is PrepareResponsesFromAnthropic with
+// session sticky (prompt_cache_key / conv id).
+func PrepareResponsesFromAnthropicWithOptions(payload []byte, opts AnthropicToResponsesOptions) ([]byte, string, bool, error) {
+	return AnthropicToResponsesWithOptions(payload, opts)
 }
 
 // FinalizeResponsesUpstream applies catalog policy and hard invariants required

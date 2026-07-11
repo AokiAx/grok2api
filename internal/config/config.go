@@ -30,9 +30,13 @@ type Config struct {
 	DataDir           string `json:"data_dir"`
 	MaxConcurrent     int    `json:"cli_pool_max_concurrent"`
 	AcquireTimeoutSec int    `json:"cli_pool_acquire_timeout"`
-	QuotaRetryMinutes int    `json:"quota_retry_minutes"`
-	RateRetrySeconds  int    `json:"rate_retry_seconds"`
-	RequestTimeoutSec int    `json:"timeout_secs"`
+	// Sticky pool keeps the same Grok account for a client session / prompt
+	// fingerprint so prefix cache (cached_tokens) stays warm.
+	StickyPool        bool `json:"cli_pool_sticky"`
+	StickyTTLMinutes  int  `json:"cli_pool_sticky_ttl_minutes"`
+	QuotaRetryMinutes int  `json:"quota_retry_minutes"`
+	RateRetrySeconds  int  `json:"rate_retry_seconds"`
+	RequestTimeoutSec int `json:"timeout_secs"`
 
 	// Register / anti-bot settings (compatible with Python config.json keys).
 	AccountsBase         string          `json:"accounts_base"`
@@ -75,6 +79,8 @@ func Defaults() Config {
 		DataDir:             "data",
 		MaxConcurrent:       1,
 		AcquireTimeoutSec:   60,
+		StickyPool:          true,
+		StickyTTLMinutes:    30,
 		QuotaRetryMinutes:   1440,
 		RateRetrySeconds:    45,
 		RequestTimeoutSec:   600,
@@ -208,6 +214,7 @@ func applyEnvironment(config *Config) error {
 		"GROK2API_PORT":                     &config.Port,
 		"GROK2API_CLI_POOL_MAX_CONCURRENT":  &config.MaxConcurrent,
 		"GROK2API_CLI_POOL_ACQUIRE_TIMEOUT": &config.AcquireTimeoutSec,
+		"GROK2API_CLI_POOL_STICKY_TTL_MINUTES": &config.StickyTTLMinutes,
 		"GROK2API_QUOTA_RETRY_MINUTES":      &config.QuotaRetryMinutes,
 		"GROK2API_RATE_RETRY_SECONDS":       &config.RateRetrySeconds,
 		"GROK2API_TIMEOUT_SECS":             &config.RequestTimeoutSec,
@@ -236,6 +243,7 @@ func applyEnvironment(config *Config) error {
 		"GROK2API_FLARESOLVERR_ENABLED":   &config.FlareSolverrEnabled,
 		"GROK2API_REGISTER_BACKUP_TOKENS": &config.RegisterBackupTokens,
 		"GROK2API_DEBUG_TRACE":            &config.DebugTrace,
+		"GROK2API_CLI_POOL_STICKY":        &config.StickyPool,
 	}
 	for name, target := range boolValues {
 		value, ok := os.LookupEnv(name)

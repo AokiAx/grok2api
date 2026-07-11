@@ -67,10 +67,14 @@ func TestFinalizeResponsesUpstreamForcesStreamAndStrips(t *testing.T) {
 	if payload["backend_search"] != true {
 		t.Fatalf("backend_search=%#v", payload["backend_search"])
 	}
-	for _, key := range []string{"external_web_access", "metadata", "store", "parallel_tool_calls", "prompt_cache_key"} {
+	for _, key := range []string{"external_web_access", "metadata", "store", "parallel_tool_calls"} {
 		if _, ok := payload[key]; ok {
 			t.Fatalf("%s should be stripped: %#v", key, payload)
 		}
+	}
+	// prompt_cache_key is kept for session sticky / cache continuity.
+	if payload["prompt_cache_key"] != "abc" {
+		t.Fatalf("prompt_cache_key=%#v", payload["prompt_cache_key"])
 	}
 	// Default-on search tools for models that support backend search.
 	tools, _ := payload["tools"].([]any)

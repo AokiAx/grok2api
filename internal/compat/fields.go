@@ -29,13 +29,16 @@ var responsesAllowedFields = map[string]struct{}{
 	"instructions":            {},
 	"reasoning_effort":        {},
 	"reasoning":               {},
+	// Structured output (Anthropic output_config.format → text.format).
+	"text": {},
+	// Kept for session continuity when upstream accepts it (Claude Code).
+	"prompt_cache_key": {},
 }
 
 // codexRejectedFields are known client extras that Grok rejects with
 // "Argument not supported: …" (Codex / OpenAI Responses clients).
 var codexRejectedFields = []string{
 	"external_web_access",
-	"prompt_cache_key",
 	"safety_identifier",
 	"service_tier",
 	"store",

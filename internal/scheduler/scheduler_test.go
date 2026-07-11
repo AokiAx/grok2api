@@ -101,6 +101,63 @@ func TestAcquireHonorsContextWhenReadyPoolIsBusy(t *testing.T) {
 	}
 }
 
+func TestAcquireStickyPrefersSameAccount(t *testing.T) {
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+		readyAccount("c"),
+	})
+	s.WithSticky(true, time.Hour)
+
+	first, err := s.AcquireSticky(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	want := first.Account().ID
+	first.Release()
+
+	for i := 0; i < 5; i++ {
+		lease, err := s.AcquireSticky(context.Background(), "user-1")
+		if err != nil {
+			t.Fatalf("sticky %d: %v", i, err)
+		}
+		if lease.Account().ID != want {
+			t.Fatalf("sticky %d = %q; want %q", i, lease.Account().ID, want)
+		}
+		lease.Release()
+	}
+
+	// Different sticky key may pick another account (not forced equal).
+	other, err := s.AcquireSticky(context.Background(), "user-2")
+	if err != nil {
+		t.Fatalf("other: %v", err)
+	}
+	other.Release()
+}
+
+func TestAcquireStickyFallsBackWhenPreferredBusy(t *testing.T) {
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+	})
+	s.WithSticky(true, time.Hour)
+
+	first, err := s.AcquireSticky(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// Hold sticky account busy.
+	second, err := s.AcquireSticky(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("fallback: %v", err)
+	}
+	if second.Account().ID == first.Account().ID {
+		t.Fatal("expected fallback to another ready account while sticky is busy")
+	}
+	second.Release()
+	first.Release()
+}
+
 func TestPromoteDueMovesRecoverableAccountsBackToReady(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
 	s := scheduler.New([]account.Account{

@@ -12,7 +12,7 @@ func (p *Pipeline) deliver(result Result, req prepared) (Result, error) {
 	case FormatChat:
 		return deliverChat(result, req.Model, req.ClientStream)
 	case FormatAnthropic:
-		return deliverAnthropicFromResponses(result, req.Model, req.ClientStream)
+		return deliverAnthropicFromResponses(result, req.Model, req.ClientStream, req.ThinkingEnabled, req.ThinkingDisplay)
 	case FormatResponses:
 		return deliverResponses(result, req.ClientStream)
 	default:
@@ -37,37 +37,27 @@ func deliverChat(result Result, model string, clientStream bool) (Result, error)
 	return withJSONHeaders(result), nil
 }
 
-func deliverAnthropicFromResponses(result Result, model string, clientStream bool) (Result, error) {
+func deliverAnthropicFromResponses(result Result, model string, clientStream bool, thinkingEnabled bool, thinkingDisplay string) (Result, error) {
+	if thinkingDisplay == "" {
+		thinkingDisplay = "summarized"
+	}
 	if clientStream {
 		if result.Stream == nil {
 			return Result{}, badGateway("Upstream stream missing", nil)
 		}
-		chatStream := compat.NewResponsesToChatStream(result.Stream, model)
-		result.Stream = compat.NewAnthropicStream(chatStream, model)
+		result.Stream = compat.NewResponsesToAnthropicStream(result.Stream, model, thinkingEnabled, thinkingDisplay)
 		return withSSEHeaders(result), nil
 	}
-	chatBody, err := readResponsesAsChat(result, model)
-	if err != nil {
-		return Result{}, err
-	}
-	converted, err := compat.OpenAIToAnthropic(chatBody)
-	if err != nil {
-		return Result{}, badGateway("Invalid upstream response", err)
-	}
-	result.Body = converted
-	result.Stream = nil
-	return withJSONHeaders(result), nil
-}
-
-func deliverAnthropicFromChat(result Result, model string, clientStream bool) (Result, error) {
-	if clientStream {
-		if result.Stream == nil {
-			return Result{}, badGateway("Upstream stream missing", nil)
+	if result.Stream != nil {
+		converted, err := compat.AggregateResponsesToAnthropic(result.Stream, model, thinkingEnabled, thinkingDisplay)
+		if err != nil {
+			return Result{}, badGateway("Invalid upstream stream", err)
 		}
-		result.Stream = compat.NewAnthropicStream(result.Stream, model)
-		return withSSEHeaders(result), nil
+		result.Body = converted
+		result.Stream = nil
+		return withJSONHeaders(result), nil
 	}
-	converted, err := compat.OpenAIToAnthropic(result.Body)
+	converted, err := compat.ResponsesToAnthropic(result.Body, model, thinkingEnabled, thinkingDisplay)
 	if err != nil {
 		return Result{}, badGateway("Invalid upstream response", err)
 	}

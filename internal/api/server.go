@@ -15,10 +15,12 @@ import (
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/bridge"
+	"github.com/AokiAx/grok2api/internal/compat"
 	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/intercept"
 	"github.com/AokiAx/grok2api/internal/register"
 	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
+	"github.com/AokiAx/grok2api/internal/requestctx"
 	"github.com/AokiAx/grok2api/internal/service"
 	"github.com/AokiAx/grok2api/internal/upstream"
 )
@@ -514,7 +516,7 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	result, err := s.bridge.Chat(request.Context(), body)
+	result, err := s.bridge.Chat(withStickyContext(request), body)
 	if err != nil {
 		s.writeBridgeError(writer, err)
 		return
@@ -642,7 +644,7 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	result, err := s.bridge.Responses(request.Context(), body)
+	result, err := s.bridge.Responses(withStickyContext(request), body)
 	if err != nil {
 		s.writeBridgeError(writer, err)
 		return
@@ -660,7 +662,9 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	result, err := s.bridge.Messages(request.Context(), body)
+	// Session sticky: Claude Code session header → prompt_cache_key + x-grok-conv-id.
+	// Account-pool sticky still uses withStickyContext (requestctx).
+	result, err := s.bridge.Messages(withStickyContext(request), body, compat.SessionIDFromRequest(request))
 	if err != nil {
 		s.writeBridgeError(writer, err)
 		return
@@ -722,6 +726,12 @@ func (s *Server) writeResult(writer http.ResponseWriter, result service.ChatResu
 
 func (s *Server) authorized(request *http.Request) bool {
 	return authorizedWithKey(request, s.apiKey)
+}
+
+// withStickyContext attaches a sticky pool key from client headers / API key
+// so continuous agent sessions stay on a warm Grok account.
+func withStickyContext(request *http.Request) context.Context {
+	return requestctx.WithStickyKey(request.Context(), service.StickyKeyFromRequest(request))
 }
 
 func authorizedWithKey(request *http.Request, key string) bool {

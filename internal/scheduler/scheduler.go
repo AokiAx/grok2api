@@ -11,19 +11,32 @@ import (
 
 var ErrNoReadyAccount = errors.New("no ready account")
 
+const defaultStickyTTL = 30 * time.Minute
+
+type stickyEntry struct {
+	accountID string
+	expiresAt time.Time
+}
+
 type Scheduler struct {
-	mu       sync.Mutex
-	accounts map[string]*account.Account
-	ready    []string
-	notify   chan struct{}
-	revision uint64
+	mu        sync.Mutex
+	accounts  map[string]*account.Account
+	ready     []string
+	notify    chan struct{}
+	revision  uint64
+	sticky    map[string]stickyEntry
+	stickyTTL time.Duration
+	stickyOn  bool
 }
 
 func New(accounts []account.Account) *Scheduler {
 	scheduler := &Scheduler{
-		accounts: make(map[string]*account.Account, len(accounts)),
-		notify:   make(chan struct{}, 1),
-		revision: 1,
+		accounts:  make(map[string]*account.Account, len(accounts)),
+		notify:    make(chan struct{}, 1),
+		revision:  1,
+		sticky:    make(map[string]stickyEntry),
+		stickyTTL: defaultStickyTTL,
+		stickyOn:  true,
 	}
 	for index := range accounts {
 		item := accounts[index]
@@ -38,22 +51,67 @@ func New(accounts []account.Account) *Scheduler {
 	return scheduler
 }
 
+// WithSticky configures session stickiness for prompt-cache affinity.
+// key empty or ttl<=0 disables sticky selection (Acquire still works).
+func (s *Scheduler) WithSticky(enabled bool, ttl time.Duration) *Scheduler {
+	if s == nil {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stickyOn = enabled
+	if ttl > 0 {
+		s.stickyTTL = ttl
+	}
+	return s
+}
+
 func (s *Scheduler) Acquire(ctx context.Context) (*Lease, error) {
+	return s.AcquireSticky(ctx, "")
+}
+
+// AcquireSticky prefers the account last used for stickyKey (when enabled),
+// so repeated client sessions stay on a warm Grok credential for prefix cache.
+func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease, error) {
 	for {
 		s.mu.Lock()
 		if len(s.ready) == 0 {
 			s.mu.Unlock()
 			return nil, ErrNoReadyAccount
 		}
+		now := time.Now()
+		// 1) Prefer sticky account when free and still ready.
+		if s.stickyOn && stickyKey != "" {
+			if entry, ok := s.sticky[stickyKey]; ok {
+				if entry.expiresAt.Before(now) {
+					delete(s.sticky, stickyKey)
+				} else if item := s.accounts[entry.accountID]; item != nil && item.Available(now) {
+					item.Active++
+					item.RequestCount++
+					s.bumpStickyLocked(stickyKey, entry.accountID, now)
+					lease := &Lease{scheduler: s, accountID: entry.accountID}
+					s.mu.Unlock()
+					return lease, nil
+				} else if item == nil || item.Pool != account.PoolReady {
+					// Account gone or not ready — drop sticky binding.
+					delete(s.sticky, stickyKey)
+				}
+				// Busy sticky account: fall through to another ready account.
+			}
+		}
+		// 2) Round-robin among ready.
 		for range len(s.ready) {
 			id := s.ready[0]
 			s.ready = append(s.ready[1:], id)
 			item := s.accounts[id]
-			if item == nil || !item.Available(time.Now()) {
+			if item == nil || !item.Available(now) {
 				continue
 			}
 			item.Active++
 			item.RequestCount++
+			if s.stickyOn && stickyKey != "" {
+				s.bumpStickyLocked(stickyKey, id, now)
+			}
 			lease := &Lease{scheduler: s, accountID: id}
 			s.mu.Unlock()
 			return lease, nil
@@ -64,6 +122,22 @@ func (s *Scheduler) Acquire(ctx context.Context) (*Lease, error) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-s.notify:
+		}
+	}
+}
+
+func (s *Scheduler) bumpStickyLocked(key, accountID string, now time.Time) {
+	ttl := s.stickyTTL
+	if ttl <= 0 {
+		ttl = defaultStickyTTL
+	}
+	s.sticky[key] = stickyEntry{accountID: accountID, expiresAt: now.Add(ttl)}
+	// Opportunistic prune to keep the map bounded under many keys.
+	if len(s.sticky) > 10000 {
+		for k, e := range s.sticky {
+			if e.expiresAt.Before(now) {
+				delete(s.sticky, k)
+			}
 		}
 	}
 }
