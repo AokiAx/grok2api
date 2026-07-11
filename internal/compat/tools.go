@@ -24,6 +24,13 @@ var grokBuiltinToolTypes = map[string]struct{}{
 	"shell":              {},
 }
 
+// searchBuiltinTypes are bare Grok search tools that collide with function tools
+// of the same name ("Duplicate tool names: web_search").
+var searchBuiltinTypes = map[string]struct{}{
+	"web_search": {},
+	"x_search":   {},
+}
+
 // tool fields Grok rejects on web_search (Codex OpenAI Responses shape).
 var webSearchRejectedFields = []string{
 	"external_web_access",
@@ -160,6 +167,7 @@ type ToolNormalizeResult struct {
 //     instead of dropping — aligns with input history sanitization
 //  4. Bare shell without environment → shell_command function (avoids 422)
 //  5. Soft-cap count when maxTools > 0
+//  6. Prefer bare web_search/x_search over function tools with the same name
 func NormalizeResponsesTools(raw any, maxTools int) []any {
 	return NormalizeResponsesToolsDetailed(raw, maxTools).Tools
 }
@@ -324,7 +332,81 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 	if len(out) == 0 {
 		return ToolNormalizeResult{BackendSearch: backendSearch}
 	}
+	// Grok keys tools by name across types: bare web_search + function web_search → 422.
+	out = CollapseSearchToolNameCollisions(out)
+	if maxTools > 0 && len(out) > maxTools {
+		out = out[:maxTools]
+	}
 	return ToolNormalizeResult{Tools: out, BackendSearch: backendSearch}
+}
+
+// CollapseSearchToolNameCollisions prefers bare {type:web_search|x_search} over
+// function tools named the same. Production error: "Duplicate tool names: web_search"
+// when client sends function:web_search and we inject (or keep) bare web_search.
+func CollapseSearchToolNameCollisions(tools []any) []any {
+	if len(tools) == 0 {
+		return tools
+	}
+	// First pass: which search builtins are needed / already bare.
+	needBare := map[string]bool{}
+	haveBare := map[string]bool{}
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		if _, isSearch := searchBuiltinTypes[typeName]; isSearch {
+			haveBare[typeName] = true
+			needBare[typeName] = true
+			continue
+		}
+		if typeName == "function" || typeName == "" {
+			name := strings.ToLower(strings.TrimSpace(firstNonEmptyString(tool["name"])))
+			if _, isSearch := searchBuiltinTypes[name]; isSearch {
+				needBare[name] = true
+			}
+		}
+	}
+	if len(needBare) == 0 {
+		return tools
+	}
+
+	out := make([]any, 0, len(tools))
+	// Emit needed bare search tools first (stable order).
+	for _, name := range []string{"web_search", "x_search"} {
+		if needBare[name] {
+			out = append(out, map[string]any{"type": name})
+			haveBare[name] = true
+		}
+	}
+	seenFunc := map[string]struct{}{}
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		if _, isSearch := searchBuiltinTypes[typeName]; isSearch {
+			// Already emitted bare form.
+			continue
+		}
+		if typeName == "function" || typeName == "" {
+			name := strings.ToLower(strings.TrimSpace(firstNonEmptyString(tool["name"])))
+			if _, isSearch := searchBuiltinTypes[name]; isSearch {
+				// Drop function shadow of search builtin.
+				continue
+			}
+			if name != "" {
+				if _, exists := seenFunc[name]; exists {
+					continue
+				}
+				seenFunc[name] = struct{}{}
+			}
+		}
+		out = append(out, tool)
+	}
+	return out
 }
 
 func syntheticFunctionTool(name, description string, parameters any) map[string]any {
@@ -390,9 +472,14 @@ func hasWebSearchTool(raw any) bool {
 		if !ok {
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(stringValue(tool["type"]))) {
+		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		switch typeName {
 		case "web_search", "web_search_preview", "websearch":
 			return true
+		case "function", "":
+			if strings.EqualFold(firstNonEmptyString(tool["name"]), "web_search") {
+				return true
+			}
 		}
 	}
 	return false

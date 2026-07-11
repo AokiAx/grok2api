@@ -19,6 +19,8 @@ import (
 //   - item_reference / bare references → assistant note (id preserved in text)
 //   - unknown types → assistant note with type + compact payload
 //   - null message content → ""
+//   - role developer → system (Grok ModelInput rejects developer)
+//   - OpenAI compaction blobs / foreign encrypted_content → dropped or note
 func SanitizeResponsesInput(raw any) any {
 	switch typed := raw.(type) {
 	case string:
@@ -54,8 +56,11 @@ func sanitizeInputItem(raw any) any {
 	case "function_call_output", "tool_result", "tool_call_output":
 		return sanitizeFunctionCallOutputItem(item)
 	case "reasoning":
-		// Grok accepts reasoning items in multi-turn history.
-		return cloneMap(item)
+		return sanitizeReasoningItem(item)
+	case "compaction", "compact_result", "compaction_result":
+		// OpenAI compact session blobs are not portable to Grok
+		// ("Could not decode the compaction blob").
+		return historyNote("assistant", "compaction", item)
 	case "local_shell_call", "shell_call":
 		return localShellCallToFunctionCall(item)
 	case "local_shell_call_output", "shell_call_output":
@@ -146,6 +151,29 @@ func sanitizeInputItem(raw any) any {
 	}
 }
 
+// sanitizeReasoningItem keeps multi-turn reasoning structure but drops
+// encrypted_content that Grok cannot decrypt (OpenAI/Codex foreign blobs).
+// Summary text is preserved so the model still sees prior plan signal.
+func sanitizeReasoningItem(item map[string]any) map[string]any {
+	out := map[string]any{"type": "reasoning"}
+	if id := strings.TrimSpace(stringValue(item["id"])); id != "" {
+		out["id"] = id
+	}
+	if status := strings.TrimSpace(stringValue(item["status"])); status != "" {
+		out["status"] = status
+	}
+	if summary, ok := item["summary"]; ok && summary != nil {
+		out["summary"] = summary
+	} else {
+		out["summary"] = []any{}
+	}
+	// Do not forward encrypted_content: foreign values 422 with
+	// "Could not decrypt the provided encrypted_content".
+	// Anthropic thinking signatures that were mapped into this field also
+	// cannot be decrypted by Grok — summary/note is the portable fallback.
+	return out
+}
+
 // builtinCallToFunctionCall maps OpenAI built-in call items onto function_call.
 func builtinCallToFunctionCall(item map[string]any, name string, args map[string]any) map[string]any {
 	callID := firstNonEmptyString(item["call_id"], item["id"])
@@ -198,6 +226,7 @@ func builtinOutputToFunctionCallOutput(item map[string]any) map[string]any {
 
 func historyNote(role, typeName string, item map[string]any) map[string]any {
 	// Compact JSON of a few useful fields so the model retains signal.
+	// Never include large opaque blobs (compaction / encrypted_content).
 	snippet := map[string]any{}
 	for _, key := range []string{"id", "call_id", "name", "status", "query", "server_label", "action", "output", "error"} {
 		if v, ok := item[key]; ok && v != nil {
@@ -243,9 +272,14 @@ func sanitizeMessageItem(item map[string]any) map[string]any {
 	if typ := strings.TrimSpace(stringValue(item["type"])); typ != "" {
 		out["type"] = typ
 	}
-	role := strings.TrimSpace(stringValue(item["role"]))
+	role := strings.ToLower(strings.TrimSpace(stringValue(item["role"])))
 	if role == "" {
 		role = "user"
+	}
+	// Grok ModelInput accepts system/user/assistant — not OpenAI "developer".
+	// Codex posts developer system prompts; map to system (xAI docs use system).
+	if role == "developer" {
+		role = "system"
 	}
 	out["role"] = role
 	if id := strings.TrimSpace(stringValue(item["id"])); id != "" {

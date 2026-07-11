@@ -748,3 +748,124 @@ func TestChatToResponsesFlattensFunctionToolChoice(t *testing.T) {
 		t.Fatalf("nested function choice leaked: %#v", choice)
 	}
 }
+
+func TestSanitizeDeveloperRoleMapsToSystem(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type": "message",
+			"role": "developer",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "permissions"},
+			},
+		},
+		map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "hi"},
+			},
+		},
+	}
+	out := compat.SanitizeResponsesInput(raw).([]any)
+	first := out[0].(map[string]any)
+	if first["role"] != "system" {
+		t.Fatalf("developer role not mapped: %#v", first)
+	}
+	if first["type"] != "message" {
+		t.Fatalf("type=%#v", first["type"])
+	}
+}
+
+func TestCollapseSearchToolNameCollisionsDropsFunctionWebSearch(t *testing.T) {
+	raw := []any{
+		map[string]any{"type": "function", "name": "web_search", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "function", "name": "Read", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "web_search"},
+	}
+	out := compat.NormalizeResponsesTools(raw, 16)
+	var sawBare, sawFnWeb, sawRead bool
+	for _, item := range out {
+		tool := item.(map[string]any)
+		if tool["type"] == "web_search" {
+			sawBare = true
+		}
+		if tool["type"] == "function" && tool["name"] == "web_search" {
+			sawFnWeb = true
+		}
+		if tool["type"] == "function" && tool["name"] == "Read" {
+			sawRead = true
+		}
+	}
+	if !sawBare || sawFnWeb || !sawRead {
+		t.Fatalf("bare=%v fnWeb=%v read=%v tools=%#v", sawBare, sawFnWeb, sawRead, out)
+	}
+}
+
+func TestFinalizeDropsReasoningEffortNoneAndInjectsSearchWithoutDup(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"stream":false,
+		"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"sys"}]}],
+		"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}],
+		"reasoning_effort":"none"
+	}`)
+	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: true})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := payload["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort none must be stripped: %#v", payload["reasoning_effort"])
+	}
+	input := payload["input"].([]any)
+	first := input[0].(map[string]any)
+	if first["role"] != "system" {
+		t.Fatalf("developer→system failed: %#v", first)
+	}
+	tools := payload["tools"].([]any)
+	names := map[string]int{}
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		key := stringValueTest(tool["type"]) + ":" + stringValueTest(tool["name"])
+		names[key]++
+		if tool["type"] == "function" && tool["name"] == "web_search" {
+			t.Fatalf("function web_search must not coexist with bare: %#v", tools)
+		}
+	}
+	if names["web_search:"] != 1 {
+		t.Fatalf("want one bare web_search, got %#v tools=%#v", names, tools)
+	}
+	if names["x_search:"] != 1 {
+		t.Fatalf("want injected x_search: %#v", tools)
+	}
+}
+
+func TestSanitizeCompactionAndEncryptedContent(t *testing.T) {
+	raw := []any{
+		map[string]any{"type": "compaction", "blob": "opaque-openai-blob"},
+		map[string]any{
+			"type":              "reasoning",
+			"id":                "rs_1",
+			"summary":           []any{map[string]any{"type": "summary_text", "text": "plan"}},
+			"encrypted_content": "foreign-enc",
+		},
+	}
+	out := compat.SanitizeResponsesInput(raw).([]any)
+	if len(out) != 2 {
+		t.Fatalf("len=%d %#v", len(out), out)
+	}
+	note := out[0].(map[string]any)
+	if content, _ := note["content"].(string); !strings.Contains(content, "compaction") {
+		t.Fatalf("compaction not converted: %#v", note)
+	}
+	rs := out[1].(map[string]any)
+	if rs["type"] != "reasoning" {
+		t.Fatalf("reasoning type=%#v", rs["type"])
+	}
+	if _, has := rs["encrypted_content"]; has {
+		t.Fatalf("encrypted_content leaked: %#v", rs)
+	}
+}

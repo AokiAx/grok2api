@@ -114,23 +114,22 @@ func TestEnsureDefaultSearchToolsRespectsDisableAndDedupes(t *testing.T) {
 		t.Fatalf("decode2: %v", err)
 	}
 	tools, _ = payload["tools"].([]any)
-	// web_search already present → only x_search prepended → [x_search, web_search, function]
+	// web_search already present → inject x_search; collapse keeps bare search first.
 	if len(tools) != 3 {
 		t.Fatalf("tools=%#v want 3", tools)
 	}
-	first := tools[0].(map[string]any)
-	if first["type"] != "x_search" {
-		t.Fatalf("first=%#v want x_search", first)
-	}
-	// no duplicate web_search
-	countWeb := 0
+	// no duplicate web_search / x_search
+	countWeb, countX := 0, 0
 	for _, raw := range tools {
-		if raw.(map[string]any)["type"] == "web_search" {
+		switch raw.(map[string]any)["type"] {
+		case "web_search":
 			countWeb++
+		case "x_search":
+			countX++
 		}
 	}
-	if countWeb != 1 {
-		t.Fatalf("web_search count=%d tools=%#v", countWeb, tools)
+	if countWeb != 1 || countX != 1 {
+		t.Fatalf("web=%d x=%d tools=%#v", countWeb, countX, tools)
 	}
 }
 

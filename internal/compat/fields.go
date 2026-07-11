@@ -117,6 +117,12 @@ func sanitizeResponsesMap(input map[string]any) bool {
 		}
 	}
 
+	// grok-4.5 rejects reasoning_effort=none ("This model does not support … none").
+	// Drop none so the request is valid; models that support disable get default.
+	if stripped := stripUnsupportedReasoningNone(input); stripped {
+		changed = true
+	}
+
 	for _, key := range codexRejectedFields {
 		if _, ok := input[key]; ok {
 			delete(input, key)
@@ -128,6 +134,28 @@ func sanitizeResponsesMap(input map[string]any) bool {
 		if _, ok := responsesAllowedFields[key]; !ok {
 			delete(input, key)
 			changed = true
+		}
+	}
+	return changed
+}
+
+// stripUnsupportedReasoningNone removes reasoning_effort/reasoning.effort when
+// the value is "none" (unsupported on grok-4.5 and most production models).
+func stripUnsupportedReasoningNone(input map[string]any) bool {
+	changed := false
+	if effort, ok := input["reasoning_effort"].(string); ok && strings.EqualFold(strings.TrimSpace(effort), "none") {
+		delete(input, "reasoning_effort")
+		changed = true
+	}
+	if reasoning, ok := input["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok && strings.EqualFold(strings.TrimSpace(effort), "none") {
+			delete(reasoning, "effort")
+			changed = true
+			if len(reasoning) == 0 {
+				delete(input, "reasoning")
+			} else {
+				input["reasoning"] = reasoning
+			}
 		}
 	}
 	return changed
@@ -171,6 +199,7 @@ var defaultSearchToolTypes = []string{"web_search", "x_search"}
 //   - enabled=false → no-op
 //   - backend_search / web_search explicitly false → no-op
 //   - existing tools of the same type are left as-is (no duplicates)
+//   - function tools named web_search/x_search are collapsed to bare builtins
 //   - client function tools are preserved after the search tools
 func EnsureDefaultSearchTools(payload []byte, enabled bool) ([]byte, error) {
 	if !enabled {
@@ -194,7 +223,14 @@ func EnsureDefaultSearchTools(payload []byte, enabled bool) ([]byte, error) {
 		if !ok {
 			continue
 		}
-		have[strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))] = true
+		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		have[typeName] = true
+		// function:web_search already covers the search capability name.
+		if typeName == "function" || typeName == "" {
+			if name := strings.ToLower(strings.TrimSpace(firstNonEmptyString(tool["name"]))); name != "" {
+				have[name] = true
+			}
+		}
 	}
 
 	prefix := make([]any, 0, len(defaultSearchToolTypes))
@@ -204,15 +240,22 @@ func EnsureDefaultSearchTools(payload []byte, enabled bool) ([]byte, error) {
 		}
 		prefix = append(prefix, map[string]any{"type": typeName})
 	}
-	if len(prefix) == 0 {
-		return payload, nil
-	}
 
 	merged := make([]any, 0, len(prefix)+len(existing))
 	merged = append(merged, prefix...)
 	merged = append(merged, existing...)
+	// Always collapse function:web_search vs bare web_search after inject.
+	merged = CollapseSearchToolNameCollisions(merged)
 	if MaxUpstreamTools > 0 && len(merged) > MaxUpstreamTools {
 		merged = merged[:MaxUpstreamTools]
+	}
+	// No change if already clean and nothing injected.
+	if len(prefix) == 0 {
+		before, _ := json.Marshal(existing)
+		after, _ := json.Marshal(merged)
+		if string(before) == string(after) {
+			return payload, nil
+		}
 	}
 	input["tools"] = merged
 	// Keep native search flag aligned when we inject search tools.

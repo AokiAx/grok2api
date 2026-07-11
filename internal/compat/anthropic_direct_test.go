@@ -91,8 +91,14 @@ func TestAnthropicToResponses_ToolUseSignatureAndStrippedFields(t *testing.T) {
 		switch item["type"] {
 		case "reasoning":
 			sawReasoning = true
-			if item["encrypted_content"] != "opaque-anthropic-signature" {
-				t.Fatalf("replay=%v", item)
+			// encrypted_content is stripped before upstream (foreign blobs 422 on Grok).
+			if _, hasEnc := item["encrypted_content"]; hasEnc {
+				t.Fatalf("encrypted_content must not reach upstream: %v", item)
+			}
+			if summary, ok := item["summary"].([]any); !ok {
+				t.Fatalf("reasoning summary missing: %v", item)
+			} else {
+				_ = summary
 			}
 		case "function_call":
 			sawCall = true
