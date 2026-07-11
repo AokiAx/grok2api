@@ -204,7 +204,7 @@ func applyEnvironment(config *Config) error {
 		"GROK_MAILTM_DOMAIN":            &config.MailtmDomain,
 		"GROK2API_PROXY_ROTATE":         &config.ProxyRotate,
 		"GROK2API_FLARESOLVERR_URL":     &config.FlareSolverrURL,
-		"GROK2API_DEBUG_TRACE_DIR":         &config.DebugTraceDir,
+		"GROK2API_DEBUG_TRACE_DIR":      &config.DebugTraceDir,
 	}
 	for name, target := range stringValues {
 		if value, ok := os.LookupEnv(name); ok {
