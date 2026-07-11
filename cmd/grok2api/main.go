@@ -172,11 +172,16 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 			traceDir = filepath.Join(settings.DataDir, "traces")
 		}
 		tracer = intercept.New(intercept.Options{
-			Enabled: true,
-			Dir:     traceDir,
+			Enabled:    true,
+			Dir:        traceDir,
+			ErrorsOnly: settings.DebugTraceErrorsOnly,
 		})
 		apiGateway = &intercept.TraceGateway{Inner: gateway, Tracer: tracer}
-		slog.Warn("debug_trace enabled; writing JSONL traces", "dir", traceDir)
+		if settings.DebugTraceErrorsOnly {
+			slog.Warn("debug_trace enabled (errors only); writing failed-request JSONL", "dir", traceDir)
+		} else {
+			slog.Warn("debug_trace enabled; writing JSONL traces", "dir", traceDir)
+		}
 	}
 	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
 	registerStore, err := regsettings.NewStore(settings.DataDir, settings)

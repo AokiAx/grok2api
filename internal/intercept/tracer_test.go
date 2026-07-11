@@ -65,6 +65,49 @@ func TestMiddlewareWritesTraceFile(t *testing.T) {
 	}
 }
 
+func TestMiddlewareErrorsOnlySkipsSuccess(t *testing.T) {
+	dir := t.TempDir()
+	tracer := intercept.New(intercept.Options{Enabled: true, Dir: dir, MaxBody: 4096, ErrorsOnly: true})
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	handler := intercept.Middleware(tracer, inner)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"x"}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("errors-only should not write success traces: %v", entries)
+	}
+
+	// Error path should still write.
+	innerErr := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":"bad"}`))
+	})
+	handler = intercept.Middleware(tracer, innerErr)
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{"model":"x"}`)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one error trace, got %d", len(entries))
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "client_request") || !strings.Contains(string(raw), `"status":422`) {
+		t.Fatalf("error trace incomplete: %s", raw)
+	}
+}
+
 func TestMiddlewareDisabledIsNoop(t *testing.T) {
 	dir := t.TempDir()
 	tracer := intercept.New(intercept.Options{Enabled: false, Dir: dir})

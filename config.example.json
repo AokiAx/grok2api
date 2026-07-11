@@ -43,6 +43,7 @@
   "register_backup_tokens": false,
   "debug_trace": false,
   "debug_trace_dir": "",
-  "_help_debug_trace": "临时协议调试拦截器。true 时把 client/upstream 请求响应写入 data/traces/*.jsonl，也可用环境变量 GROK2API_DEBUG_TRACE=1。",
+  "debug_trace_errors_only": true,
+  "_help_debug_trace": "临时协议调试拦截器。true 时把 client/upstream 请求响应写入 data/traces/*.jsonl，也可用环境变量 GROK2API_DEBUG_TRACE=1。debug_trace_errors_only=true 时只落盘 status>=400 / 出错请求，避免磁盘被 200 刷满。",
   "_help_register": "面板 /panel 可启停批注册；CLI: grok2api register --count N。Turnstile 需本地 solver 或 CapMonster。proxy 可指向 Privoxy/WARP 出口。"
 }

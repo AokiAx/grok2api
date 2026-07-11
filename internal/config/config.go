@@ -67,6 +67,8 @@ type Config struct {
 	// Enable via "debug_trace": true or GROK2API_DEBUG_TRACE=1.
 	DebugTrace    bool   `json:"debug_trace"`
 	DebugTraceDir string `json:"debug_trace_dir"`
+	// When true with debug_trace, only persist traces for status>=400 / errors.
+	DebugTraceErrorsOnly bool `json:"debug_trace_errors_only"`
 }
 
 func Defaults() Config {
@@ -202,7 +204,7 @@ func applyEnvironment(config *Config) error {
 		"GROK_MAILTM_DOMAIN":            &config.MailtmDomain,
 		"GROK2API_PROXY_ROTATE":         &config.ProxyRotate,
 		"GROK2API_FLARESOLVERR_URL":     &config.FlareSolverrURL,
-		"GROK2API_DEBUG_TRACE_DIR":      &config.DebugTraceDir,
+		"GROK2API_DEBUG_TRACE_DIR":         &config.DebugTraceDir,
 	}
 	for name, target := range stringValues {
 		if value, ok := os.LookupEnv(name); ok {
@@ -240,10 +242,11 @@ func applyEnvironment(config *Config) error {
 	}
 
 	boolValues := map[string]*bool{
-		"GROK2API_FLARESOLVERR_ENABLED":   &config.FlareSolverrEnabled,
-		"GROK2API_REGISTER_BACKUP_TOKENS": &config.RegisterBackupTokens,
-		"GROK2API_DEBUG_TRACE":            &config.DebugTrace,
-		"GROK2API_CLI_POOL_STICKY":        &config.StickyPool,
+		"GROK2API_FLARESOLVERR_ENABLED":    &config.FlareSolverrEnabled,
+		"GROK2API_REGISTER_BACKUP_TOKENS":  &config.RegisterBackupTokens,
+		"GROK2API_DEBUG_TRACE":             &config.DebugTrace,
+		"GROK2API_DEBUG_TRACE_ERRORS_ONLY": &config.DebugTraceErrorsOnly,
+		"GROK2API_CLI_POOL_STICKY":         &config.StickyPool,
 	}
 	for name, target := range boolValues {
 		value, ok := os.LookupEnv(name)

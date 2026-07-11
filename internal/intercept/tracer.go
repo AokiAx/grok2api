@@ -28,6 +28,9 @@ type Options struct {
 	Dir string
 	// MaxBody caps logged body size (bytes). Default 64 KiB.
 	MaxBody int
+	// ErrorsOnly skips disk/slog for successful (2xx/3xx) requests.
+	// In-memory span events are still collected so a failing request keeps full context.
+	ErrorsOnly bool
 }
 
 // Tracer records multi-stage events for a request.
@@ -109,6 +112,10 @@ func (s *Span) Event(stage string, fields map[string]any) {
 	s.events = append(s.events, event)
 	s.mu.Unlock()
 
+	// Errors-only mode buffers silently until End decides to flush.
+	if s.tracer.opts.ErrorsOnly {
+		return
+	}
 	// Also emit a short slog line so docker logs show the trail live.
 	s.tracer.logger.Info("trace",
 		"trace_id", s.id,
@@ -131,8 +138,48 @@ func (s *Span) End(status int, err error) {
 	if err != nil {
 		fields["error"] = err.Error()
 	}
-	s.Event("request.end", fields)
+	// Always append request.end into the buffer (may still skip write/log).
+	event := map[string]any{
+		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
+		"stage": "request.end",
+	}
+	for key, value := range fields {
+		event[key] = value
+	}
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	s.mu.Unlock()
+
+	if s.tracer.opts.ErrorsOnly && !isErrorStatus(status, err) {
+		return
+	}
+	if !s.tracer.opts.ErrorsOnly {
+		s.tracer.logger.Info("trace",
+			"trace_id", s.id,
+			"path", s.path,
+			"stage", "request.end",
+			"summary", summarizeEvent(event),
+		)
+	} else {
+		s.tracer.logger.Warn("trace error",
+			"trace_id", s.id,
+			"path", s.path,
+			"status", status,
+			"summary", summarizeEvent(event),
+		)
+	}
 	s.tracer.write(s)
+}
+
+func isErrorStatus(status int, err error) bool {
+	if err != nil {
+		return true
+	}
+	// 0 means recorder never got WriteHeader; treat as OK unless other signal.
+	if status == 0 {
+		return false
+	}
+	return status >= 400
 }
 
 func (t *Tracer) write(span *Span) {
