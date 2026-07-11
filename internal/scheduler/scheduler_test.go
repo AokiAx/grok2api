@@ -292,6 +292,54 @@ func TestRecordUsageUpdatesQuotaAndSuccessTime(t *testing.T) {
 	}
 }
 
+func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+	})
+	s.ApplyMaxActive(2)
+	// Two leases on same account should succeed when MaxActive=2.
+	first, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first.Account().ID != "a" && first.Account().ID != "b" {
+		t.Fatalf("unexpected id %q", first.Account().ID)
+	}
+	// Pin sticky-less RR: hold first, acquire until we get same id or prove capacity.
+	// Directly check Available via second acquire on full pool of 2 accounts with max 2 each
+	// allows 4 concurrent; take two on first account by Prefer... simpler: use Apply then
+	// acquire twice without release — with 2 accounts max 2, always get a lease.
+	second, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	// Force both on same account: release second, set only one ready with max 2.
+	first.Release()
+	second.Release()
+
+	s = scheduler.New([]account.Account{readyAccount("solo")})
+	s.ApplyMaxActive(2)
+	l1, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("l1: %v", err)
+	}
+	l2, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("l2 with max_active=2: %v", err)
+	}
+	if l1.Account().ID != "solo" || l2.Account().ID != "solo" {
+		t.Fatalf("want both solo")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.Acquire(ctx); err == nil {
+		t.Fatal("third lease should block/fail while max_active=2")
+	}
+	l1.Release()
+	l2.Release()
+}
+
 func TestActiveByIDReturnsLiveLeaseCounts(t *testing.T) {
 	s := scheduler.New([]account.Account{readyAccount("a"), readyAccount("b")})
 	lease, err := s.Acquire(context.Background())

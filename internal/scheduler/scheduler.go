@@ -66,6 +66,26 @@ func (s *Scheduler) WithSticky(enabled bool, ttl time.Duration) *Scheduler {
 	return s
 }
 
+// ApplyMaxActive sets MaxActive on every in-memory account (cli_pool_max_concurrent).
+// Values <= 0 are treated as 1. Does not rewrite SQLite; call after New/load.
+func (s *Scheduler) ApplyMaxActive(n int) *Scheduler {
+	if s == nil {
+		return s
+	}
+	if n <= 0 {
+		n = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.accounts {
+		if item == nil {
+			continue
+		}
+		item.MaxActive = n
+	}
+	return s
+}
+
 func (s *Scheduler) Acquire(ctx context.Context) (*Lease, error) {
 	return s.AcquireSticky(ctx, "")
 }
