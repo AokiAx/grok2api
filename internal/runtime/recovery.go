@@ -60,10 +60,76 @@ const (
 	// Per recovery tick (default interval ~20s). Sized for multi-thousand
 	// account pools so expired access tokens drain in minutes, not hours.
 	maxQuotaProbesPerTick        = 32
-	maxAuthRefreshesPerTick      = 128
+	maxAuthRefreshesPerTick      = 256
 	maxProactiveRefreshesPerTick = 256
+	maxIsolatePerTick            = 500
 	proactiveRefreshLead         = 90 * time.Minute
+	authTransientBackoff         = 5 * time.Minute
+	authValidationBackoff        = 10 * time.Minute
 )
+
+// IsolationResult counts permanent auth quarantines.
+type IsolationResult struct {
+	Isolated int
+	Skipped  int
+	Failed   int
+}
+
+// IsolateUnrecoverableAuth moves permanently dead credentials out of the auth
+// recovery queue into reason=disabled so status/ops can see them separately
+// and recovery ticks stop wasting refresh budget on them.
+func IsolateUnrecoverableAuth(
+	ctx context.Context,
+	pool *scheduler.Scheduler,
+	store CredentialStore,
+	now time.Time,
+) (IsolationResult, error) {
+	if store == nil {
+		return IsolationResult{}, nil
+	}
+	accounts, err := store.ListAccounts(ctx)
+	if err != nil {
+		return IsolationResult{}, fmt.Errorf("list accounts for auth isolation: %w", err)
+	}
+	result := IsolationResult{}
+	for _, item := range accounts {
+		if item.Pool != account.PoolUnavailable {
+			result.Skipped++
+			continue
+		}
+		// Already quarantined.
+		if item.UnavailableReason == account.ReasonDisabled && isUnrecoverableAuthCode(item.LastErrorCode) {
+			result.Skipped++
+			continue
+		}
+		if !isUnrecoverableAuthCode(item.LastErrorCode) {
+			result.Skipped++
+			continue
+		}
+		if result.Isolated >= maxIsolatePerTick {
+			result.Skipped++
+			continue
+		}
+		isolateRevokedAccount(&item, now)
+		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+			result.Failed++
+			continue
+		}
+		result.Isolated++
+	}
+	return result, nil
+}
+
+func isolateRevokedAccount(item *account.Account, now time.Time) {
+	item.Pool = account.PoolUnavailable
+	item.UnavailableReason = account.ReasonDisabled
+	if !isUnrecoverableAuthCode(item.LastErrorCode) {
+		item.LastErrorCode = "refresh-revoked"
+	}
+	// Far-future: never auto-retry; operator must re-import.
+	item.RetryAt = now.Add(365 * 24 * time.Hour)
+	item.UpdatedAt = now.UTC()
+}
 
 func RecoverCredentials(
 	ctx context.Context,
@@ -78,25 +144,49 @@ func RecoverCredentials(
 		return CredentialRecoveryResult{}, fmt.Errorf("list accounts for credential recovery: %w", err)
 	}
 	result := CredentialRecoveryResult{}
-	refreshedCount := 0
+	candidates := make([]account.Account, 0, 256)
 	for _, item := range accounts {
 		if item.Pool != account.PoolUnavailable ||
 			item.UnavailableReason != account.ReasonAuth ||
-			item.RefreshToken == "" ||
-			(!item.RetryAt.IsZero() && item.RetryAt.After(now)) {
+			item.RefreshToken == "" {
 			result.Skipped++
 			continue
 		}
-		// Permanent failures (revoked refresh) are not worth retrying forever.
+		// Permanent failures: quarantine and stop burning refresh budget.
 		if isUnrecoverableAuthCode(item.LastErrorCode) {
+			isolateRevokedAccount(&item, now)
+			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+				result.Failed++
+			} else {
+				result.Revoked++
+			}
+			continue
+		}
+		if !item.RetryAt.IsZero() && item.RetryAt.After(now) {
 			result.Skipped++
 			continue
 		}
-		if refreshedCount >= maxAuthRefreshesPerTick {
-			result.Skipped++
-			continue
+		candidates = append(candidates, item)
+	}
+	// Prefer oldest updated / earliest expiry so stuck auth_failed drain first.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ai, aj := candidates[i], candidates[j]
+		if !ai.ExpiresAt.Equal(aj.ExpiresAt) {
+			if ai.ExpiresAt.IsZero() {
+				return false
+			}
+			if aj.ExpiresAt.IsZero() {
+				return true
+			}
+			return ai.ExpiresAt.Before(aj.ExpiresAt)
 		}
-		refreshedCount++
+		return ai.UpdatedAt.Before(aj.UpdatedAt)
+	})
+	if len(candidates) > maxAuthRefreshesPerTick {
+		result.Skipped += len(candidates) - maxAuthRefreshesPerTick
+		candidates = candidates[:maxAuthRefreshesPerTick]
+	}
+	for _, item := range candidates {
 		refreshed, refreshErr := refresher.Refresh(ctx, item)
 		if refreshErr != nil {
 			applyRefreshFailure(&item, refreshErr, now)
@@ -114,7 +204,7 @@ func RecoverCredentials(
 		if validateErr != nil {
 			refreshed.Pool = account.PoolUnavailable
 			refreshed.UnavailableReason = account.ReasonAuth
-			refreshed.RetryAt = now.Add(30 * time.Minute)
+			refreshed.RetryAt = now.Add(authValidationBackoff)
 			refreshed.LastErrorCode = "validation-failed"
 			result.Failed++
 		} else if reason == "" {
@@ -124,6 +214,12 @@ func RecoverCredentials(
 			refreshed.LastErrorCode = ""
 			refreshed.AuthenticationFails = 0
 			result.Recovered++
+		} else if isUnrecoverableAuthCode(errorCode) {
+			refreshed.Pool = account.PoolUnavailable
+			refreshed.UnavailableReason = account.ReasonDisabled
+			refreshed.LastErrorCode = errorCode
+			refreshed.RetryAt = now.Add(365 * 24 * time.Hour)
+			result.Revoked++
 		} else {
 			refreshed.Pool = account.PoolUnavailable
 			refreshed.UnavailableReason = reason
@@ -219,17 +315,18 @@ func RefreshExpiring(
 
 func applyRefreshFailure(item *account.Account, refreshErr error, now time.Time) {
 	item.Pool = account.PoolUnavailable
-	item.UnavailableReason = account.ReasonAuth
 	item.UpdatedAt = now.UTC()
 	item.AuthenticationFails++
 	if isPermanentRefresh(refreshErr) {
+		// Quarantine permanently — do not keep them in the auth retry queue.
+		item.UnavailableReason = account.ReasonDisabled
 		item.LastErrorCode = "refresh-revoked"
-		// Far-future retry_at: skip automatic retries; operator must re-import.
 		item.RetryAt = now.Add(365 * 24 * time.Hour)
 		return
 	}
+	item.UnavailableReason = account.ReasonAuth
 	item.LastErrorCode = "refresh-failed"
-	item.RetryAt = now.Add(30 * time.Minute)
+	item.RetryAt = now.Add(authTransientBackoff)
 }
 
 func isPermanentRefresh(err error) bool {
@@ -263,7 +360,9 @@ func credentialRetryAt(reason account.UnavailableReason, now time.Time) time.Tim
 	case account.ReasonCooldown:
 		return now.Add(45 * time.Second)
 	case account.ReasonAuth, account.ReasonValidating:
-		return now.Add(30 * time.Minute)
+		return now.Add(authTransientBackoff)
+	case account.ReasonDisabled:
+		return now.Add(365 * 24 * time.Hour)
 	default:
 		return time.Time{}
 	}
@@ -483,6 +582,14 @@ func RunRecovery(
 	runOnce := func(now time.Time) {
 		if err := RecoverDue(ctx, pool, store, now); err != nil {
 			slog.Error("recovery promote tick failed", "error", err)
+		}
+		// Quarantine permanently dead refresh tokens before spending refresh budget.
+		if config.credentialStore != nil {
+			if iso, err := IsolateUnrecoverableAuth(ctx, pool, config.credentialStore, now); err != nil {
+				slog.Error("recovery auth isolation tick failed", "error", err)
+			} else if iso.Isolated > 0 {
+				slog.Info("recovery isolated revoked accounts", "isolated", iso.Isolated, "failed", iso.Failed)
+			}
 		}
 		if config.credentialStore != nil && (config.quotaProber != nil || config.validator != nil) {
 			if _, err := RecoverQuota(

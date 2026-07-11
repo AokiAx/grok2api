@@ -286,8 +286,11 @@ func TestRecoverCredentialsBacksOffRejectedRefresh(t *testing.T) {
 	if result.Failed != 1 || len(store.saved) != 1 {
 		t.Fatalf("result=%#v saved=%#v", result, store.saved)
 	}
-	if !store.saved[0].RetryAt.After(now.Add(20*time.Minute)) || store.saved[0].LastErrorCode != "refresh-failed" {
+	if store.saved[0].LastErrorCode != "refresh-failed" {
 		t.Fatalf("saved = %#v", store.saved[0])
+	}
+	if !store.saved[0].RetryAt.After(now.Add(4*time.Minute)) || !store.saved[0].RetryAt.Before(now.Add(10*time.Minute)) {
+		t.Fatalf("expected ~5m backoff, got retry_at=%v", store.saved[0].RetryAt)
 	}
 }
 
@@ -367,12 +370,15 @@ func TestRecoverCredentialsMarksRevokedRefreshAsUnrecoverable(t *testing.T) {
 	if len(store.saved) != 1 || store.saved[0].LastErrorCode != "refresh-revoked" {
 		t.Fatalf("saved=%#v", store.saved)
 	}
+	if store.saved[0].UnavailableReason != account.ReasonDisabled {
+		t.Fatalf("want disabled quarantine, got %#v", store.saved[0])
+	}
 	if !store.saved[0].RetryAt.After(now.Add(24 * time.Hour)) {
 		t.Fatalf("retry_at should be far future: %v", store.saved[0].RetryAt)
 	}
 }
 
-func TestRecoverCredentialsSkipsAlreadyRevokedCodes(t *testing.T) {
+func TestRecoverCredentialsIsolatesAlreadyRevokedCodes(t *testing.T) {
 	now := time.Now().UTC()
 	revoked := account.Account{
 		ID: "revoked", RefreshToken: "dead", Pool: account.PoolUnavailable,
@@ -387,8 +393,32 @@ func TestRecoverCredentialsSkipsAlreadyRevokedCodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if result.Skipped != 1 || refresher.calls != 0 {
+	if result.Revoked != 1 || refresher.calls != 0 {
 		t.Fatalf("result=%#v calls=%d", result, refresher.calls)
+	}
+	if len(store.saved) != 1 || store.saved[0].UnavailableReason != account.ReasonDisabled {
+		t.Fatalf("saved=%#v", store.saved)
+	}
+}
+
+func TestIsolateUnrecoverableAuthMovesRevokedToDisabled(t *testing.T) {
+	now := time.Now().UTC()
+	accounts := []account.Account{
+		{ID: "revoked", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonAuth, LastErrorCode: "refresh-revoked", RefreshToken: "x"},
+		{ID: "auth_fail", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonAuth, LastErrorCode: "auth_failed", RefreshToken: "y"},
+		{ID: "ready", Pool: account.PoolReady, RefreshToken: "z"},
+	}
+	store := &recoveryStore{accounts: accounts}
+	pool := scheduler.New(accounts)
+	result, err := runtime.IsolateUnrecoverableAuth(context.Background(), pool, store, now)
+	if err != nil {
+		t.Fatalf("isolate: %v", err)
+	}
+	if result.Isolated != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(store.saved) != 1 || store.saved[0].ID != "revoked" || store.saved[0].UnavailableReason != account.ReasonDisabled {
+		t.Fatalf("saved=%#v", store.saved)
 	}
 }
 
