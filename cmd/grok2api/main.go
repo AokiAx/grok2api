@@ -205,11 +205,13 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	go func() {
 		defer close(recoveryDone)
 		// RunRecovery only exits on context cancel; per-account errors are logged.
+		// 20s ticks + higher per-tick refresh caps clear multi-thousand
+		// expired access-token backlogs much faster than the old 1m/8 rate.
 		if err := runtimeworker.RunRecovery(
 			recoveryCtx,
 			pool,
 			repo,
-			time.Minute,
+			20*time.Second,
 			runtimeworker.WithCredentialRecovery(repo, upstreamClient, upstreamClient),
 			runtimeworker.WithQuotaProber(upstreamClient),
 			runtimeworker.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,10 +57,12 @@ type QuotaRecoveryResult struct {
 }
 
 const (
-	maxQuotaProbesPerTick        = 8
-	maxAuthRefreshesPerTick      = 16
-	maxProactiveRefreshesPerTick = 8
-	proactiveRefreshLead         = 45 * time.Minute
+	// Per recovery tick (default interval ~20s). Sized for multi-thousand
+	// account pools so expired access tokens drain in minutes, not hours.
+	maxQuotaProbesPerTick        = 32
+	maxAuthRefreshesPerTick      = 128
+	maxProactiveRefreshesPerTick = 256
+	proactiveRefreshLead         = 90 * time.Minute
 )
 
 func RecoverCredentials(
@@ -138,7 +141,8 @@ func RecoverCredentials(
 }
 
 // RefreshExpiring proactively refreshes ready accounts whose access tokens are
-// near expiry, so live traffic does not have to wait for a 401 first.
+// near expiry (or already past expires_at), so live traffic does not wait for 401.
+// Candidates are processed soonest-expiry first so backlog drains fairly.
 func RefreshExpiring(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
@@ -158,8 +162,8 @@ func RefreshExpiring(
 		return CredentialRecoveryResult{}, fmt.Errorf("list accounts for proactive refresh: %w", err)
 	}
 	result := CredentialRecoveryResult{}
-	refreshedCount := 0
 	deadline := now.Add(lead)
+	candidates := make([]account.Account, 0, len(accounts))
 	for _, item := range accounts {
 		if item.Pool != account.PoolReady {
 			result.Skipped++
@@ -174,11 +178,17 @@ func RefreshExpiring(
 			result.Skipped++
 			continue
 		}
-		if refreshedCount >= maxProactiveRefreshesPerTick {
-			result.Skipped++
-			continue
-		}
-		refreshedCount++
+		candidates = append(candidates, item)
+	}
+	// Already-expired and soonest-to-expire first.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].ExpiresAt.Before(candidates[j].ExpiresAt)
+	})
+	if len(candidates) > maxProactiveRefreshesPerTick {
+		result.Skipped += len(candidates) - maxProactiveRefreshesPerTick
+		candidates = candidates[:maxProactiveRefreshesPerTick]
+	}
+	for _, item := range candidates {
 		refreshed, refreshErr := refresher.Refresh(ctx, item)
 		if refreshErr != nil {
 			applyRefreshFailure(&item, refreshErr, now)

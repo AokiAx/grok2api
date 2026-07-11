@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -32,10 +33,11 @@ func (p *usageProbe) ProbeFreeQuotaUsage(context.Context, account.Account) (acco
 
 func TestRecoverQuotaWritesUsageAndCapsProbeBudget(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
-	accounts := make([]account.Account, 0, 10)
-	for i := 0; i < 10; i++ {
+	const n = 40
+	accounts := make([]account.Account, 0, n)
+	for i := 0; i < n; i++ {
 		accounts = append(accounts, account.Account{
-			ID:                "q" + string(rune('0'+i)),
+			ID:                fmt.Sprintf("q%d", i),
 			Pool:              account.PoolUnavailable,
 			UnavailableReason: account.ReasonQuota,
 			RetryAt:           now.Add(-time.Minute),
@@ -51,10 +53,10 @@ func TestRecoverQuotaWritesUsageAndCapsProbeBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if prober.calls != 8 {
-		t.Fatalf("calls=%d; want max 8", prober.calls)
+	if prober.calls != 32 {
+		t.Fatalf("calls=%d; want max 32", prober.calls)
 	}
-	if result.Recovered != 8 || result.Skipped < 2 {
+	if result.Recovered != 32 || result.Skipped < 2 {
 		t.Fatalf("result=%#v", result)
 	}
 	found := false
