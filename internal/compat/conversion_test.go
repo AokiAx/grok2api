@@ -449,7 +449,7 @@ func TestSanitizeResponsesInputMapsCodexShellAndPreservesBuiltins(t *testing.T) 
 	}
 	out := compat.SanitizeResponsesInput(raw).([]any)
 	var (
-		fnCalls, fnOuts int
+		fnCalls, fnOuts           int
 		webSearch, computer, note bool
 		foundEmpty                bool
 	)

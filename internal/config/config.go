@@ -36,7 +36,7 @@ type Config struct {
 	StickyTTLMinutes  int  `json:"cli_pool_sticky_ttl_minutes"`
 	QuotaRetryMinutes int  `json:"quota_retry_minutes"`
 	RateRetrySeconds  int  `json:"rate_retry_seconds"`
-	RequestTimeoutSec int `json:"timeout_secs"`
+	RequestTimeoutSec int  `json:"timeout_secs"`
 
 	// Register / anti-bot settings (compatible with Python config.json keys).
 	AccountsBase         string          `json:"accounts_base"`
@@ -211,21 +211,21 @@ func applyEnvironment(config *Config) error {
 	}
 
 	integerValues := map[string]*int{
-		"GROK2API_PORT":                     &config.Port,
-		"GROK2API_CLI_POOL_MAX_CONCURRENT":  &config.MaxConcurrent,
-		"GROK2API_CLI_POOL_ACQUIRE_TIMEOUT": &config.AcquireTimeoutSec,
+		"GROK2API_PORT":                        &config.Port,
+		"GROK2API_CLI_POOL_MAX_CONCURRENT":     &config.MaxConcurrent,
+		"GROK2API_CLI_POOL_ACQUIRE_TIMEOUT":    &config.AcquireTimeoutSec,
 		"GROK2API_CLI_POOL_STICKY_TTL_MINUTES": &config.StickyTTLMinutes,
-		"GROK2API_QUOTA_RETRY_MINUTES":      &config.QuotaRetryMinutes,
-		"GROK2API_RATE_RETRY_SECONDS":       &config.RateRetrySeconds,
-		"GROK2API_TIMEOUT_SECS":             &config.RequestTimeoutSec,
-		"GROK2API_TURNSTILE_TIMEOUT":        &config.TurnstileTimeoutSec,
-		"TURNSTILE_TIMEOUT":                 &config.TurnstileTimeoutSec,
-		"GROK2API_EMAIL_CODE_TIMEOUT":       &config.EmailCodeTimeoutSec,
-		"EMAIL_CODE_TIMEOUT":                &config.EmailCodeTimeoutSec,
-		"GROK2API_TOTAL_ACCOUNTS":           &config.TotalAccounts,
-		"TOTAL_ACCOUNTS":                    &config.TotalAccounts,
-		"GROK2API_MAX_WORKERS":              &config.MaxWorkers,
-		"MAX_WORKERS":                       &config.MaxWorkers,
+		"GROK2API_QUOTA_RETRY_MINUTES":         &config.QuotaRetryMinutes,
+		"GROK2API_RATE_RETRY_SECONDS":          &config.RateRetrySeconds,
+		"GROK2API_TIMEOUT_SECS":                &config.RequestTimeoutSec,
+		"GROK2API_TURNSTILE_TIMEOUT":           &config.TurnstileTimeoutSec,
+		"TURNSTILE_TIMEOUT":                    &config.TurnstileTimeoutSec,
+		"GROK2API_EMAIL_CODE_TIMEOUT":          &config.EmailCodeTimeoutSec,
+		"EMAIL_CODE_TIMEOUT":                   &config.EmailCodeTimeoutSec,
+		"GROK2API_TOTAL_ACCOUNTS":              &config.TotalAccounts,
+		"TOTAL_ACCOUNTS":                       &config.TotalAccounts,
+		"GROK2API_MAX_WORKERS":                 &config.MaxWorkers,
+		"MAX_WORKERS":                          &config.MaxWorkers,
 	}
 	for name, target := range integerValues {
 		value, ok := os.LookupEnv(name)

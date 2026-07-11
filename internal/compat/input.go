@@ -109,12 +109,12 @@ func sanitizeInputItem(raw any) any {
 		return builtinOutputToFunctionCallOutput(item)
 	case "mcp_call":
 		return builtinCallToFunctionCall(item, firstNonEmptyString(item["name"], "mcp_call"), map[string]any{
-			"server":     firstNonEmptyString(item["server_label"], item["server"]),
-			"arguments":  firstNonNil(item["arguments"], item["input"]),
-			"status":     stringValue(item["status"]),
-			"tool":       stringValue(item["name"]),
-			"error":      item["error"],
-			"output":     item["output"],
+			"server":    firstNonEmptyString(item["server_label"], item["server"]),
+			"arguments": firstNonNil(item["arguments"], item["input"]),
+			"status":    stringValue(item["status"]),
+			"tool":      stringValue(item["name"]),
+			"error":     item["error"],
+			"output":    item["output"],
 		})
 	case "mcp_list_tools":
 		return builtinCallToFunctionCall(item, "mcp_list_tools", map[string]any{
