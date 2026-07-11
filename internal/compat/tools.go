@@ -155,10 +155,10 @@ type ToolNormalizeResult struct {
 //
 // Policy:
 //  1. Expand Codex {type:"namespace", tools:[function...]} into flat function tools
-//  2. Collapse Codex web_search extras (external_web_access, search_context_size, …)
-//     to bare {"type":"web_search"} — otherwise Grok returns 400 Argument not supported
-//  3. Drop unknown OpenAI-only types (local_shell, tool_search, custom, …)
-//  4. Drop shell without required environment
+//  2. Collapse Codex web_search extras to bare {"type":"web_search"}
+//  3. Map OpenAI-only types onto function tools (local_shell→shell_command, custom, …)
+//     instead of dropping — aligns with input history sanitization
+//  4. Bare shell without environment → shell_command function (avoids 422)
 //  5. Soft-cap count when maxTools > 0
 func NormalizeResponsesTools(raw any, maxTools int) []any {
 	return NormalizeResponsesToolsDetailed(raw, maxTools).Tools
@@ -231,15 +231,22 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 			}
 			appendTool(map[string]any{"type": "web_search"})
 		case "local_shell":
-			// OpenAI built-in; Grok has no local_shell variant. Drop — Codex still
-			// sends shell_command/apply_patch as function tools for agent work.
-			continue
-		case "tool_search", "custom":
-			// OpenAI/Codex-only; Grok rejects unknown variants.
-			continue
+			// OpenAI built-in tool type — map to the same function name used when
+			// rewriting local_shell_call items in input history.
+			appendTool(syntheticFunctionTool(
+				"shell_command",
+				firstNonEmptyString(tool["description"], "Run a shell command in the local environment."),
+				shellCommandParameters(),
+			))
 		case "shell":
-			// Grok shell requires environment; incomplete objects 422.
+			// Grok native shell requires environment; incomplete objects 422.
+			// Fall back to shell_command function so the capability is not lost.
 			if _, hasEnv := tool["environment"]; !hasEnv {
+				appendTool(syntheticFunctionTool(
+					"shell_command",
+					firstNonEmptyString(tool["description"], "Run a shell command."),
+					shellCommandParameters(),
+				))
 				continue
 			}
 			clean := map[string]any{"type": "shell", "environment": tool["environment"]}
@@ -247,45 +254,130 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 				clean["name"] = name
 			}
 			appendTool(clean)
+		case "custom":
+			// Codex freeform / custom tools → flat function.
+			name := firstNonEmptyString(tool["name"], "custom_tool")
+			desc := firstNonEmptyString(tool["description"], "Custom tool "+name)
+			params := firstNonNil(tool["parameters"], tool["input_schema"])
+			if params == nil {
+				params = freeformToolParameters(tool)
+			}
+			appendTool(syntheticFunctionTool(name, desc, params))
+		case "tool_search":
+			name := firstNonEmptyString(tool["name"], "tool_search")
+			desc := firstNonEmptyString(tool["description"], "Search for available tools.")
+			params := firstNonNil(tool["parameters"], tool["input_schema"])
+			if params == nil {
+				params = map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string", "description": "Search query for tools"},
+					},
+					"required": []any{"query"},
+				}
+			}
+			appendTool(syntheticFunctionTool(name, desc, params))
 		case "function", "":
 			definition, valid := parseToolDefinition(tool)
 			if valid && definition.Type == "function" {
 				appendTool(definition.responseTool())
 			}
 		default:
-			if _, allowed := grokBuiltinToolTypes[typeName]; !allowed {
+			if _, allowed := grokBuiltinToolTypes[typeName]; allowed {
+				// Keep type (+ name/description when present); drop Codex/OpenAI extras.
+				clean := map[string]any{"type": typeName}
+				if name := firstNonEmptyString(tool["name"]); name != "" {
+					clean["name"] = name
+				}
+				if desc := firstNonEmptyString(tool["description"]); desc != "" {
+					clean["description"] = desc
+				}
+				// mcp / file_search may need server_label / vector_store_ids — pass through
+				// only a small allowlist of known-safe keys.
+				for _, key := range []string{
+					"server_label", "server_url", "server_description",
+					"vector_store_ids", "max_num_results", "filters",
+					"container", "parameters",
+				} {
+					if value, ok := tool[key]; ok {
+						clean[key] = value
+					}
+				}
+				// Never forward external_web_access on any builtin.
+				for _, key := range webSearchRejectedFields {
+					delete(clean, key)
+				}
+				appendTool(clean)
 				continue
 			}
-			// Keep type (+ name/description when present); drop Codex/OpenAI extras.
-			clean := map[string]any{"type": typeName}
+			// Unknown OpenAI/Codex type with a name → function so capability remains.
 			if name := firstNonEmptyString(tool["name"]); name != "" {
-				clean["name"] = name
+				params := firstNonNil(tool["parameters"], tool["input_schema"], emptyObjectSchema())
+				appendTool(syntheticFunctionTool(
+					name,
+					firstNonEmptyString(tool["description"], "Tool "+name+" (converted from "+typeName+")"),
+					params,
+				))
 			}
-			if desc := firstNonEmptyString(tool["description"]); desc != "" {
-				clean["description"] = desc
-			}
-			// mcp / file_search may need server_label / vector_store_ids — pass through
-			// only a small allowlist of known-safe keys.
-			for _, key := range []string{
-				"server_label", "server_url", "server_description",
-				"vector_store_ids", "max_num_results", "filters",
-				"container", "parameters",
-			} {
-				if value, ok := tool[key]; ok {
-					clean[key] = value
-				}
-			}
-			// Never forward external_web_access on any builtin.
-			for _, key := range webSearchRejectedFields {
-				delete(clean, key)
-			}
-			appendTool(clean)
 		}
 	}
 	if len(out) == 0 {
 		return ToolNormalizeResult{BackendSearch: backendSearch}
 	}
 	return ToolNormalizeResult{Tools: out, BackendSearch: backendSearch}
+}
+
+func syntheticFunctionTool(name, description string, parameters any) map[string]any {
+	if parameters == nil {
+		parameters = emptyObjectSchema()
+	}
+	tool := map[string]any{
+		"type":       "function",
+		"name":       name,
+		"parameters": parameters,
+	}
+	if strings.TrimSpace(description) != "" {
+		tool["description"] = description
+	}
+	return tool
+}
+
+func shellCommandParameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"command": map[string]any{
+				"type":        "string",
+				"description": "Shell command to execute",
+			},
+			"workdir": map[string]any{
+				"type":        "string",
+				"description": "Optional working directory",
+			},
+		},
+		"required": []any{"command"},
+	}
+}
+
+func freeformToolParameters(tool map[string]any) map[string]any {
+	// Preserve freeform format metadata in the schema description so the model
+	// still sees syntax hints when Grok only accepts function tools.
+	desc := "Freeform / custom tool input"
+	if format, ok := tool["format"].(map[string]any); ok {
+		if syntax := firstNonEmptyString(format["syntax"], format["type"]); syntax != "" {
+			desc = "Freeform input (syntax: " + syntax + ")"
+		}
+	}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"input": map[string]any{
+				"type":        "string",
+				"description": desc,
+			},
+		},
+		"required": []any{"input"},
+	}
 }
 
 func hasWebSearchTool(raw any) bool {

@@ -515,7 +515,7 @@ func stringValueTest(v any) string {
 	return s
 }
 
-func TestNormalizeResponsesToolsSanitizesCodexWebSearchAndDropsLocalShell(t *testing.T) {
+func TestNormalizeResponsesToolsMapsCodexBuiltinsToFunctions(t *testing.T) {
 	raw := []any{
 		map[string]any{
 			"type":                 "web_search",
@@ -527,8 +527,9 @@ func TestNormalizeResponsesToolsSanitizesCodexWebSearchAndDropsLocalShell(t *tes
 			"user_location":        map[string]any{"type": "approximate", "country": "US"},
 		},
 		map[string]any{"type": "local_shell"},
-		map[string]any{"type": "tool_search", "execution": "x", "description": "y", "parameters": map[string]any{"type": "object"}},
-		map[string]any{"type": "shell"}, // missing environment → drop
+		map[string]any{"type": "tool_search", "execution": "x", "description": "Search tools", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "shell"}, // missing environment → shell_command function
+		map[string]any{"type": "custom", "name": "apply_patch", "description": "Apply a patch"},
 		map[string]any{
 			"type": "function",
 			"name": "shell_command",
@@ -539,8 +540,9 @@ func TestNormalizeResponsesToolsSanitizesCodexWebSearchAndDropsLocalShell(t *tes
 		},
 	}
 	result := compat.NormalizeResponsesToolsDetailed(raw, 16)
-	if len(result.Tools) != 2 {
-		t.Fatalf("tools=%#v want web_search + shell_command", result.Tools)
+	// web_search + shell_command (deduped from local_shell/shell/function) + tool_search + apply_patch
+	if len(result.Tools) != 4 {
+		t.Fatalf("tools=%#v want 4", result.Tools)
 	}
 	first := result.Tools[0].(map[string]any)
 	if first["type"] != "web_search" || len(first) != 1 {
@@ -549,9 +551,17 @@ func TestNormalizeResponsesToolsSanitizesCodexWebSearchAndDropsLocalShell(t *tes
 	if result.BackendSearch == nil || !*result.BackendSearch {
 		t.Fatalf("BackendSearch=%v want true from external_web_access", result.BackendSearch)
 	}
-	second := result.Tools[1].(map[string]any)
-	if second["type"] != "function" || second["name"] != "shell_command" {
-		t.Fatalf("second=%#v", second)
+	byName := map[string]map[string]any{}
+	for _, rawTool := range result.Tools {
+		tool := rawTool.(map[string]any)
+		if tool["type"] == "function" {
+			byName[stringValueTest(tool["name"])] = tool
+		}
+	}
+	for _, name := range []string{"shell_command", "tool_search", "apply_patch"} {
+		if byName[name] == nil {
+			t.Fatalf("missing function %s in %#v", name, result.Tools)
+		}
 	}
 }
 
@@ -584,9 +594,10 @@ func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T
 	// (mapped first); tool-level true should still set backend_search if not set —
 	// but top-level false was mapped first. Either way tools must be clean.
 	tools, _ := payload["tools"].([]any)
-	if len(tools) != 2 {
+	if len(tools) < 2 {
 		t.Fatalf("tools=%#v", tools)
 	}
+	var sawWeb, sawShell, sawLocalShell bool
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
 		if _, ok := tool["external_web_access"]; ok {
@@ -596,11 +607,23 @@ func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T
 			t.Fatalf("search_context_size leaked: %#v", tool)
 		}
 		if tool["type"] == "local_shell" {
-			t.Fatalf("local_shell should be dropped: %#v", tool)
+			sawLocalShell = true
+		}
+		if tool["type"] == "web_search" {
+			sawWeb = true
+		}
+		if tool["type"] == "function" && tool["name"] == "shell_command" {
+			sawShell = true
 		}
 	}
+	if sawLocalShell {
+		t.Fatalf("local_shell type must be converted, not forwarded: %#v", tools)
+	}
+	if !sawWeb || !sawShell {
+		t.Fatalf("expected web_search + shell_command function, got %#v", tools)
+	}
 	encoded := string(out)
-	if strings.Contains(encoded, "external_web_access") || strings.Contains(encoded, "local_shell") {
+	if strings.Contains(encoded, "external_web_access") || strings.Contains(encoded, `"type":"local_shell"`) {
 		t.Fatalf("forbidden tokens remain: %s", encoded)
 	}
 }
