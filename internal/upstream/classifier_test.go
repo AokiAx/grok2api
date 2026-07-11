@@ -152,6 +152,26 @@ func TestClassifyFailureQuotaTextOn403(t *testing.T) {
 	}
 }
 
+func TestClassifyFailurePermissionDeniedIsValidating(t *testing.T) {
+	body := `{"code":"permission-denied","error":"Access to the chat endpoint is denied. Please ensure you're using the correct credentials."}`
+	failure := upstream.ClassifyFailure(403, []byte(body))
+	if failure.Reason != account.ReasonValidating {
+		t.Fatalf("permission-denied should be validating, got %#v", failure)
+	}
+	if failure.Code != "permission-denied" {
+		t.Fatalf("code = %q", failure.Code)
+	}
+}
+
+func TestClassifyFailureHardCredentialStillAuth(t *testing.T) {
+	failure := upstream.ClassifyFailure(401, []byte(
+		`{"error":"Invalid or expired credentials (auth_kind=bearer, reason=no auth context)"}`,
+	))
+	if failure.Reason != account.ReasonAuth {
+		t.Fatalf("hard credential failure should be auth, got %#v", failure)
+	}
+}
+
 func TestParseRateLimitHeadersRequestCounters(t *testing.T) {
 	header := make(http.Header)
 	header.Set("x-ratelimit-limit-requests", "100")

@@ -122,6 +122,15 @@ func ClassifyFailure(status int, body []byte) Failure {
 		if failure.Code == "" {
 			failure.Code = "rate_limit"
 		}
+	// Brand-new free accounts often 403 permission-denied on /responses for a
+	// short window after mint even though /models + OIDC tokens are valid.
+	// Treat as validating (retryable) so import does not quarantine them as auth.
+	case isTransientChatDenied(status, lowerCode, lowerMessage):
+		failure.Kind = FailureUpstream
+		failure.Reason = account.ReasonValidating
+		if failure.Code == "" {
+			failure.Code = "permission-denied"
+		}
 	case isAuthFailure(status, lowerCode, lowerMessage):
 		failure.Kind = FailureAuth
 		failure.Reason = account.ReasonAuth
@@ -219,7 +228,43 @@ func isQuotaFailure(status int, code, message string) bool {
 	return false
 }
 
+// isTransientChatDenied reports provisioning-style chat denials that clear on
+// their own. Hard credential failures (no auth context / invalid token) must
+// NOT match here.
+func isTransientChatDenied(status int, code, message string) bool {
+	if status != 403 && status != 401 {
+		return false
+	}
+	// Real credential death — keep as auth.
+	hard := []string{
+		"no auth context",
+		"invalid or expired credentials",
+		"invalid_token",
+		"invalid token",
+		"token has expired",
+		"expired credentials",
+	}
+	combined := code + " " + message
+	for _, marker := range hard {
+		if strings.Contains(combined, marker) {
+			return false
+		}
+	}
+	if code == "permission-denied" || strings.Contains(code, "permission-denied") {
+		return true
+	}
+	// Observed body: "Access to the chat endpoint is denied..."
+	if strings.Contains(message, "chat endpoint is denied") ||
+		strings.Contains(message, "access to the chat endpoint") {
+		return true
+	}
+	return false
+}
+
 func isAuthFailure(status int, code, message string) bool {
+	if isTransientChatDenied(status, code, message) {
+		return false
+	}
 	if status == 401 || status == 403 {
 		// Prefer quota classification when the body clearly says usage exhausted.
 		if isQuotaFailure(status, code, message) {
@@ -234,8 +279,6 @@ func isAuthFailure(status int, code, message string) bool {
 		"expired credentials",
 		"no auth context",
 		"unauthorized",
-		"permissiondenied",
-		"permission denied",
 		"token has expired",
 		"refresh_token",
 	}

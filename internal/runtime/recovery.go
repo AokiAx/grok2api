@@ -60,12 +60,17 @@ const (
 	// Per recovery tick (default interval ~20s). Sized for multi-thousand
 	// account pools so expired access tokens drain in minutes, not hours.
 	maxQuotaProbesPerTick        = 32
+	maxValidatingProbesPerTick   = 64
 	maxAuthRefreshesPerTick      = 256
 	maxProactiveRefreshesPerTick = 256
 	maxIsolatePerTick            = 500
 	proactiveRefreshLead         = 90 * time.Minute
 	authTransientBackoff         = 5 * time.Minute
 	authValidationBackoff        = 10 * time.Minute
+	validatingBackoff            = 45 * time.Second
+	// After this many failed validating re-probes, escalate to auth so truly
+	// blocked accounts stop burning probe budget forever.
+	maxValidatingFails = 12
 )
 
 // IsolationResult counts permanent auth quarantines.
@@ -359,13 +364,107 @@ func credentialRetryAt(reason account.UnavailableReason, now time.Time) time.Tim
 		return now.Add(24 * time.Hour)
 	case account.ReasonCooldown:
 		return now.Add(45 * time.Second)
-	case account.ReasonAuth, account.ReasonValidating:
+	case account.ReasonValidating:
+		return now.Add(validatingBackoff)
+	case account.ReasonAuth:
 		return now.Add(authTransientBackoff)
 	case account.ReasonDisabled:
 		return now.Add(365 * 24 * time.Hour)
 	default:
 		return time.Time{}
 	}
+}
+
+// RecoverValidating re-probes accounts parked as validating (typically
+// post-mint permission-denied on chat). Unlike auth recovery this does NOT
+// require a refresh first — tokens are usually already valid.
+func RecoverValidating(
+	ctx context.Context,
+	pool *scheduler.Scheduler,
+	store CredentialStore,
+	validator CredentialValidator,
+	now time.Time,
+) (CredentialRecoveryResult, error) {
+	if store == nil || validator == nil {
+		return CredentialRecoveryResult{}, nil
+	}
+	accounts, err := store.ListAccounts(ctx)
+	if err != nil {
+		return CredentialRecoveryResult{}, fmt.Errorf("list accounts for validating recovery: %w", err)
+	}
+	result := CredentialRecoveryResult{}
+	candidates := make([]account.Account, 0, maxValidatingProbesPerTick)
+	for _, item := range accounts {
+		if item.Pool != account.PoolUnavailable || item.UnavailableReason != account.ReasonValidating {
+			result.Skipped++
+			continue
+		}
+		if !item.RetryAt.IsZero() && item.RetryAt.After(now) {
+			result.Skipped++
+			continue
+		}
+		candidates = append(candidates, item)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].UpdatedAt.Before(candidates[j].UpdatedAt)
+	})
+	if len(candidates) > maxValidatingProbesPerTick {
+		result.Skipped += len(candidates) - maxValidatingProbesPerTick
+		candidates = candidates[:maxValidatingProbesPerTick]
+	}
+	for _, item := range candidates {
+		reason, errorCode, validateErr := validator.Validate(ctx, item)
+		item.UpdatedAt = now.UTC()
+		if validateErr != nil {
+			item.RetryAt = now.Add(validatingBackoff)
+			item.LastErrorCode = "validation-failed"
+			item.AuthenticationFails++
+			result.Failed++
+			_ = saveAccountBestEffort(ctx, store, pool, item)
+			continue
+		}
+		if reason == "" {
+			item.Pool = account.PoolReady
+			item.UnavailableReason = ""
+			item.RetryAt = time.Time{}
+			item.LastErrorCode = ""
+			item.AuthenticationFails = 0
+			result.Recovered++
+			_ = saveAccountBestEffort(ctx, store, pool, item)
+			continue
+		}
+		// Still bad.
+		item.AuthenticationFails++
+		item.LastErrorCode = firstNonEmpty(errorCode, string(reason))
+		switch {
+		case reason == account.ReasonQuota:
+			item.Pool = account.PoolUnavailable
+			item.UnavailableReason = account.ReasonQuota
+			item.RetryAt = now.Add(24 * time.Hour)
+			result.Failed++
+		case reason == account.ReasonCooldown:
+			item.Pool = account.PoolUnavailable
+			item.UnavailableReason = account.ReasonCooldown
+			item.RetryAt = now.Add(45 * time.Second)
+			result.Failed++
+		case reason == account.ReasonAuth || item.AuthenticationFails >= maxValidatingFails:
+			// Hard auth, or too many validating failures → park as auth for
+			// refresh-based recovery / operator attention.
+			item.Pool = account.PoolUnavailable
+			item.UnavailableReason = account.ReasonAuth
+			item.RetryAt = now.Add(authTransientBackoff)
+			result.Failed++
+		default:
+			item.Pool = account.PoolUnavailable
+			item.UnavailableReason = account.ReasonValidating
+			item.RetryAt = now.Add(validatingBackoff)
+			result.Failed++
+		}
+		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+			result.Failed++
+		}
+	}
+	return result, nil
 }
 
 type recoveryConfig struct {
@@ -602,6 +701,14 @@ func RunRecovery(
 				config.quotaRetry,
 			); err != nil {
 				slog.Error("recovery quota tick failed", "error", err)
+			}
+		}
+		// Re-probe post-mint permission-denied accounts before spending refresh budget.
+		if config.credentialStore != nil && config.validator != nil {
+			if res, err := RecoverValidating(ctx, pool, config.credentialStore, config.validator, now); err != nil {
+				slog.Error("recovery validating tick failed", "error", err)
+			} else if res.Recovered > 0 {
+				slog.Info("recovery validated accounts", "recovered", res.Recovered, "failed", res.Failed)
 			}
 		}
 		if config.credentialStore != nil && config.refresher != nil {

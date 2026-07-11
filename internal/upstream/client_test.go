@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,6 +218,59 @@ func TestValidateResponsesProbeAuthFailure(t *testing.T) {
 	reason, _, err := client.Validate(context.Background(), account.Account{AccessToken: "t"})
 	if err != nil || reason != account.ReasonAuth {
 		t.Fatalf("err=%v reason=%q", err, reason)
+	}
+}
+
+func TestValidateRetriesTransientPermissionDenied(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		n := hits.Add(1)
+		if n < 3 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"permission-denied","error":"Access to the chat endpoint is denied."}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: response.completed\ndata: {}\n\n"))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL, "0.2.93", server.Client())
+	reason, code, err := client.Validate(context.Background(), account.Account{AccessToken: "t"})
+	if err != nil || reason != "" || code != "" {
+		t.Fatalf("validate err=%v reason=%q code=%q hits=%d", err, reason, code, hits.Load())
+	}
+	if hits.Load() != 3 {
+		t.Fatalf("hits = %d; want 3", hits.Load())
+	}
+}
+
+func TestValidatePermissionDeniedExhaustedIsValidating(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"permission-denied","error":"Access to the chat endpoint is denied."}`))
+	}))
+	defer server.Close()
+	client := upstream.NewClient(server.URL, "0.2.93", server.Client())
+	// Short timeout so 3×1.5s retries don't hang the suite if something else breaks.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	reason, code, err := client.Validate(ctx, account.Account{AccessToken: "t"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if reason != account.ReasonValidating {
+		t.Fatalf("reason=%q code=%q; want validating", reason, code)
 	}
 }
 

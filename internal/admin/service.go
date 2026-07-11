@@ -365,6 +365,11 @@ func (s *Service) retryAt(
 		return now.Add(s.quotaRetry)
 	case account.ReasonCooldown:
 		return now.Add(s.rateRetry)
+	case account.ReasonValidating:
+		// New-account chat provisioning window; recovery re-probes soon.
+		return now.Add(45 * time.Second)
+	case account.ReasonAuth:
+		return now.Add(5 * time.Minute)
 	default:
 		return time.Time{}
 	}

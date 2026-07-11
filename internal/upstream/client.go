@@ -212,6 +212,40 @@ func (c *Client) validateResponsesProbe(
 	ctx context.Context,
 	item account.Account,
 ) (account.UnavailableReason, string, error) {
+	// New free accounts frequently return transient permission-denied on the
+	// first /responses call right after mint. Retry a couple of times before
+	// letting the caller park the account as validating.
+	const attempts = 3
+	var lastReason account.UnavailableReason
+	var lastCode string
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return account.ReasonValidating, "probe-cancelled", nil
+			case <-time.After(1500 * time.Millisecond):
+			}
+		}
+		reason, code, err := c.validateResponsesProbeOnce(ctx, item)
+		if err != nil {
+			return "", "", err
+		}
+		if reason == "" {
+			return "", "", nil
+		}
+		lastReason, lastCode = reason, code
+		// Only retry provisioning-style denials; hard auth/quota fail fast.
+		if reason != account.ReasonValidating && !strings.EqualFold(code, "permission-denied") {
+			return reason, code, nil
+		}
+	}
+	return lastReason, lastCode, nil
+}
+
+func (c *Client) validateResponsesProbeOnce(
+	ctx context.Context,
+	item account.Account,
+) (account.UnavailableReason, string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	payload := []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"ping"}],"stream":true,"max_output_tokens":16}`)

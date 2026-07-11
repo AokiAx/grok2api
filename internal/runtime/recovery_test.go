@@ -236,6 +236,78 @@ func TestRunRecoveryStopsWithContext(t *testing.T) {
 	}
 }
 
+func TestRecoverValidatingPromotesHealthyAccount(t *testing.T) {
+	now := time.Now().UTC()
+	item := account.Account{
+		ID: "new-mint", AccessToken: "tok",
+		Pool: account.PoolUnavailable, UnavailableReason: account.ReasonValidating,
+		LastErrorCode: "permission-denied", RetryAt: now.Add(-time.Second),
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	pool := scheduler.New([]account.Account{item})
+	result, err := runtime.RecoverValidating(
+		context.Background(), pool, store, credentialValidator{}, now,
+	)
+	if err != nil {
+		t.Fatalf("recover validating: %v", err)
+	}
+	if result.Recovered != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(store.saved) != 1 || store.saved[0].Pool != account.PoolReady {
+		t.Fatalf("saved = %#v", store.saved)
+	}
+	lease, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	lease.Release()
+}
+
+func TestRecoverValidatingSkipsFutureRetryAt(t *testing.T) {
+	now := time.Now().UTC()
+	item := account.Account{
+		ID: "waiting", AccessToken: "tok",
+		Pool: account.PoolUnavailable, UnavailableReason: account.ReasonValidating,
+		RetryAt: now.Add(time.Minute),
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	result, err := runtime.RecoverValidating(
+		context.Background(), scheduler.New([]account.Account{item}), store,
+		credentialValidator{}, now,
+	)
+	if err != nil {
+		t.Fatalf("recover validating: %v", err)
+	}
+	if result.Skipped < 1 || result.Recovered != 0 || len(store.saved) != 0 {
+		t.Fatalf("result=%#v saved=%#v", result, store.saved)
+	}
+}
+
+func TestRecoverValidatingEscalatesAfterMaxFails(t *testing.T) {
+	now := time.Now().UTC()
+	item := account.Account{
+		ID: "stuck", AccessToken: "tok",
+		Pool: account.PoolUnavailable, UnavailableReason: account.ReasonValidating,
+		LastErrorCode: "permission-denied", AuthenticationFails: 11,
+		RetryAt: now.Add(-time.Second),
+	}
+	store := &recoveryStore{accounts: []account.Account{item}}
+	result, err := runtime.RecoverValidating(
+		context.Background(), scheduler.New([]account.Account{item}), store,
+		credentialValidator{reason: account.ReasonValidating, code: "permission-denied"}, now,
+	)
+	if err != nil {
+		t.Fatalf("recover validating: %v", err)
+	}
+	if result.Failed != 1 || len(store.saved) != 1 {
+		t.Fatalf("result=%#v saved=%#v", result, store.saved)
+	}
+	if store.saved[0].UnavailableReason != account.ReasonAuth {
+		t.Fatalf("expected escalate to auth, got %#v", store.saved[0])
+	}
+}
+
 func TestRecoverCredentialsRefreshesAndRestoresAuthAccount(t *testing.T) {
 	now := time.Now().UTC()
 	expired := account.Account{
