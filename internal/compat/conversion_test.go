@@ -426,7 +426,7 @@ func TestStripUnknownResponsesFieldsNoopWhenClean(t *testing.T) {
 	}
 }
 
-func TestSanitizeResponsesInputMapsCodexShellAndDropsUnsupported(t *testing.T) {
+func TestSanitizeResponsesInputMapsCodexShellAndPreservesBuiltins(t *testing.T) {
 	raw := []any{
 		map[string]any{
 			"type": "message", "role": "user",
@@ -438,41 +438,59 @@ func TestSanitizeResponsesInputMapsCodexShellAndDropsUnsupported(t *testing.T) {
 		},
 		map[string]any{"type": "local_shell_call_output", "call_id": "c1", "output": "hi\n"},
 		map[string]any{"type": "item_reference", "id": "msg_x"},
-		map[string]any{"type": "web_search_call", "id": "ws1", "status": "completed"},
+		map[string]any{"type": "web_search_call", "id": "ws1", "status": "completed", "query": "golang"},
 		map[string]any{"type": "message", "role": "user", "content": nil},
 		map[string]any{
 			"type": "custom_tool_call", "call_id": "c2", "name": "apply_patch", "input": "{\"p\":1}",
 		},
+		map[string]any{
+			"type": "computer_call", "call_id": "c3",
+			"action": map[string]any{"type": "click", "x": 1, "y": 2},
+		},
 	}
 	out := compat.SanitizeResponsesInput(raw).([]any)
-	types := make([]string, 0, len(out))
+	var (
+		fnCalls, fnOuts int
+		webSearch, computer, note bool
+		foundEmpty                bool
+	)
 	for _, item := range out {
 		m := item.(map[string]any)
-		if typ := stringValueTest(m["type"]); typ != "" {
-			types = append(types, typ)
-		} else {
-			types = append(types, "message")
+		switch m["type"] {
+		case "function_call":
+			fnCalls++
+			switch m["name"] {
+			case "web_search":
+				webSearch = true
+				if !strings.Contains(stringValueTest(m["arguments"]), "golang") {
+					t.Fatalf("web_search args missing query: %#v", m)
+				}
+			case "computer":
+				computer = true
+			case "shell_command", "apply_patch":
+				// ok
+			}
+		case "function_call_output":
+			fnOuts++
+		default:
+			if m["role"] == "user" && m["content"] == "" {
+				foundEmpty = true
+			}
+			if content, _ := m["content"].(string); strings.Contains(content, "item_reference") {
+				note = true
+			}
+		}
+		// raw OpenAI built-in types must not leak
+		if typ := stringValueTest(m["type"]); strings.Contains(typ, "local_shell") ||
+			typ == "item_reference" || typ == "web_search_call" || typ == "computer_call" || typ == "custom_tool_call" {
+			t.Fatalf("unsupported type leaked: %#v", m)
 		}
 	}
-	// local_shell → function_call + function_call_output; custom → function_call;
-	// null content message kept; item_reference/web_search_call dropped.
-	joined := strings.Join(types, ",")
-	if !strings.Contains(joined, "function_call") || !strings.Contains(joined, "function_call_output") {
-		t.Fatalf("types=%v", types)
+	if fnCalls < 4 || fnOuts < 1 {
+		t.Fatalf("expected mapped function calls/outputs, got calls=%d outs=%d out=%#v", fnCalls, fnOuts, out)
 	}
-	if strings.Contains(joined, "local_shell") || strings.Contains(joined, "item_reference") || strings.Contains(joined, "web_search_call") {
-		t.Fatalf("unsupported types leaked: %v", types)
-	}
-	// null content coerced
-	foundEmpty := false
-	for _, item := range out {
-		m := item.(map[string]any)
-		if m["role"] == "user" && m["content"] == "" {
-			foundEmpty = true
-		}
-	}
-	if !foundEmpty {
-		t.Fatalf("expected coerced empty content message: %#v", out)
+	if !webSearch || !computer || !note || !foundEmpty {
+		t.Fatalf("web=%v computer=%v note=%v empty=%v out=%#v", webSearch, computer, note, foundEmpty, out)
 	}
 
 	// Full finalize path must not 422-shape
@@ -484,17 +502,12 @@ func TestSanitizeResponsesInputMapsCodexShellAndDropsUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(finalized, &payload); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
 	encoded := string(finalized)
-	for _, bad := range []string{"local_shell_call", "item_reference", "web_search_call", "custom_tool_call"} {
+	for _, bad := range []string{`"type":"local_shell_call"`, `"type":"item_reference"`, `"type":"web_search_call"`, `"type":"custom_tool_call"`, `"type":"computer_call"`} {
 		if strings.Contains(encoded, bad) {
 			t.Fatalf("finalized still has %s: %s", bad, encoded)
 		}
 	}
-	_ = payload
 }
 
 func stringValueTest(v any) string {

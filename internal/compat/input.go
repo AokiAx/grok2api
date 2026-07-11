@@ -9,15 +9,16 @@ import (
 // SanitizeResponsesInput rewrites Codex/OpenAI Responses input arrays into
 // shapes accepted by Grok's ModelInput enum.
 //
-// Grok rejects (422 "data did not match any variant of untagged enum ModelInput"):
-//   - item_reference, local_shell_call, web_search_call, computer_call,
-//     custom_tool_call, null content, …
+// Grok rejects native OpenAI built-ins (422 ModelInput). We never silently
+// delete tool-loop semantics when a faithful mapping exists:
 //
-// Policy:
-//   - Keep message / function_call / function_call_output / reasoning
-//   - Map local_shell_* and custom_tool_* onto function_call(_output)
-//   - Drop untranslatable built-in call items (web_search_call, item_reference, …)
-//   - Coerce null message content to empty string
+//   - message / function_call / function_call_output / reasoning → keep
+//   - local_shell_* / custom_tool_* / web_search_* / computer_* / mcp_* /
+//     file_search_* / code_interpreter_* / image_generation_* / apply_patch_*
+//     → function_call(+_output) with structured arguments
+//   - item_reference / bare references → assistant note (id preserved in text)
+//   - unknown types → assistant note with type + compact payload
+//   - null message content → ""
 func SanitizeResponsesInput(raw any) any {
 	switch typed := raw.(type) {
 	case string:
@@ -30,7 +31,7 @@ func SanitizeResponsesInput(raw any) any {
 			}
 		}
 		if len(out) == 0 {
-			// Never send empty array after dropping everything — keep a noop user turn.
+			// Never send empty array after filtering — keep a noop user turn.
 			return []any{map[string]any{"role": "user", "content": ""}}
 		}
 		return out
@@ -61,7 +62,7 @@ func sanitizeInputItem(raw any) any {
 		return map[string]any{
 			"type":    "function_call_output",
 			"call_id": firstNonEmptyString(item["call_id"], item["id"], "call_"+randomID(10)),
-			"output":  stringifyOutput(item["output"]),
+			"output":  stringifyOutput(firstNonNil(item["output"], item["result"])),
 		}
 	case "custom_tool_call":
 		return customToolCallToFunctionCall(item)
@@ -69,24 +70,172 @@ func sanitizeInputItem(raw any) any {
 		return map[string]any{
 			"type":    "function_call_output",
 			"call_id": firstNonEmptyString(item["call_id"], item["id"], "call_"+randomID(10)),
-			"output":  stringifyOutput(item["output"]),
+			"output":  stringifyOutput(firstNonNil(item["output"], item["result"])),
 		}
-	case "item_reference", "web_search_call", "web_search_call_output",
-		"file_search_call", "file_search_call_output",
-		"code_interpreter_call", "code_interpreter_call_output",
-		"image_generation_call", "image_generation_call_output",
-		"computer_call", "computer_call_output",
-		"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
-		"apply_patch_call", "apply_patch_call_output":
-		// Not representable on Grok ModelInput — drop to avoid 422.
-		return nil
+	case "web_search_call":
+		return builtinCallToFunctionCall(item, "web_search", map[string]any{
+			"query":  firstNonEmptyString(item["query"], digString(item, "action", "query")),
+			"status": stringValue(item["status"]),
+		})
+	case "web_search_call_output":
+		return builtinOutputToFunctionCallOutput(item)
+	case "file_search_call":
+		return builtinCallToFunctionCall(item, "file_search", map[string]any{
+			"queries": firstNonNil(item["queries"], digAny(item, "action", "queries")),
+			"status":  stringValue(item["status"]),
+		})
+	case "file_search_call_output":
+		return builtinOutputToFunctionCallOutput(item)
+	case "code_interpreter_call":
+		return builtinCallToFunctionCall(item, "code_interpreter", map[string]any{
+			"code":   firstNonEmptyString(item["code"], digString(item, "action", "code")),
+			"status": stringValue(item["status"]),
+		})
+	case "code_interpreter_call_output":
+		return builtinOutputToFunctionCallOutput(item)
+	case "image_generation_call":
+		return builtinCallToFunctionCall(item, "image_generation", map[string]any{
+			"prompt": firstNonEmptyString(item["prompt"], digString(item, "action", "prompt")),
+			"status": stringValue(item["status"]),
+		})
+	case "image_generation_call_output":
+		return builtinOutputToFunctionCallOutput(item)
+	case "computer_call":
+		return builtinCallToFunctionCall(item, "computer", map[string]any{
+			"action": firstNonNil(item["action"], item["pending_safety_checks"]),
+			"status": stringValue(item["status"]),
+		})
+	case "computer_call_output":
+		return builtinOutputToFunctionCallOutput(item)
+	case "mcp_call":
+		return builtinCallToFunctionCall(item, firstNonEmptyString(item["name"], "mcp_call"), map[string]any{
+			"server":     firstNonEmptyString(item["server_label"], item["server"]),
+			"arguments":  firstNonNil(item["arguments"], item["input"]),
+			"status":     stringValue(item["status"]),
+			"tool":       stringValue(item["name"]),
+			"error":      item["error"],
+			"output":     item["output"],
+		})
+	case "mcp_list_tools":
+		return builtinCallToFunctionCall(item, "mcp_list_tools", map[string]any{
+			"server": stringValue(firstNonEmptyString(item["server_label"], item["server"])),
+			"tools":  firstNonNil(item["tools"], item["output"]),
+		})
+	case "mcp_approval_request", "mcp_approval_response":
+		return historyNote("assistant", typeName, item)
+	case "apply_patch_call":
+		return builtinCallToFunctionCall(item, "apply_patch", map[string]any{
+			"patch":  firstNonEmptyString(item["patch"], digString(item, "action", "patch"), digString(item, "action", "input")),
+			"status": stringValue(item["status"]),
+		})
+	case "apply_patch_call_output":
+		return builtinOutputToFunctionCallOutput(item)
+	case "item_reference":
+		// Cannot resolve without a response store; keep a visible breadcrumb.
+		id := firstNonEmptyString(item["id"], item["item_id"], digString(item, "item", "id"))
+		return map[string]any{
+			"role":    "assistant",
+			"content": "[prior item_reference id=" + id + " — expanded content unavailable on this backend]",
+		}
 	default:
-		// Unknown typed item: drop rather than 422 the whole request.
 		if typeName != "" {
-			return nil
+			// Unknown typed item: preserve as a short history note, never 422.
+			return historyNote("assistant", typeName, item)
 		}
 		return sanitizeMessageItem(item)
 	}
+}
+
+// builtinCallToFunctionCall maps OpenAI built-in call items onto function_call.
+func builtinCallToFunctionCall(item map[string]any, name string, args map[string]any) map[string]any {
+	callID := firstNonEmptyString(item["call_id"], item["id"])
+	if callID == "" {
+		callID = "call_" + randomID(12)
+	}
+	// Drop empty string values for cleaner arguments.
+	clean := map[string]any{}
+	for k, v := range args {
+		if v == nil {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		clean[k] = v
+	}
+	if len(clean) == 0 {
+		// Still emit a call so multi-turn pairing with outputs stays coherent.
+		clean["status"] = firstNonEmptyString(item["status"], "completed")
+	}
+	encoded, err := json.Marshal(clean)
+	if err != nil {
+		encoded = []byte("{}")
+	}
+	out := map[string]any{
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      name,
+		"arguments": string(encoded),
+	}
+	if status := strings.TrimSpace(stringValue(item["status"])); status != "" {
+		out["status"] = status
+	}
+	return out
+}
+
+func builtinOutputToFunctionCallOutput(item map[string]any) map[string]any {
+	callID := firstNonEmptyString(item["call_id"], item["id"])
+	if callID == "" {
+		callID = "call_" + randomID(12)
+	}
+	output := firstNonNil(item["output"], item["result"], item["content"], item["text"])
+	return map[string]any{
+		"type":    "function_call_output",
+		"call_id": callID,
+		"output":  stringifyOutput(output),
+	}
+}
+
+func historyNote(role, typeName string, item map[string]any) map[string]any {
+	// Compact JSON of a few useful fields so the model retains signal.
+	snippet := map[string]any{}
+	for _, key := range []string{"id", "call_id", "name", "status", "query", "server_label", "action", "output", "error"} {
+		if v, ok := item[key]; ok && v != nil {
+			snippet[key] = v
+		}
+	}
+	body := stringifyOutput(snippet)
+	if len(body) > 1500 {
+		body = body[:1500] + "…"
+	}
+	return map[string]any{
+		"role":    role,
+		"content": "[converted " + typeName + "] " + body,
+	}
+}
+
+func digString(item map[string]any, keys ...string) string {
+	cur := any(item)
+	for _, key := range keys {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return ""
+		}
+		cur = obj[key]
+	}
+	return stringValue(cur)
+}
+
+func digAny(item map[string]any, keys ...string) any {
+	cur := any(item)
+	for _, key := range keys {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = obj[key]
+	}
+	return cur
 }
 
 func sanitizeMessageItem(item map[string]any) map[string]any {
