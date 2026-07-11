@@ -3,11 +3,13 @@ package admin_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
+	"github.com/AokiAx/grok2api/internal/repository"
 )
 
 type memoryRepository struct {
@@ -36,6 +38,98 @@ func (r *memoryRepository) ListAccounts(context.Context) ([]account.Account, err
 		result = append(result, item)
 	}
 	return result, nil
+}
+
+func (r *memoryRepository) ListAccountsPage(_ context.Context, query repository.ListAccountsQuery) (repository.ListAccountsResult, error) {
+	all, _ := r.ListAccounts(context.Background())
+	filtered := make([]account.Account, 0, len(all))
+	pool := strings.ToLower(strings.TrimSpace(query.Pool))
+	q := strings.ToLower(strings.TrimSpace(query.Q))
+	for _, item := range all {
+		if pool == "ready" || pool == "unavailable" {
+			if string(item.Pool) != pool {
+				continue
+			}
+		}
+		if q != "" {
+			haystack := strings.ToLower(strings.Join([]string{
+				item.ID, item.Email, string(item.UnavailableReason), item.LastErrorCode,
+			}, " "))
+			if !strings.Contains(haystack, q) {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	page := query.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	start := (page - 1) * pageSize
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return repository.ListAccountsResult{
+		Items:    filtered[start:end],
+		Total:    len(filtered),
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
+}
+
+func (r *memoryRepository) AccountStats(context.Context) (repository.AccountStats, error) {
+	all, _ := r.ListAccounts(context.Background())
+	stats := repository.AccountStats{Reasons: map[string]int{}}
+	for _, item := range all {
+		stats.TotalAccounts++
+		if item.Pool == account.PoolReady {
+			stats.ReadyAccounts++
+		} else {
+			stats.UnavailableAccounts++
+			if item.UnavailableReason != "" {
+				stats.Reasons[string(item.UnavailableReason)]++
+			}
+		}
+		stats.TotalRequests += item.RequestCount
+		maxActive := item.MaxActive
+		if maxActive <= 0 {
+			maxActive = 1
+		}
+		stats.MaxActive += maxActive
+		if item.RefreshToken != "" {
+			stats.RefreshableAccounts++
+		}
+		if item.QuotaLimit > 0 {
+			used := item.QuotaActual
+			if used < 0 {
+				used = 0
+			}
+			if used > item.QuotaLimit {
+				used = item.QuotaLimit
+			}
+			remaining := item.QuotaLimit - used
+			stats.QuotaActual += used
+			stats.QuotaLimit += item.QuotaLimit
+			stats.QuotaRemaining += remaining
+			stats.QuotaObserved++
+			if item.Pool == account.PoolReady {
+				stats.ReadyQuotaRemaining += remaining
+				stats.ReadyQuotaObserved++
+			}
+		}
+	}
+	return stats, nil
 }
 
 func (r *memoryRepository) SaveAccount(_ context.Context, item account.Account) error {

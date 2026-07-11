@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,10 +21,97 @@ type fakeAdmin struct {
 	request   admin.ImportRequest
 	deleted   string
 	recovered string
+	lastQuery admin.ListAccountsQuery
 }
 
-func (a *fakeAdmin) List(context.Context) ([]account.Account, error) {
-	return a.accounts, nil
+func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (admin.ListAccountsPage, error) {
+	a.lastQuery = query
+	page := query.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	pool := strings.ToLower(strings.TrimSpace(query.Pool))
+	q := strings.ToLower(strings.TrimSpace(query.Q))
+	filtered := make([]account.Account, 0, len(a.accounts))
+	for _, item := range a.accounts {
+		if pool == "ready" || pool == "unavailable" {
+			if string(item.Pool) != pool {
+				continue
+			}
+		}
+		if q != "" {
+			hay := strings.ToLower(item.ID + " " + item.Email + " " + string(item.UnavailableReason) + " " + item.LastErrorCode)
+			if !strings.Contains(hay, q) {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	start := (page - 1) * pageSize
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return admin.ListAccountsPage{
+		Accounts: filtered[start:end],
+		Total:    len(filtered),
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
+}
+
+func (a *fakeAdmin) Stats(context.Context) (admin.AccountStats, error) {
+	stats := admin.AccountStats{Reasons: map[string]int{}}
+	for _, item := range a.accounts {
+		stats.TotalAccounts++
+		if item.Pool == account.PoolReady {
+			stats.ReadyAccounts++
+		} else {
+			stats.UnavailableAccounts++
+			if item.UnavailableReason != "" {
+				stats.Reasons[string(item.UnavailableReason)]++
+			}
+		}
+		stats.ActiveLeases += item.Active
+		maxActive := item.MaxActive
+		if maxActive <= 0 {
+			maxActive = 1
+		}
+		stats.MaxActive += maxActive
+		stats.TotalRequests += item.RequestCount
+		if item.RefreshToken != "" {
+			stats.RefreshableAccounts++
+		}
+		if item.QuotaLimit > 0 {
+			used := item.QuotaActual
+			if used < 0 {
+				used = 0
+			}
+			if used > item.QuotaLimit {
+				used = item.QuotaLimit
+			}
+			remaining := item.QuotaLimit - used
+			stats.QuotaActual += used
+			stats.QuotaLimit += item.QuotaLimit
+			stats.QuotaRemaining += remaining
+			stats.QuotaObserved++
+			if item.Pool == account.PoolReady {
+				stats.ReadyQuotaRemaining += remaining
+				stats.ReadyQuotaObserved++
+			}
+		}
+	}
+	return stats, nil
 }
 
 func (a *fakeAdmin) Import(_ context.Context, request admin.ImportRequest) (admin.ImportResult, error) {
@@ -119,6 +207,83 @@ func TestAdminListNeverReturnsTokens(t *testing.T) {
 	if summary.Reasons["quota"] != 1 || summary.Reasons["auth"] != 1 {
 		t.Fatalf("reasons = %#v", summary.Reasons)
 	}
+	var pageMeta struct {
+		Total      int `json:"total"`
+		Page       int `json:"page"`
+		PageSize   int `json:"page_size"`
+		TotalPages int `json:"total_pages"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &pageMeta); err != nil {
+		t.Fatalf("decode page meta: %v", err)
+	}
+	if pageMeta.Total != 3 || pageMeta.Page != 1 || pageMeta.PageSize != 50 || pageMeta.TotalPages != 1 {
+		t.Fatalf("page meta = %#v", pageMeta)
+	}
+}
+
+func TestAdminListPaginationAndFilter(t *testing.T) {
+	accounts := make([]account.Account, 0, 12)
+	for i := 0; i < 10; i++ {
+		id := "ready-" + strconv.Itoa(i)
+		accounts = append(accounts, account.Account{
+			ID:    id,
+			Email: id + "@example.com",
+			Pool:  account.PoolReady,
+		})
+	}
+	accounts = append(accounts,
+		account.Account{ID: "quota-1", Email: "quota@example.com", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota},
+		account.Account{ID: "auth-1", Email: "auth@example.com", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonAuth, LastErrorCode: "refresh-failed"},
+	)
+	adminService := &fakeAdmin{accounts: accounts}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(adminService, "panel-secret"))
+
+	request := httptest.NewRequest(http.MethodGet, "/admin/api/cli-accounts?page=2&page_size=5&pool=ready", nil)
+	request.Header.Set("Authorization", "Bearer panel-secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Total      int                      `json:"total"`
+		Page       int                      `json:"page"`
+		PageSize   int                      `json:"page_size"`
+		TotalPages int                      `json:"total_pages"`
+		Accounts   []map[string]any         `json:"accounts"`
+		Summary    struct{ TotalAccounts int `json:"total_accounts"` } `json:"summary"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Total != 10 || payload.Page != 2 || payload.PageSize != 5 || payload.TotalPages != 2 {
+		t.Fatalf("pagination = total=%d page=%d size=%d pages=%d", payload.Total, payload.Page, payload.PageSize, payload.TotalPages)
+	}
+	if len(payload.Accounts) != 5 {
+		t.Fatalf("page len = %d", len(payload.Accounts))
+	}
+	// Summary stays global, not filtered to ready-only.
+	if payload.Summary.TotalAccounts != 12 {
+		t.Fatalf("summary total = %d", payload.Summary.TotalAccounts)
+	}
+	if adminService.lastQuery.Pool != "ready" || adminService.lastQuery.Page != 2 || adminService.lastQuery.PageSize != 5 {
+		t.Fatalf("last query = %#v", adminService.lastQuery)
+	}
+
+	searchReq := httptest.NewRequest(http.MethodGet, "/admin/api/cli-accounts?q=refresh-failed&page_size=10", nil)
+	searchReq.Header.Set("Authorization", "Bearer panel-secret")
+	searchRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(searchRec, searchReq)
+	var searchPayload struct {
+		Total    int              `json:"total"`
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.Unmarshal(searchRec.Body.Bytes(), &searchPayload); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if searchPayload.Total != 1 || len(searchPayload.Accounts) != 1 {
+		t.Fatalf("search payload = %#v", searchPayload)
+	}
 }
 
 func TestAdminImportPreviewAndApply(t *testing.T) {
@@ -173,6 +338,7 @@ func TestPanelRouteIsEmbedded(t *testing.T) {
 		`id="totalAccounts"`, `id="totalRequests"`, `id="activeLeases"`,
 		`id="refreshableAccounts"`, `id="quotaUsage"`, `id="reasonBars"`,
 		`id="lastUpdated"`, "renderSummary", "setInterval(refresh,15000)",
+		`id="pagePrev"`, `id="pageNext"`, `id="pageSize"`, "accountsQuery",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Fatalf("panel statistics marker missing: %s", marker)

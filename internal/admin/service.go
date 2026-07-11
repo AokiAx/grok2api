@@ -9,10 +9,47 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
+	"github.com/AokiAx/grok2api/internal/repository"
 )
+
+// ListAccountsQuery is the admin-facing account list filter/page request.
+type ListAccountsQuery struct {
+	Pool     string // "", "ready", "unavailable"
+	Q        string
+	Page     int
+	PageSize int
+}
+
+// ListAccountsPage is one filtered page of accounts.
+type ListAccountsPage struct {
+	Accounts []account.Account
+	Total    int
+	Page     int
+	PageSize int
+}
+
+// AccountStats is a global pool aggregate for the panel summary.
+type AccountStats struct {
+	TotalAccounts       int            `json:"total_accounts"`
+	ReadyAccounts       int            `json:"ready_accounts"`
+	UnavailableAccounts int            `json:"unavailable_accounts"`
+	ActiveLeases        int            `json:"active_leases"`
+	MaxActive           int            `json:"max_active"`
+	TotalRequests       int64          `json:"total_requests"`
+	RefreshableAccounts int            `json:"refreshable_accounts"`
+	QuotaActual         int64          `json:"quota_actual"`
+	QuotaLimit          int64          `json:"quota_limit"`
+	QuotaRemaining      int64          `json:"quota_remaining"`
+	ReadyQuotaRemaining int64          `json:"ready_quota_remaining"`
+	QuotaObserved       int            `json:"quota_observed_accounts"`
+	ReadyQuotaObserved  int            `json:"ready_quota_observed_accounts"`
+	Reasons             map[string]int `json:"reasons"`
+}
 
 type Repository interface {
 	ListAccounts(context.Context) ([]account.Account, error)
+	ListAccountsPage(context.Context, repository.ListAccountsQuery) (repository.ListAccountsResult, error)
+	AccountStats(context.Context) (repository.AccountStats, error)
 	SaveAccount(context.Context, account.Account) error
 	DeleteAccount(context.Context, string) error
 }
@@ -96,6 +133,52 @@ type ImportResult struct {
 
 func (s *Service) List(ctx context.Context) ([]account.Account, error) {
 	return s.repository.ListAccounts(ctx)
+}
+
+// ListPage returns one filtered page of accounts without loading the whole table.
+func (s *Service) ListPage(ctx context.Context, query ListAccountsQuery) (ListAccountsPage, error) {
+	result, err := s.repository.ListAccountsPage(ctx, repository.ListAccountsQuery{
+		Pool:     query.Pool,
+		Q:        query.Q,
+		Page:     query.Page,
+		PageSize: query.PageSize,
+	})
+	if err != nil {
+		return ListAccountsPage{}, err
+	}
+	return ListAccountsPage{
+		Accounts: result.Items,
+		Total:    result.Total,
+		Page:     result.Page,
+		PageSize: result.PageSize,
+	}, nil
+}
+
+// Stats returns global pool aggregates for the admin summary cards.
+func (s *Service) Stats(ctx context.Context) (AccountStats, error) {
+	raw, err := s.repository.AccountStats(ctx)
+	if err != nil {
+		return AccountStats{}, err
+	}
+	reasons := raw.Reasons
+	if reasons == nil {
+		reasons = map[string]int{}
+	}
+	return AccountStats{
+		TotalAccounts:       raw.TotalAccounts,
+		ReadyAccounts:       raw.ReadyAccounts,
+		UnavailableAccounts: raw.UnavailableAccounts,
+		MaxActive:           raw.MaxActive,
+		TotalRequests:       raw.TotalRequests,
+		RefreshableAccounts: raw.RefreshableAccounts,
+		QuotaActual:         raw.QuotaActual,
+		QuotaLimit:          raw.QuotaLimit,
+		QuotaRemaining:      raw.QuotaRemaining,
+		ReadyQuotaRemaining: raw.ReadyQuotaRemaining,
+		QuotaObserved:       raw.QuotaObserved,
+		ReadyQuotaObserved:  raw.ReadyQuotaObserved,
+		Reasons:             reasons,
+	}, nil
 }
 
 func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResult, error) {

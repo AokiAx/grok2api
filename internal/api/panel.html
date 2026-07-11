@@ -271,7 +271,26 @@
       flex-wrap: wrap;
       margin-bottom: 12px;
     }
-    .filters { display: flex; gap: 8px; flex-wrap: wrap; }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+    .pager .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pager .meta {
+      color: var(--dim);
+      font-size: 12px;
+    }
+    .pager select { height: 32px; }
 
     input, select, textarea {
       background: var(--bg);
@@ -596,6 +615,11 @@
               <option value="ready">Ready</option>
               <option value="unavailable">Unavailable</option>
             </select>
+            <select id="pageSize" aria-label="每页数量">
+              <option value="50">50 / 页</option>
+              <option value="100">100 / 页</option>
+              <option value="200">200 / 页</option>
+            </select>
           </div>
         </div>
         <div class="table-wrap">
@@ -614,6 +638,14 @@
             </thead>
             <tbody id="accounts"></tbody>
           </table>
+        </div>
+        <div class="pager">
+          <div class="meta" id="pageMeta">—</div>
+          <div class="controls">
+            <button type="button" class="btn sm ghost" id="pagePrev">上一页</button>
+            <span class="meta" id="pageLabel">第 1 页</span>
+            <button type="button" class="btn sm ghost" id="pageNext">下一页</button>
+          </div>
         </div>
       </div>
     </section>
@@ -839,7 +871,16 @@
   <script>
     const STORAGE_KEY = 'grok2api.panel_password';
     const byId = id => document.getElementById(id);
-    const state = { accounts: [], authed: false, authRequired: true };
+    const state = {
+      accounts: [],
+      authed: false,
+      authRequired: true,
+      page: 1,
+      pageSize: 50,
+      total: 0,
+      totalPages: 0,
+      searchTimer: null
+    };
     const number = new Intl.NumberFormat('zh-CN');
     const reasonNames = {
       quota: '额度耗尽',
@@ -993,19 +1034,51 @@
       }
     }
 
-    function renderAccounts() {
-      const query = byId('search').value.trim().toLowerCase();
+    function accountsQuery(extra = {}) {
+      const params = new URLSearchParams();
+      const page = extra.page != null ? extra.page : state.page;
+      const pageSize = extra.pageSize != null ? extra.pageSize : state.pageSize;
+      params.set('page', String(page));
+      params.set('page_size', String(pageSize));
       const pool = byId('poolFilter').value;
+      if (pool && pool !== 'all') params.set('pool', pool);
+      const q = byId('search').value.trim();
+      if (q) params.set('q', q);
+      return params.toString();
+    }
+
+    function applyAccountsPayload(data) {
+      state.accounts = data.accounts || [];
+      state.total = Number(data.total ?? data.count ?? state.accounts.length) || 0;
+      state.page = Number(data.page || state.page || 1) || 1;
+      state.pageSize = Number(data.page_size || state.pageSize || 50) || 50;
+      state.totalPages = Number(data.total_pages || 0);
+      if (!state.totalPages && state.pageSize > 0) {
+        state.totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+      }
+      if (state.total === 0) state.totalPages = 0;
+      byId('pageSize').value = String(state.pageSize);
+    }
+
+    function renderAccounts() {
       const body = byId('accounts');
       body.replaceChildren();
-      const visible = state.accounts.filter(account =>
-        (pool === 'all' || account.pool === pool) &&
-        (!query || [account.email, account.id, account.unavailable_reason, account.last_error_code]
-          .some(value => String(value || '').toLowerCase().includes(query)))
-      );
-      byId('visibleCount').textContent = `显示 ${visible.length} / ${state.accounts.length}`;
+      const pageItems = state.accounts || [];
+      const from = state.total === 0 ? 0 : (state.page - 1) * state.pageSize + 1;
+      const to = state.total === 0 ? 0 : Math.min(state.page * state.pageSize, state.total);
+      byId('visibleCount').textContent = state.total
+        ? `本页 ${pageItems.length} · 筛选 ${number.format(state.total)}`
+        : '无匹配账号';
+      byId('pageMeta').textContent = state.total
+        ? `第 ${number.format(from)}–${number.format(to)} 条 / 共 ${number.format(state.total)}`
+        : '共 0 条';
+      byId('pageLabel').textContent = state.totalPages
+        ? `第 ${state.page} / ${state.totalPages} 页`
+        : '第 1 页';
+      byId('pagePrev').disabled = state.page <= 1;
+      byId('pageNext').disabled = !state.totalPages || state.page >= state.totalPages;
 
-      for (const account of visible) {
+      for (const account of pageItems) {
         const row = document.createElement('tr');
         cell(row, account.email || account.id, 'name');
         const status = cell(row, '');
@@ -1034,7 +1107,7 @@
         body.appendChild(row);
       }
 
-      if (!visible.length) {
+      if (!pageItems.length) {
         const row = document.createElement('tr');
         const empty = cell(row, '没有符合条件的账号');
         empty.colSpan = 8;
@@ -1043,21 +1116,27 @@
       }
     }
 
-    async function verifyPassword() {
-      const response = await fetch('/admin/api/cli-accounts', { headers: auth() });
+    async function fetchAccounts(extra = {}) {
+      const response = await fetch(`/admin/api/cli-accounts?${accountsQuery(extra)}`, { headers: auth() });
       if (response.status === 401) {
-        throw new Error('密码错误');
+        const err = new Error('密码错误');
+        err.status = 401;
+        throw err;
       }
       if (!response.ok) {
-        throw new Error(`验证失败 (${response.status})`);
+        throw new Error(`accounts ${response.status}`);
       }
       return response.json();
+    }
+
+    async function verifyPassword() {
+      return fetchAccounts({ page: 1 });
     }
 
     async function enterApp(initialAccountsData) {
       showApp();
       if (initialAccountsData) {
-        state.accounts = initialAccountsData.accounts || [];
+        applyAccountsPayload(initialAccountsData);
         try {
           const healthResponse = await fetch('/health');
           const health = healthResponse.ok ? await healthResponse.json() : {};
@@ -1111,27 +1190,38 @@
         const healthResponse = await fetch('/health');
         if (!healthResponse.ok) throw new Error(`health ${healthResponse.status}`);
         const health = await healthResponse.json();
-        const accountsResponse = await fetch('/admin/api/cli-accounts', { headers: auth() });
-        if (accountsResponse.status === 401) {
-          logout();
-          byId('loginError').textContent = '登录已失效，请重新输入密码';
-          return;
-        }
-        if (!accountsResponse.ok) {
-          throw new Error(`accounts ${accountsResponse.status}`);
-        }
-        const data = await accountsResponse.json();
-        state.accounts = data.accounts || [];
+        const data = await fetchAccounts();
+        applyAccountsPayload(data);
         renderSummary(data.summary || {}, health);
         renderAccounts();
         byId('healthDot').classList.remove('error');
         byId('connectionState').textContent = '服务正常';
         byId('lastUpdated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
       } catch (error) {
+        if (error && error.status === 401) {
+          logout();
+          byId('loginError').textContent = '登录已失效，请重新输入密码';
+          return;
+        }
         byId('healthDot').classList.add('error');
         byId('connectionState').textContent = String(error.message || error);
         byId('lastUpdated').textContent = '更新失败';
       }
+    }
+
+    function scheduleAccountsReload(resetPage) {
+      if (resetPage) state.page = 1;
+      if (state.searchTimer) clearTimeout(state.searchTimer);
+      state.searchTimer = setTimeout(() => {
+        if (state.authed) refresh();
+      }, 300);
+    }
+
+    function changePage(delta) {
+      const next = state.page + delta;
+      if (next < 1 || (state.totalPages && next > state.totalPages)) return;
+      state.page = next;
+      refresh();
     }
 
     async function accountAction(id, action) {
@@ -1638,8 +1728,15 @@ async function stopRegister() {
     if (byId('clearImportButton')) byId('clearImportButton').onclick = () => clearImport();
     byId('previewButton').onclick = () => send(true);
     byId('importButton').onclick = () => send(false);
-    byId('search').oninput = renderAccounts;
-    byId('poolFilter').onchange = renderAccounts;
+    byId('search').oninput = () => scheduleAccountsReload(true);
+    byId('poolFilter').onchange = () => scheduleAccountsReload(true);
+    byId('pageSize').onchange = () => {
+      state.pageSize = Number(byId('pageSize').value) || 50;
+      state.page = 1;
+      refresh();
+    };
+    byId('pagePrev').onclick = () => changePage(-1);
+    byId('pageNext').onclick = () => changePage(1);
     byId('registerStartButton').onclick = startRegister;
     byId('registerStopButton').onclick = stopRegister;
     byId('registerRefreshButton').onclick = refreshRegister;

@@ -575,6 +575,93 @@ func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error 
 	return nil
 }
 
+// ListAccountsQuery filters and pages the accounts table for admin views.
+// Page is 1-based. PageSize defaults to 50 and is capped at 200.
+type ListAccountsQuery struct {
+	Pool     string // "", "ready", or "unavailable"
+	Q        string // substring match on id/email/reason/error
+	Page     int
+	PageSize int
+}
+
+// ListAccountsResult is one page of accounts plus the filtered total.
+type ListAccountsResult struct {
+	Items    []account.Account
+	Total    int
+	Page     int
+	PageSize int
+}
+
+// AccountStats is a lightweight global aggregate (no token rows).
+type AccountStats struct {
+	TotalAccounts       int
+	ReadyAccounts       int
+	UnavailableAccounts int
+	TotalRequests       int64
+	MaxActive           int
+	RefreshableAccounts int
+	QuotaActual         int64
+	QuotaLimit          int64
+	QuotaRemaining      int64
+	ReadyQuotaRemaining int64
+	QuotaObserved       int
+	ReadyQuotaObserved  int
+	Reasons             map[string]int
+}
+
+const (
+	defaultListPageSize = 50
+	maxListPageSize     = 200
+)
+
+func normalizeListQuery(query ListAccountsQuery) ListAccountsQuery {
+	page := query.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = defaultListPageSize
+	}
+	if pageSize > maxListPageSize {
+		pageSize = maxListPageSize
+	}
+	pool := strings.ToLower(strings.TrimSpace(query.Pool))
+	if pool != "ready" && pool != "unavailable" {
+		pool = ""
+	}
+	return ListAccountsQuery{
+		Pool:     pool,
+		Q:        strings.TrimSpace(query.Q),
+		Page:     page,
+		PageSize: pageSize,
+	}
+}
+
+func accountListWhere(query ListAccountsQuery) (string, []any) {
+	var clauses []string
+	var args []any
+	if query.Pool != "" {
+		clauses = append(clauses, "pool = ?")
+		args = append(args, query.Pool)
+	}
+	if query.Q != "" {
+		like := "%" + escapeLike(query.Q) + "%"
+		clauses = append(clauses,
+			`(id LIKE ? ESCAPE '\' OR email LIKE ? ESCAPE '\' OR unavailable_reason LIKE ? ESCAPE '\' OR last_error_code LIKE ? ESCAPE '\')`)
+		args = append(args, like, like, like, like)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func escapeLike(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
+}
+
 func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 	rows, err := r.db.QueryContext(
 		ctx,
@@ -591,44 +678,180 @@ func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 
 	var result []account.Account
 	for rows.Next() {
-		var item account.Account
-		var expiresAt, retryAt, lastSuccessAt, createdAt, updatedAt string
-		if err := rows.Scan(
-			&item.ID,
-			&item.AccessToken,
-			&item.RefreshToken,
-			&expiresAt,
-			&item.OIDCIssuer,
-			&item.OIDCClientID,
-			&item.Email,
-			&item.UserID,
-			&item.TeamID,
-			&item.Pool,
-			&item.UnavailableReason,
-			&retryAt,
-			&item.LastErrorCode,
-			&lastSuccessAt,
-			&item.QuotaActual,
-			&item.QuotaLimit,
-			&item.RequestCount,
-			&item.AuthenticationFails,
-			&item.MaxActive,
-			&createdAt,
-			&updatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan account: %w", err)
+		item, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
 		}
-		item.ExpiresAt = parseTime(expiresAt)
-		item.RetryAt = parseTime(retryAt)
-		item.LastSuccessAt = parseTime(lastSuccessAt)
-		item.CreatedAt = parseTime(createdAt)
-		item.UpdatedAt = parseTime(updatedAt)
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate accounts: %w", err)
 	}
 	return result, nil
+}
+
+func (r *SQLite) ListAccountsPage(ctx context.Context, query ListAccountsQuery) (ListAccountsResult, error) {
+	query = normalizeListQuery(query)
+	where, args := accountListWhere(query)
+
+	var total int
+	countSQL := `SELECT COUNT(*) FROM accounts ` + where
+	if err := r.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+		return ListAccountsResult{}, fmt.Errorf("count filtered accounts: %w", err)
+	}
+
+	offset := (query.Page - 1) * query.PageSize
+	listSQL := `SELECT id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
+			email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
+			last_success_at, quota_actual, quota_limit, request_count,
+			authentication_fails, max_active, created_at, updated_at
+		 FROM accounts ` + where + ` ORDER BY created_at, id LIMIT ? OFFSET ?`
+	listArgs := append(append([]any{}, args...), query.PageSize, offset)
+	rows, err := r.db.QueryContext(ctx, listSQL, listArgs...)
+	if err != nil {
+		return ListAccountsResult{}, fmt.Errorf("list accounts page: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]account.Account, 0, query.PageSize)
+	for rows.Next() {
+		item, err := scanAccount(rows)
+		if err != nil {
+			return ListAccountsResult{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ListAccountsResult{}, fmt.Errorf("iterate accounts page: %w", err)
+	}
+	return ListAccountsResult{
+		Items:    items,
+		Total:    total,
+		Page:     query.Page,
+		PageSize: query.PageSize,
+	}, nil
+}
+
+type accountScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanAccount(rows accountScanner) (account.Account, error) {
+	var item account.Account
+	var expiresAt, retryAt, lastSuccessAt, createdAt, updatedAt string
+	if err := rows.Scan(
+		&item.ID,
+		&item.AccessToken,
+		&item.RefreshToken,
+		&expiresAt,
+		&item.OIDCIssuer,
+		&item.OIDCClientID,
+		&item.Email,
+		&item.UserID,
+		&item.TeamID,
+		&item.Pool,
+		&item.UnavailableReason,
+		&retryAt,
+		&item.LastErrorCode,
+		&lastSuccessAt,
+		&item.QuotaActual,
+		&item.QuotaLimit,
+		&item.RequestCount,
+		&item.AuthenticationFails,
+		&item.MaxActive,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return account.Account{}, fmt.Errorf("scan account: %w", err)
+	}
+	item.ExpiresAt = parseTime(expiresAt)
+	item.RetryAt = parseTime(retryAt)
+	item.LastSuccessAt = parseTime(lastSuccessAt)
+	item.CreatedAt = parseTime(createdAt)
+	item.UpdatedAt = parseTime(updatedAt)
+	return item, nil
+}
+
+// AccountStats returns global pool aggregates without loading token rows.
+func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
+	stats := AccountStats{Reasons: make(map[string]int)}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN pool = 'ready' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN pool = 'unavailable' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(request_count), 0),
+			COALESCE(SUM(CASE WHEN max_active > 0 THEN max_active ELSE 1 END), 0),
+			COALESCE(SUM(CASE WHEN refresh_token != '' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE
+				WHEN quota_limit > 0 THEN
+					CASE
+						WHEN quota_actual < 0 THEN 0
+						WHEN quota_actual > quota_limit THEN quota_limit
+						ELSE quota_actual
+					END
+				ELSE 0
+			END), 0),
+			COALESCE(SUM(CASE WHEN quota_limit > 0 THEN quota_limit ELSE 0 END), 0),
+			COALESCE(SUM(CASE
+				WHEN quota_limit > 0 THEN
+					quota_limit - CASE
+						WHEN quota_actual < 0 THEN 0
+						WHEN quota_actual > quota_limit THEN quota_limit
+						ELSE quota_actual
+					END
+				ELSE 0
+			END), 0),
+			COALESCE(SUM(CASE
+				WHEN pool = 'ready' AND quota_limit > 0 THEN
+					quota_limit - CASE
+						WHEN quota_actual < 0 THEN 0
+						WHEN quota_actual > quota_limit THEN quota_limit
+						ELSE quota_actual
+					END
+				ELSE 0
+			END), 0),
+			COALESCE(SUM(CASE WHEN quota_limit > 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN pool = 'ready' AND quota_limit > 0 THEN 1 ELSE 0 END), 0)
+		FROM accounts`).Scan(
+		&stats.TotalAccounts,
+		&stats.ReadyAccounts,
+		&stats.UnavailableAccounts,
+		&stats.TotalRequests,
+		&stats.MaxActive,
+		&stats.RefreshableAccounts,
+		&stats.QuotaActual,
+		&stats.QuotaLimit,
+		&stats.QuotaRemaining,
+		&stats.ReadyQuotaRemaining,
+		&stats.QuotaObserved,
+		&stats.ReadyQuotaObserved,
+	)
+	if err != nil {
+		return AccountStats{}, fmt.Errorf("account stats: %w", err)
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT unavailable_reason, COUNT(*)
+		FROM accounts
+		WHERE pool = 'unavailable' AND unavailable_reason != ''
+		GROUP BY unavailable_reason`)
+	if err != nil {
+		return AccountStats{}, fmt.Errorf("account reason stats: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reason string
+		var count int
+		if err := rows.Scan(&reason, &count); err != nil {
+			return AccountStats{}, fmt.Errorf("scan reason stats: %w", err)
+		}
+		stats.Reasons[reason] = count
+	}
+	if err := rows.Err(); err != nil {
+		return AccountStats{}, fmt.Errorf("iterate reason stats: %w", err)
+	}
+	return stats, nil
 }
 
 func parseTime(value string) time.Time {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -177,6 +178,72 @@ func TestSaveAccountPersistsPoolTransitionAndEvent(t *testing.T) {
 	}
 	if events != 1 {
 		t.Fatalf("event count = %d; want 1", events)
+	}
+}
+
+func TestListAccountsPageAndStats(t *testing.T) {
+	ctx := context.Background()
+	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "page.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	now := time.Now().UTC()
+	for i := 0; i < 7; i++ {
+		pool := account.PoolReady
+		reason := account.UnavailableReason("")
+		if i >= 5 {
+			pool = account.PoolUnavailable
+			reason = account.ReasonQuota
+		}
+		id := "acc-" + strconv.Itoa(i)
+		item := account.Account{
+			ID: id, Email: id + "@ex.com",
+			AccessToken: "tok-" + id, Pool: pool, UnavailableReason: reason,
+			MaxActive: 2, RequestCount: int64(i + 1), QuotaActual: 10, QuotaLimit: 100,
+			CreatedAt: now.Add(time.Duration(i) * time.Second), UpdatedAt: now,
+		}
+		if i == 6 {
+			item.LastErrorCode = "refresh-failed"
+			item.UnavailableReason = account.ReasonAuth
+			item.RefreshToken = "r"
+		}
+		if err := repo.SaveAccount(ctx, item); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+
+	page, err := repo.ListAccountsPage(ctx, repository.ListAccountsQuery{Page: 2, PageSize: 3, Pool: "ready"})
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if page.Total != 5 || page.Page != 2 || page.PageSize != 3 || len(page.Items) != 2 {
+		t.Fatalf("ready page = total=%d page=%d size=%d items=%d", page.Total, page.Page, page.PageSize, len(page.Items))
+	}
+
+	search, err := repo.ListAccountsPage(ctx, repository.ListAccountsQuery{Q: "refresh-failed", Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if search.Total != 1 || len(search.Items) != 1 || search.Items[0].LastErrorCode != "refresh-failed" {
+		t.Fatalf("search = %#v", search)
+	}
+
+	stats, err := repo.AccountStats(ctx)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.TotalAccounts != 7 || stats.ReadyAccounts != 5 || stats.UnavailableAccounts != 2 {
+		t.Fatalf("pool stats = %#v", stats)
+	}
+	if stats.MaxActive != 14 || stats.RefreshableAccounts != 1 {
+		t.Fatalf("runtime stats = %#v", stats)
+	}
+	if stats.QuotaObserved != 7 || stats.QuotaRemaining != 7*90 || stats.ReadyQuotaRemaining != 5*90 {
+		t.Fatalf("quota stats = %#v", stats)
+	}
+	if stats.Reasons["quota"] != 1 || stats.Reasons["auth"] != 1 {
+		t.Fatalf("reasons = %#v", stats.Reasons)
 	}
 }
 

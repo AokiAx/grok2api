@@ -95,7 +95,8 @@ func WithDebugTrace(tracer *intercept.Tracer) Option {
 }
 
 type AdminService interface {
-	List(context.Context) ([]account.Account, error)
+	ListPage(context.Context, admin.ListAccountsQuery) (admin.ListAccountsPage, error)
+	Stats(context.Context) (admin.AccountStats, error)
 	Import(context.Context, admin.ImportRequest) (admin.ImportResult, error)
 	Delete(context.Context, string) error
 	Recover(context.Context, string) (account.Account, error)
@@ -206,7 +207,13 @@ func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
 		return
 	}
-	accounts, err := s.admin.List(request.Context())
+	query := parseAdminListQuery(request)
+	page, err := s.admin.ListPage(request.Context(), query)
+	if err != nil {
+		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
+		return
+	}
+	summary, err := s.admin.Stats(request.Context())
 	if err != nil {
 		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
 		return
@@ -214,82 +221,50 @@ func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
 	// Merge live scheduler lease counts. Active is memory-only and not in SQLite.
 	if live, ok := s.status.(LiveLeaseProvider); ok {
 		activeByID := live.ActiveByID()
-		for index := range accounts {
-			accounts[index].Active = activeByID[accounts[index].ID]
+		for index := range page.Accounts {
+			page.Accounts[index].Active = activeByID[page.Accounts[index].ID]
 		}
+		activeTotal := 0
+		for _, count := range activeByID {
+			activeTotal += count
+		}
+		summary.ActiveLeases = activeTotal
 	}
-	public := make([]map[string]any, 0, len(accounts))
-	for _, item := range accounts {
+	public := make([]map[string]any, 0, len(page.Accounts))
+	for _, item := range page.Accounts {
 		public = append(public, publicAccount(item))
 	}
+	totalPages := 0
+	if page.PageSize > 0 {
+		totalPages = (page.Total + page.PageSize - 1) / page.PageSize
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"count":    len(accounts),
-		"accounts": public,
-		"summary":  summarizeAccounts(accounts),
+		"count":       page.Total,
+		"total":       page.Total,
+		"page":        page.Page,
+		"page_size":   page.PageSize,
+		"total_pages": totalPages,
+		"pool":        query.Pool,
+		"q":           query.Q,
+		"accounts":    public,
+		"summary":     summary,
 	})
 }
 
-type accountSummary struct {
-	TotalAccounts       int   `json:"total_accounts"`
-	ReadyAccounts       int   `json:"ready_accounts"`
-	UnavailableAccounts int   `json:"unavailable_accounts"`
-	ActiveLeases        int   `json:"active_leases"`
-	MaxActive           int   `json:"max_active"`
-	TotalRequests       int64 `json:"total_requests"`
-	RefreshableAccounts int   `json:"refreshable_accounts"`
-	// QuotaActual/Limit keep legacy used/limit totals for compatibility.
-	QuotaActual int64 `json:"quota_actual"`
-	QuotaLimit  int64 `json:"quota_limit"`
-	// Free token remaining summary (preferred for panel display).
-	QuotaRemaining      int64          `json:"quota_remaining"`
-	ReadyQuotaRemaining int64          `json:"ready_quota_remaining"`
-	QuotaObserved       int            `json:"quota_observed_accounts"`
-	ReadyQuotaObserved  int            `json:"ready_quota_observed_accounts"`
-	Reasons             map[string]int `json:"reasons"`
-}
-
-func summarizeAccounts(accounts []account.Account) accountSummary {
-	summary := accountSummary{
-		TotalAccounts: len(accounts),
-		Reasons:       make(map[string]int),
+func parseAdminListQuery(request *http.Request) admin.ListAccountsQuery {
+	values := request.URL.Query()
+	page, _ := strconv.Atoi(strings.TrimSpace(values.Get("page")))
+	pageSize, _ := strconv.Atoi(strings.TrimSpace(values.Get("page_size")))
+	pool := strings.TrimSpace(values.Get("pool"))
+	if pool == "all" {
+		pool = ""
 	}
-	for _, item := range accounts {
-		if item.Pool == account.PoolReady {
-			summary.ReadyAccounts++
-		} else {
-			summary.UnavailableAccounts++
-			summary.Reasons[string(item.UnavailableReason)]++
-		}
-		summary.ActiveLeases += item.Active
-		maxActive := item.MaxActive
-		if maxActive <= 0 {
-			maxActive = 1
-		}
-		summary.MaxActive += maxActive
-		summary.TotalRequests += item.RequestCount
-		if item.RefreshToken != "" {
-			summary.RefreshableAccounts++
-		}
-		if item.QuotaLimit > 0 {
-			used := item.QuotaActual
-			if used < 0 {
-				used = 0
-			}
-			if used > item.QuotaLimit {
-				used = item.QuotaLimit
-			}
-			remaining := item.QuotaLimit - used
-			summary.QuotaActual += used
-			summary.QuotaLimit += item.QuotaLimit
-			summary.QuotaRemaining += remaining
-			summary.QuotaObserved++
-			if item.Pool == account.PoolReady {
-				summary.ReadyQuotaRemaining += remaining
-				summary.ReadyQuotaObserved++
-			}
-		}
+	return admin.ListAccountsQuery{
+		Pool:     pool,
+		Q:        strings.TrimSpace(values.Get("q")),
+		Page:     page,
+		PageSize: pageSize,
 	}
-	return summary
 }
 
 func publicAccount(item account.Account) map[string]any {
