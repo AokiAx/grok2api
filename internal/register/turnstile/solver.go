@@ -82,6 +82,8 @@ func (l *Local) Solve(ctx context.Context, sitekey, pageURL string) (string, err
 		ErrorID          int    `json:"errorId"`
 		ErrorDescription string `json:"errorDescription"`
 		TaskID           string `json:"taskId"`
+		// Theyka/Turnstile-Solver uses snake_case.
+		TaskIDAlt string `json:"task_id"`
 	}
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return "", err
@@ -89,7 +91,11 @@ func (l *Local) Solve(ctx context.Context, sitekey, pageURL string) (string, err
 	if created.ErrorID != 0 {
 		return "", fmt.Errorf("local solver create: %s", created.ErrorDescription)
 	}
-	if strings.TrimSpace(created.TaskID) == "" {
+	taskID := strings.TrimSpace(created.TaskID)
+	if taskID == "" {
+		taskID = strings.TrimSpace(created.TaskIDAlt)
+	}
+	if taskID == "" {
 		return "", fmt.Errorf("local solver missing taskId")
 	}
 	deadline := time.Now().Add(l.timeout)
@@ -102,7 +108,7 @@ func (l *Local) Solve(ctx context.Context, sitekey, pageURL string) (string, err
 			return "", ctx.Err()
 		case <-time.After(3 * time.Second):
 		}
-		resultURL := l.baseURL + "/result?id=" + url.QueryEscape(created.TaskID)
+		resultURL := l.baseURL + "/result?id=" + url.QueryEscape(taskID)
 		resultReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
 		if err != nil {
 			return "", err
@@ -117,26 +123,50 @@ func (l *Local) Solve(ctx context.Context, sitekey, pageURL string) (string, err
 		if resultResp.StatusCode >= 400 {
 			return "", fmt.Errorf("local solver result HTTP %d", resultResp.StatusCode)
 		}
+		// Theyka may return plain-text CAPTCHA_NOT_READY before JSON token payload.
+		trimmed := strings.TrimSpace(string(resultRaw))
+		if trimmed == "" ||
+			strings.EqualFold(trimmed, "CAPTCHA_NOT_READY") ||
+			strings.EqualFold(trimmed, "processing") ||
+			strings.EqualFold(trimmed, "captcha_not_ready") {
+			continue
+		}
 		var result struct {
 			ErrorID          int    `json:"errorId"`
 			ErrorDescription string `json:"errorDescription"`
 			Status           string `json:"status"`
-			Solution         struct {
+			// CapMonster-style nested token.
+			Solution struct {
 				Token string `json:"token"`
 			} `json:"solution"`
+			// Theyka/Turnstile-Solver returns the token in "value".
+			Value string `json:"value"`
+			// Some forks return a bare token field.
+			Token string `json:"token"`
 		}
 		if err := json.Unmarshal(resultRaw, &result); err != nil {
-			return "", err
+			// Keep polling on transient non-JSON wait responses.
+			if strings.HasPrefix(strings.ToUpper(trimmed), "CAPTCHA") {
+				continue
+			}
+			return "", fmt.Errorf("local solver result parse: %w (%s)", err, truncate(trimmed, 120))
 		}
 		if result.ErrorID != 0 {
 			return "", fmt.Errorf("local solver result: %s", result.ErrorDescription)
 		}
+		token := strings.TrimSpace(result.Solution.Token)
+		if token == "" {
+			token = strings.TrimSpace(result.Value)
+		}
+		if token == "" {
+			token = strings.TrimSpace(result.Token)
+		}
+		if token != "" {
+			return token, nil
+		}
 		switch strings.ToLower(result.Status) {
 		case "ready":
-			if strings.TrimSpace(result.Solution.Token) == "" {
-				return "", fmt.Errorf("local solver missing token")
-			}
-			return result.Solution.Token, nil
+			return "", fmt.Errorf("local solver missing token")
 		case "processing", "captcha_not_ready", "":
 			continue
 		default:
