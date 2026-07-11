@@ -121,9 +121,10 @@ func PrepareResponsesFromAnthropic(payload []byte, defaultModel string) ([]byte,
 
 // FinalizeResponsesUpstream applies catalog policy and hard invariants required
 // before calling the Grok /responses endpoint:
-//  1. default backend_search when the model supports it
-//  2. strip unknown fields (avoid 422)
-//  3. force stream:true so the gateway can always read SSE (non-stream clients
+//  1. strip unknown fields (avoid 422)
+//  2. default backend_search when the model supports it
+//  3. default-inject web_search + x_search tools when search is enabled
+//  4. force stream:true so the gateway can always read SSE (non-stream clients
 //     are aggregated after the fact)
 func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error) {
 	// Strip first so client extras (external_web_access, store, …) never reach
@@ -135,7 +136,10 @@ func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error)
 	if ensured, ensureErr := EnsureBackendSearch(body, hints.SupportsBackendSearch); ensureErr == nil {
 		body = ensured
 	}
-	// Second pass in case EnsureBackendSearch reintroduced nothing unexpected.
+	if withTools, toolErr := EnsureDefaultSearchTools(body, hints.SupportsBackendSearch); toolErr == nil {
+		body = withTools
+	}
+	// Second pass in case Ensure* reintroduced nothing unexpected / re-sanitize tools.
 	if stripped, stripErr := StripUnknownResponsesFields(body); stripErr == nil {
 		body = stripped
 	}

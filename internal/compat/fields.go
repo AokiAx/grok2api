@@ -146,6 +146,73 @@ func EnsureBackendSearch(payload []byte, enabled bool) ([]byte, error) {
 	return encoded, nil
 }
 
+// defaultSearchToolTypes are Grok built-in search tools injected when the model
+// supports backend search and the client has not disabled it.
+var defaultSearchToolTypes = []string{"web_search", "x_search"}
+
+// EnsureDefaultSearchTools prepends bare web_search / x_search tools when the
+// model supports native search and search is not explicitly disabled.
+//
+// Policy:
+//   - enabled=false → no-op
+//   - backend_search / web_search explicitly false → no-op
+//   - existing tools of the same type are left as-is (no duplicates)
+//   - client function tools are preserved after the search tools
+func EnsureDefaultSearchTools(payload []byte, enabled bool) ([]byte, error) {
+	if !enabled {
+		return payload, nil
+	}
+	var input map[string]any
+	if err := json.Unmarshal(payload, &input); err != nil {
+		return nil, fmt.Errorf("decode responses request: %w", err)
+	}
+	if raw, ok := input["backend_search"]; ok && !truthy(raw) {
+		return payload, nil
+	}
+	if raw, ok := input["web_search"]; ok && !truthy(raw) {
+		return payload, nil
+	}
+
+	existing, _ := input["tools"].([]any)
+	have := map[string]bool{}
+	for _, item := range existing {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		have[strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))] = true
+	}
+
+	prefix := make([]any, 0, len(defaultSearchToolTypes))
+	for _, typeName := range defaultSearchToolTypes {
+		if have[typeName] {
+			continue
+		}
+		prefix = append(prefix, map[string]any{"type": typeName})
+	}
+	if len(prefix) == 0 {
+		return payload, nil
+	}
+
+	merged := make([]any, 0, len(prefix)+len(existing))
+	merged = append(merged, prefix...)
+	merged = append(merged, existing...)
+	if MaxUpstreamTools > 0 && len(merged) > MaxUpstreamTools {
+		merged = merged[:MaxUpstreamTools]
+	}
+	input["tools"] = merged
+	// Keep native search flag aligned when we inject search tools.
+	if _, exists := input["backend_search"]; !exists {
+		input["backend_search"] = true
+	}
+
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode responses request: %w", err)
+	}
+	return encoded, nil
+}
+
 // SetJSONStreamFlag forces the stream field on a JSON object payload.
 func SetJSONStreamFlag(payload []byte, stream bool) ([]byte, error) {
 	var input map[string]any

@@ -485,9 +485,25 @@ func TestResponsesRouteFlattensFunctionToolsAndChoice(t *testing.T) {
 	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
 		t.Fatalf("decode forwarded: %v", err)
 	}
-	tool := forwarded["tools"].([]any)[0].(map[string]any)
-	if tool["name"] != "Inspect" {
-		t.Fatalf("tool name=%#v payload=%#v", tool["name"], forwarded)
+	tools, _ := forwarded["tools"].([]any)
+	var tool map[string]any
+	haveSearch := map[string]bool{}
+	for _, raw := range tools {
+		item, _ := raw.(map[string]any)
+		switch item["type"] {
+		case "web_search", "x_search":
+			haveSearch[item["type"].(string)] = true
+		case "function":
+			if item["name"] == "Inspect" {
+				tool = item
+			}
+		}
+	}
+	if tool == nil {
+		t.Fatalf("Inspect function missing: %#v", tools)
+	}
+	if !haveSearch["web_search"] || !haveSearch["x_search"] {
+		t.Fatalf("default search tools missing: %#v", tools)
 	}
 	if _, ok := tool["parameters"].(map[string]any); !ok {
 		t.Fatalf("top-level parameters missing: %#v", tool)

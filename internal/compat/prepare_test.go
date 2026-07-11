@@ -72,6 +72,67 @@ func TestFinalizeResponsesUpstreamForcesStreamAndStrips(t *testing.T) {
 			t.Fatalf("%s should be stripped: %#v", key, payload)
 		}
 	}
+	// Default-on search tools for models that support backend search.
+	tools, _ := payload["tools"].([]any)
+	types := map[string]bool{}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		types[stringValueLocal(tool["type"])] = true
+	}
+	if !types["web_search"] || !types["x_search"] {
+		t.Fatalf("expected default web_search+x_search tools, got %#v", tools)
+	}
+}
+
+func TestEnsureDefaultSearchToolsRespectsDisableAndDedupes(t *testing.T) {
+	disabled, err := compat.EnsureDefaultSearchTools(
+		[]byte(`{"model":"grok-4.5","backend_search":false,"tools":[{"type":"function","name":"a","parameters":{"type":"object"}}]}`),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("disabled: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(disabled, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("disabled should not inject search tools: %#v", tools)
+	}
+
+	withExisting := []byte(`{"model":"grok-4.5","tools":[{"type":"web_search"},{"type":"function","name":"a","parameters":{"type":"object"}}]}`)
+	out, err := compat.EnsureDefaultSearchTools(withExisting, true)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode2: %v", err)
+	}
+	tools, _ = payload["tools"].([]any)
+	// web_search already present → only x_search prepended → [x_search, web_search, function]
+	if len(tools) != 3 {
+		t.Fatalf("tools=%#v want 3", tools)
+	}
+	first := tools[0].(map[string]any)
+	if first["type"] != "x_search" {
+		t.Fatalf("first=%#v want x_search", first)
+	}
+	// no duplicate web_search
+	countWeb := 0
+	for _, raw := range tools {
+		if raw.(map[string]any)["type"] == "web_search" {
+			countWeb++
+		}
+	}
+	if countWeb != 1 {
+		t.Fatalf("web_search count=%d tools=%#v", countWeb, tools)
+	}
+}
+
+func stringValueLocal(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func TestFinalizeMapsExternalWebAccessWithoutDefaultSearch(t *testing.T) {
