@@ -246,12 +246,14 @@ func TestAdminListPaginationAndFilter(t *testing.T) {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var payload struct {
-		Total      int                      `json:"total"`
-		Page       int                      `json:"page"`
-		PageSize   int                      `json:"page_size"`
-		TotalPages int                      `json:"total_pages"`
-		Accounts   []map[string]any         `json:"accounts"`
-		Summary    struct{ TotalAccounts int `json:"total_accounts"` } `json:"summary"`
+		Total      int              `json:"total"`
+		Page       int              `json:"page"`
+		PageSize   int              `json:"page_size"`
+		TotalPages int              `json:"total_pages"`
+		Accounts   []map[string]any `json:"accounts"`
+		Summary    struct {
+			TotalAccounts int `json:"total_accounts"`
+		} `json:"summary"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode: %v", err)
