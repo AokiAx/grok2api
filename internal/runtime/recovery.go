@@ -65,7 +65,9 @@ const (
 	maxValidatingProbesPerTick   = 128
 	validatingProbeWorkers       = 16
 	maxAuthRefreshesPerTick      = 256
+	authRefreshWorkers           = 32
 	maxProactiveRefreshesPerTick = 256
+	proactiveRefreshWorkers      = 32
 	maxIsolatePerTick            = 500
 	proactiveRefreshLead         = 90 * time.Minute
 	authTransientBackoff         = 5 * time.Minute
@@ -198,10 +200,59 @@ func RecoverCredentials(
 		result.Skipped += len(candidates) - maxAuthRefreshesPerTick
 		candidates = candidates[:maxAuthRefreshesPerTick]
 	}
-	for _, item := range candidates {
-		refreshed, refreshErr := refresher.Refresh(ctx, item)
-		if refreshErr != nil {
-			applyRefreshFailure(&item, refreshErr, now)
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	type authOutcome struct {
+		item        account.Account
+		refreshed   account.Account
+		refreshErr  error
+		reason      account.UnavailableReason
+		errorCode   string
+		validateErr error
+		didRefresh  bool
+	}
+	outcomes := make([]authOutcome, len(candidates))
+	workers := authRefreshWorkers
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				item := candidates[index]
+				refreshed, refreshErr := refresher.Refresh(ctx, item)
+				if refreshErr != nil {
+					outcomes[index] = authOutcome{item: item, refreshErr: refreshErr}
+					continue
+				}
+				reason, errorCode, validateErr := validator.Validate(ctx, refreshed)
+				outcomes[index] = authOutcome{
+					item:        item,
+					refreshed:   refreshed,
+					reason:      reason,
+					errorCode:   errorCode,
+					validateErr: validateErr,
+					didRefresh:  true,
+				}
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, outcome := range outcomes {
+		if outcome.refreshErr != nil {
+			item := outcome.item
+			applyRefreshFailure(&item, outcome.refreshErr, now)
 			if isUnrecoverableAuthCode(item.LastErrorCode) {
 				result.Revoked++
 			} else {
@@ -212,31 +263,31 @@ func RecoverCredentials(
 			}
 			continue
 		}
-		reason, errorCode, validateErr := validator.Validate(ctx, refreshed)
-		if validateErr != nil {
+		refreshed := outcome.refreshed
+		if outcome.validateErr != nil {
 			refreshed.Pool = account.PoolUnavailable
 			refreshed.UnavailableReason = account.ReasonAuth
 			refreshed.RetryAt = now.Add(authValidationBackoff)
 			refreshed.LastErrorCode = "validation-failed"
 			result.Failed++
-		} else if reason == "" {
+		} else if outcome.reason == "" {
 			refreshed.Pool = account.PoolReady
 			refreshed.UnavailableReason = ""
 			refreshed.RetryAt = time.Time{}
 			refreshed.LastErrorCode = ""
 			refreshed.AuthenticationFails = 0
 			result.Recovered++
-		} else if isUnrecoverableAuthCode(errorCode) {
+		} else if isUnrecoverableAuthCode(outcome.errorCode) {
 			refreshed.Pool = account.PoolUnavailable
 			refreshed.UnavailableReason = account.ReasonDisabled
-			refreshed.LastErrorCode = errorCode
+			refreshed.LastErrorCode = outcome.errorCode
 			refreshed.RetryAt = now.Add(365 * 24 * time.Hour)
 			result.Revoked++
 		} else {
 			refreshed.Pool = account.PoolUnavailable
-			refreshed.UnavailableReason = reason
-			refreshed.LastErrorCode = errorCode
-			refreshed.RetryAt = credentialRetryAt(reason, now)
+			refreshed.UnavailableReason = outcome.reason
+			refreshed.LastErrorCode = outcome.errorCode
+			refreshed.RetryAt = credentialRetryAt(outcome.reason, now)
 			result.Failed++
 		}
 		refreshed.UpdatedAt = now.UTC()
@@ -296,10 +347,43 @@ func RefreshExpiring(
 		result.Skipped += len(candidates) - maxProactiveRefreshesPerTick
 		candidates = candidates[:maxProactiveRefreshesPerTick]
 	}
-	for _, item := range candidates {
-		refreshed, refreshErr := refresher.Refresh(ctx, item)
-		if refreshErr != nil {
-			applyRefreshFailure(&item, refreshErr, now)
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	type refreshOutcome struct {
+		item       account.Account
+		refreshed  account.Account
+		refreshErr error
+	}
+	outcomes := make([]refreshOutcome, len(candidates))
+	workers := proactiveRefreshWorkers
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				item := candidates[index]
+				refreshed, refreshErr := refresher.Refresh(ctx, item)
+				outcomes[index] = refreshOutcome{item: item, refreshed: refreshed, refreshErr: refreshErr}
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, outcome := range outcomes {
+		if outcome.refreshErr != nil {
+			item := outcome.item
+			applyRefreshFailure(&item, outcome.refreshErr, now)
 			if isUnrecoverableAuthCode(item.LastErrorCode) {
 				result.Revoked++
 			} else {
@@ -311,6 +395,7 @@ func RefreshExpiring(
 			continue
 		}
 		// Keep ready; only rotate credentials.
+		refreshed := outcome.refreshed
 		refreshed.Pool = account.PoolReady
 		refreshed.UnavailableReason = ""
 		refreshed.RetryAt = time.Time{}
@@ -855,7 +940,10 @@ func RunRecovery(
 				slog.Info("recovery isolated revoked accounts", "isolated", iso.Isolated, "failed", iso.Failed)
 			}
 		}
-		if config.credentialStore != nil && (config.quotaProber != nil || config.validator != nil) {
+		runQuota := func(label string) {
+			if config.credentialStore == nil || (config.quotaProber == nil && config.validator == nil) {
+				return
+			}
 			if res, err := RecoverQuota(
 				ctx,
 				pool,
@@ -866,9 +954,10 @@ func RunRecovery(
 				config.quotaRetry,
 				config.refresher,
 			); err != nil {
-				slog.Error("recovery quota tick failed", "error", err)
+				slog.Error("recovery quota tick failed", "phase", label, "error", err)
 			} else if res.Recovered > 0 || res.Deferred > 0 || res.Failed > 0 {
 				slog.Info("recovery quota tick",
+					"phase", label,
 					"recovered", res.Recovered,
 					"deferred", res.Deferred,
 					"failed", res.Failed,
@@ -876,6 +965,8 @@ func RunRecovery(
 				)
 			}
 		}
+		// Quota first: free-tier due queues are the largest backlog.
+		runQuota("early")
 		// Re-probe post-mint permission-denied accounts before spending refresh budget.
 		if config.credentialStore != nil && config.validator != nil {
 			if res, err := RecoverValidating(ctx, pool, config.credentialStore, config.validator, now); err != nil {
@@ -885,7 +976,7 @@ func RunRecovery(
 			}
 		}
 		if config.credentialStore != nil && config.refresher != nil {
-			if _, err := RefreshExpiring(
+			if res, err := RefreshExpiring(
 				ctx,
 				pool,
 				config.credentialStore,
@@ -894,10 +985,16 @@ func RunRecovery(
 				proactiveRefreshLead,
 			); err != nil {
 				slog.Error("recovery proactive refresh tick failed", "error", err)
+			} else if res.Refreshed > 0 || res.Failed > 0 || res.Revoked > 0 {
+				slog.Info("recovery proactive refresh",
+					"refreshed", res.Refreshed,
+					"failed", res.Failed,
+					"revoked", res.Revoked,
+				)
 			}
 		}
 		if config.credentialStore != nil && config.refresher != nil && config.validator != nil {
-			if _, err := RecoverCredentials(
+			if res, err := RecoverCredentials(
 				ctx,
 				pool,
 				config.credentialStore,
@@ -906,8 +1003,16 @@ func RunRecovery(
 				now,
 			); err != nil {
 				slog.Error("recovery credential tick failed", "error", err)
+			} else if res.Recovered > 0 || res.Failed > 0 || res.Revoked > 0 {
+				slog.Info("recovery credentials",
+					"recovered", res.Recovered,
+					"failed", res.Failed,
+					"revoked", res.Revoked,
+				)
 			}
 		}
+		// Second quota pass so due free accounts do not wait a full auth cycle.
+		runQuota("late")
 	}
 	runOnce(time.Now().UTC())
 	ticker := time.NewTicker(interval)
