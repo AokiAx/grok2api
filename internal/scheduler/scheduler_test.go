@@ -55,47 +55,45 @@ func TestFillFirstBurnsOneAccountBeforeNext(t *testing.T) {
 	}
 }
 
-func TestRoundRobinUsesFullPoolWhenActiveSizeZero(t *testing.T) {
-	s := scheduler.New([]account.Account{
-		readyAccount("a"),
-		readyAccount("b"),
-		readyAccount("c"),
-	}).WithStrategy(scheduler.StrategyRoundRobin).ApplyActiveSize(0)
-
-	seen := map[string]int{}
-	for i := 0; i < 30; i++ {
-		lease, err := s.Acquire(context.Background())
-		if err != nil {
-			t.Fatalf("acquire %d: %v", i, err)
-		}
-		seen[lease.Account().ID]++
-		lease.Release()
-	}
-	if len(seen) != 3 {
-		t.Fatalf("used %#v; want all 3 ready accounts", seen)
-	}
-}
-
-func TestActiveSizeOptionalCap(t *testing.T) {
+func TestHotSetCapsConcurrentFanOut(t *testing.T) {
+	// Hold 4 concurrent leases with active_size=2 and max_active=1 each →
+	// only 2 accounts can ever be in use; other ready stay cold.
 	s := scheduler.New([]account.Account{
 		readyAccount("a"),
 		readyAccount("b"),
 		readyAccount("c"),
 		readyAccount("d"),
 		readyAccount("e"),
-	}).WithStrategy(scheduler.StrategyRoundRobin).ApplyActiveSize(2)
+	}).WithStrategy(scheduler.StrategyFillFirst).ApplyActiveSize(2)
 
-	seen := map[string]int{}
-	for i := 0; i < 20; i++ {
+	var held []*scheduler.Lease
+	for i := 0; i < 2; i++ {
 		lease, err := s.Acquire(context.Background())
 		if err != nil {
-			t.Fatalf("acquire %d: %v", i, err)
+			t.Fatalf("acquire hot %d: %v", i, err)
 		}
-		seen[lease.Account().ID]++
-		lease.Release()
+		held = append(held, lease)
+	}
+	// Third acquire must wait/fail while both hot slots are busy.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.Acquire(ctx); err == nil {
+		t.Fatal("expected no third lease while hot set is full and busy")
+	}
+	seen := map[string]struct{}{}
+	for _, lease := range held {
+		seen[lease.Account().ID] = struct{}{}
 	}
 	if len(seen) != 2 {
-		t.Fatalf("used %d distinct %#v; want optional cap of 2", len(seen), seen)
+		t.Fatalf("held %#v; want 2 hot accounts", seen)
+	}
+	for _, id := range []string{"c", "d", "e"} {
+		if _, ok := seen[id]; ok {
+			t.Fatalf("cold %s was used", id)
+		}
+	}
+	for _, lease := range held {
+		lease.Release()
 	}
 }
 

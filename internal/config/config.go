@@ -34,9 +34,10 @@ type Config struct {
 	// rotating through quota/auth/permission-denied failures (like CPA
 	// max-retry-credentials). Without this, one bad request can park the pool.
 	MaxAttempts int `json:"cli_pool_max_attempts"`
-	// Strategy is round-robin (default) or fill-first — CLIProxyAPI-style.
+	// Strategy is fill-first (default) or round-robin.
 	Strategy string `json:"cli_pool_strategy"`
-	// ActiveSize optionally caps distinct serving accounts. 0 = full ready pool.
+	// ActiveSize is the hot-set size: only this many ready accounts serve
+	// traffic; the rest stay cold until a hot account is parked. 0 = unlimited.
 	ActiveSize int `json:"cli_pool_active_size"`
 	// Sticky pool keeps the same Grok account for a client session / prompt
 	// fingerprint so prefix cache (cached_tokens) stays warm.
@@ -91,7 +92,7 @@ func Defaults() Config {
 		AcquireTimeoutSec:   60,
 		MaxAttempts:         3,
 		Strategy:            "fill-first",
-		ActiveSize:          0,
+		ActiveSize:          32,
 		StickyPool:          true,
 		StickyTTLMinutes:    30,
 		QuotaRetryMinutes:   1440,

@@ -65,7 +65,7 @@ func New(accounts []account.Account) *Scheduler {
 		stickyTTL:  defaultStickyTTL,
 		stickyOn:   true,
 		strategy:   StrategyFillFirst,
-		activeSize: 0,
+		activeSize: 32,
 		hot:        make(map[string]struct{}),
 	}
 	for index := range accounts {
@@ -125,7 +125,8 @@ func (s *Scheduler) ApplyMaxActive(n int) *Scheduler {
 	return s
 }
 
-// ApplyActiveSize optionally limits the serving set. 0 = all ready (recommended).
+// ApplyActiveSize caps how many ready accounts may serve traffic (hot set).
+// 0 disables the cap (not recommended for free-tier pools).
 func (s *Scheduler) ApplyActiveSize(n int) *Scheduler {
 	if s == nil {
 		return s
@@ -226,7 +227,7 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 
 	strategy := s.strategy
 	if strategy == "" {
-		strategy = StrategyRoundRobin
+		strategy = StrategyFillFirst
 	}
 
 	var chosen string
