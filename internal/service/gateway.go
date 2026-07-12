@@ -37,9 +37,12 @@ type Gateway struct {
 	quotaRetry      time.Duration
 	rateRetry       time.Duration
 	validatingRetry time.Duration
-	now             func() time.Time
-	circuitMu       sync.Mutex
-	circuit         CircuitStatus
+	// maxAttempts caps how many accounts one request may park while rotating.
+	// Default 3 — never equal to ReadyCount() (that burns the whole pool).
+	maxAttempts int
+	now         func() time.Time
+	circuitMu   sync.Mutex
+	circuit     CircuitStatus
 }
 
 type CircuitStatus struct {
@@ -68,6 +71,14 @@ func WithValidatingRetry(duration time.Duration) Option {
 	}
 }
 
+// WithMaxAttempts sets the per-request account rotation budget.
+// Values <= 0 fall back to 3.
+func WithMaxAttempts(n int) Option {
+	return func(gateway *Gateway) {
+		gateway.maxAttempts = n
+	}
+}
+
 func NewGateway(
 	scheduler *scheduler.Scheduler,
 	store AccountStore,
@@ -81,10 +92,14 @@ func NewGateway(
 		quotaRetry:      24 * time.Hour,
 		rateRetry:       45 * time.Second,
 		validatingRetry: 45 * time.Second,
+		maxAttempts:     3,
 		now:             time.Now,
 	}
 	for _, option := range options {
 		option(gateway)
+	}
+	if gateway.maxAttempts <= 0 {
+		gateway.maxAttempts = 3
 	}
 	return gateway
 }
@@ -103,9 +118,18 @@ func (g *Gateway) Request(
 	if circuitError := g.quotaCircuitError(); circuitError != nil {
 		return ChatResult{}, circuitError
 	}
-	attempts := g.scheduler.ReadyCount()
-	if attempts == 0 {
+	ready := g.scheduler.ReadyCount()
+	if ready == 0 {
 		return ChatResult{}, g.poolUnavailable()
+	}
+	// Critical: never rotate through the entire ready pool. One exhausted or
+	// permission-denied response would otherwise park every credential.
+	attempts := g.maxAttempts
+	if attempts <= 0 {
+		attempts = 3
+	}
+	if ready < attempts {
+		attempts = ready
 	}
 
 	attempted := 0

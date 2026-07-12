@@ -30,6 +30,10 @@ type Config struct {
 	DataDir           string `json:"data_dir"`
 	MaxConcurrent     int    `json:"cli_pool_max_concurrent"`
 	AcquireTimeoutSec int    `json:"cli_pool_acquire_timeout"`
+	// MaxAttempts caps how many ready accounts a single request may burn when
+	// rotating through quota/auth/permission-denied failures. Without this,
+	// one bad request can park the entire ready pool.
+	MaxAttempts int `json:"cli_pool_max_attempts"`
 	// Sticky pool keeps the same Grok account for a client session / prompt
 	// fingerprint so prefix cache (cached_tokens) stays warm.
 	StickyPool        bool `json:"cli_pool_sticky"`
@@ -81,6 +85,7 @@ func Defaults() Config {
 		DataDir:             "data",
 		MaxConcurrent:       1,
 		AcquireTimeoutSec:   60,
+		MaxAttempts:         3,
 		StickyPool:          true,
 		StickyTTLMinutes:    30,
 		QuotaRetryMinutes:   1440,
@@ -141,6 +146,12 @@ func normalize(config *Config) {
 	}
 	if config.MaxWorkers <= 0 {
 		config.MaxWorkers = 1
+	}
+	if config.MaxAttempts <= 0 {
+		config.MaxAttempts = 3
+	}
+	if config.MaxConcurrent <= 0 {
+		config.MaxConcurrent = 1
 	}
 	if strings.TrimSpace(config.EmailProvider) == "" {
 		config.EmailProvider = "cfmail"

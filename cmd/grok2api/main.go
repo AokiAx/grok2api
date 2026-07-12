@@ -159,7 +159,14 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	if settings.StickyPool {
 		slog.Info("account pool sticky enabled", "ttl", stickyTTL.String())
 	}
-	slog.Info("account pool concurrency", "max_active_per_account", maxConcurrent)
+	maxAttempts := settings.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	slog.Info("account pool concurrency",
+		"max_active_per_account", maxConcurrent,
+		"max_attempts_per_request", maxAttempts,
+	)
 	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
 	upstreamClient := upstream.NewClient(
 		settings.ProxyBaseURL,
@@ -172,6 +179,7 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		upstreamClient,
 		service.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
+		service.WithMaxAttempts(maxAttempts),
 	)
 	// Optional temporary interceptor: logs client + upstream stages for protocol debugging.
 	var apiGateway api.Gateway = gateway

@@ -119,14 +119,10 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 				// Busy sticky account: fall through to another ready account.
 			}
 		}
-		// 2) Round-robin among ready.
-		for range len(s.ready) {
-			id := s.ready[0]
-			s.ready = append(s.ready[1:], id)
-			item := s.accounts[id]
-			if item == nil || !item.Available(now) {
-				continue
-			}
+		// 2) Prefer least-used ready account so traffic does not spray evenly
+		// across the whole pool (which burns every credential on failures).
+		id, item := s.pickLeastUsedReadyLocked(now)
+		if item != nil {
 			item.Active++
 			item.RequestCount++
 			if s.stickyOn && stickyKey != "" {
@@ -144,6 +140,27 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 		case <-s.notify:
 		}
 	}
+}
+
+// pickLeastUsedReadyLocked returns the free ready account with the lowest
+// RequestCount (tie-break by id). Avoids pure round-robin spraying that makes
+// every credential share fatal quota/auth errors equally.
+func (s *Scheduler) pickLeastUsedReadyLocked(now time.Time) (string, *account.Account) {
+	var bestID string
+	var best *account.Account
+	for _, id := range s.ready {
+		item := s.accounts[id]
+		if item == nil || !item.Available(now) {
+			continue
+		}
+		if best == nil ||
+			item.RequestCount < best.RequestCount ||
+			(item.RequestCount == best.RequestCount && id < bestID) {
+			best = item
+			bestID = id
+		}
+	}
+	return bestID, best
 }
 
 func (s *Scheduler) bumpStickyLocked(key, accountID string, now time.Time) {

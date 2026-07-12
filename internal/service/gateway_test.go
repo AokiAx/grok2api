@@ -256,6 +256,39 @@ func TestPermissionDeniedRotatesToNextAccount(t *testing.T) {
 	}
 }
 
+func TestMaxAttemptsDoesNotBurnEntireReadyPool(t *testing.T) {
+	// Regression: attempts used to equal ReadyCount(), so one bad request
+	// parked every credential. Cap must leave remaining accounts ready.
+	store := &fakeStore{}
+	up := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"b": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"c": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"d": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+		"e": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+	}}
+	pool := scheduler.New([]account.Account{
+		ready("a"), ready("b"), ready("c"), ready("d"), ready("e"),
+	})
+	gateway := service.NewGateway(
+		pool,
+		store,
+		up,
+		service.WithMaxAttempts(2),
+		service.WithQuotaRetry(time.Hour),
+	)
+	_, err := gateway.Chat(context.Background(), []byte(`{}`), false)
+	if _, ok := service.AsPoolUnavailable(err); !ok {
+		t.Fatalf("error=%v; want pool unavailable after attempt budget", err)
+	}
+	if pool.ReadyCount() != 3 {
+		t.Fatalf("ready=%d; want 3 remaining after max_attempts=2", pool.ReadyCount())
+	}
+	if len(store.saved) != 2 {
+		t.Fatalf("parked=%d; want 2", len(store.saved))
+	}
+}
+
 func TestPermissionDeniedAloneReturnsPoolUnavailable(t *testing.T) {
 	store := &fakeStore{}
 	gateway := service.NewGateway(

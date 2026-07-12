@@ -11,6 +11,7 @@
   "default_model": "grok-4.5",
   "data_dir": "data",
   "cli_pool_max_concurrent": 2,
+  "cli_pool_max_attempts": 3,
   "cli_pool_acquire_timeout": 60,
   "cli_pool_sticky": true,
   "cli_pool_sticky_ttl_minutes": 30,
