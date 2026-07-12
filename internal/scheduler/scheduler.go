@@ -216,9 +216,30 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 // until a hot slot frees). Strategy only orders within that set.
 func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 	candidates := make([]string, 0, len(s.ready))
-	for _, id := range s.ready {
+	// Copy ids first: parking exhausted accounts mutates s.ready.
+	readyIDs := append([]string(nil), s.ready...)
+	for _, id := range readyIDs {
 		item := s.accounts[id]
-		if item == nil || !item.Available(now) {
+		if item == nil {
+			continue
+		}
+		// Known-empty free quotas must leave ready immediately so Status() and
+		// acquire waiters do not treat them as capacity.
+		if item.Pool == account.PoolReady && item.QuotaExhausted() {
+			item.Pool = account.PoolUnavailable
+			item.UnavailableReason = account.ReasonQuota
+			if item.LastErrorCode == "" {
+				item.LastErrorCode = "local:quota-exhausted"
+			}
+			if item.RetryAt.IsZero() || item.RetryAt.Before(now) {
+				item.RetryAt = now.Add(24 * time.Hour)
+			}
+			item.UpdatedAt = now.UTC()
+			s.removeReadyLocked(id)
+			s.revision++
+			continue
+		}
+		if !item.Available(now) {
 			continue
 		}
 		if !s.eligibleLocked(id) {

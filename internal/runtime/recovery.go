@@ -89,6 +89,52 @@ type IsolationResult struct {
 	Failed   int
 }
 
+// IsolateExhaustedReady parks ready accounts whose stored free-quota counters
+// already show zero remaining capacity. Prevents dead free accounts from
+// bloating the ready pool and burning live request attempts.
+func IsolateExhaustedReady(
+	ctx context.Context,
+	pool *scheduler.Scheduler,
+	store CredentialStore,
+	now time.Time,
+	quotaRetry time.Duration,
+) (IsolationResult, error) {
+	if store == nil {
+		return IsolationResult{}, nil
+	}
+	if quotaRetry <= 0 {
+		quotaRetry = 24 * time.Hour
+	}
+	accounts, err := store.ListAccounts(ctx)
+	if err != nil {
+		return IsolationResult{}, fmt.Errorf("list accounts for exhausted isolation: %w", err)
+	}
+	result := IsolationResult{}
+	for _, item := range accounts {
+		if item.Pool != account.PoolReady || !item.QuotaExhausted() {
+			result.Skipped++
+			continue
+		}
+		if result.Isolated >= maxIsolatePerTick {
+			result.Skipped++
+			continue
+		}
+		item.Pool = account.PoolUnavailable
+		item.UnavailableReason = account.ReasonQuota
+		if item.LastErrorCode == "" {
+			item.LastErrorCode = "local:quota-exhausted"
+		}
+		item.RetryAt = now.Add(quotaRetry)
+		item.UpdatedAt = now.UTC()
+		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+			result.Failed++
+			continue
+		}
+		result.Isolated++
+	}
+	return result, nil
+}
+
 // IsolateUnrecoverableAuth moves permanently dead credentials out of the auth
 // recovery queue into reason=disabled so status/ops can see them separately
 // and recovery ticks stop wasting refresh budget on them.
@@ -823,6 +869,11 @@ func RunRecovery(
 				slog.Error("recovery auth isolation tick failed", "error", err)
 			} else if iso.Isolated > 0 {
 				slog.Info("recovery isolated revoked accounts", "isolated", iso.Isolated, "failed", iso.Failed)
+			}
+			if iso, err := IsolateExhaustedReady(ctx, pool, config.credentialStore, now, config.quotaRetry); err != nil {
+				slog.Error("recovery exhausted-ready isolation tick failed", "error", err)
+			} else if iso.Isolated > 0 {
+				slog.Info("recovery parked exhausted ready accounts", "isolated", iso.Isolated, "failed", iso.Failed)
 			}
 		}
 		runQuota := func(label string) {

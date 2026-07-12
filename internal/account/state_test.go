@@ -44,6 +44,17 @@ func TestAccountAvailabilityUsesTwoPools(t *testing.T) {
 			},
 			available: false,
 		},
+		{
+			name: "ready account with exhausted free quota is unavailable",
+			account: account.Account{
+				ID:          "empty",
+				Pool:        account.PoolReady,
+				MaxActive:   1,
+				QuotaActual: 2000000,
+				QuotaLimit:  2000000,
+			},
+			available: false,
+		},
 	}
 
 	for _, tt := range tests {

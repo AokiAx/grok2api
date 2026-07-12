@@ -44,10 +44,16 @@ type Account struct {
 	UpdatedAt           time.Time
 }
 
+// QuotaExhausted reports whether free-tier counters already show no remaining
+// capacity. Used to keep known-empty accounts out of the ready scheduler.
+func (a Account) QuotaExhausted() bool {
+	return a.QuotaLimit > 0 && a.QuotaActual >= a.QuotaLimit
+}
+
 func (a Account) Available(_ time.Time) bool {
 	maxActive := a.MaxActive
 	if maxActive <= 0 {
 		maxActive = 1
 	}
-	return a.Pool == PoolReady && a.Active < maxActive
+	return a.Pool == PoolReady && a.Active < maxActive && !a.QuotaExhausted()
 }
