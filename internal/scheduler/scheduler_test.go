@@ -56,15 +56,14 @@ func TestFillFirstBurnsOneAccountBeforeNext(t *testing.T) {
 }
 
 func TestHotSetCapsConcurrentFanOut(t *testing.T) {
-	// Hold 4 concurrent leases with active_size=2 and max_active=1 each →
-	// only 2 accounts can ever be in use; other ready stay cold.
+	// active_size=2, max_active=1: only 2 accounts serve; cold stay unused.
 	s := scheduler.New([]account.Account{
 		readyAccount("a"),
 		readyAccount("b"),
 		readyAccount("c"),
 		readyAccount("d"),
 		readyAccount("e"),
-	}).WithStrategy(scheduler.StrategyFillFirst).ApplyActiveSize(2)
+	}).WithStrategy(scheduler.StrategyRoundRobin).ApplyActiveSize(2)
 
 	var held []*scheduler.Lease
 	for i := 0; i < 2; i++ {
@@ -74,7 +73,6 @@ func TestHotSetCapsConcurrentFanOut(t *testing.T) {
 		}
 		held = append(held, lease)
 	}
-	// Third acquire must wait/fail while both hot slots are busy.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, err := s.Acquire(ctx); err == nil {
@@ -85,15 +83,49 @@ func TestHotSetCapsConcurrentFanOut(t *testing.T) {
 		seen[lease.Account().ID] = struct{}{}
 	}
 	if len(seen) != 2 {
-		t.Fatalf("held %#v; want 2 hot accounts", seen)
+		t.Fatalf("held %#v; want exactly 2 hot accounts", seen)
 	}
-	for _, id := range []string{"c", "d", "e"} {
-		if _, ok := seen[id]; ok {
-			t.Fatalf("cold %s was used", id)
-		}
-	}
+	// Releasing and acquiring many times must never expand beyond hot set of 2.
 	for _, lease := range held {
 		lease.Release()
+	}
+	all := map[string]int{}
+	for i := 0; i < 20; i++ {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("loop %d: %v", i, err)
+		}
+		all[lease.Account().ID]++
+		lease.Release()
+	}
+	if len(all) != 2 {
+		t.Fatalf("after release loop used %#v; want still only hot set of 2", all)
+	}
+}
+
+func TestHotSetRoundRobinSpreadsLoad(t *testing.T) {
+	// Within hot set of 3, RR must use all 3 — not stack on one account.
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+		readyAccount("c"),
+		readyAccount("d"),
+	}).WithStrategy(scheduler.StrategyRoundRobin).ApplyActiveSize(3)
+
+	seen := map[string]int{}
+	for i := 0; i < 30; i++ {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		seen[lease.Account().ID]++
+		lease.Release()
+	}
+	if len(seen) != 3 {
+		t.Fatalf("used %#v; want exactly hot set of 3", seen)
+	}
+	if _, ok := seen["d"]; ok {
+		t.Fatal("cold account d received traffic")
 	}
 }
 

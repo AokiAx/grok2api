@@ -27,10 +27,12 @@ const (
 
 func ParseStrategy(raw string) Strategy {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case string(StrategyRoundRobin), "round_robin", "rr":
-		return StrategyRoundRobin
-	default:
+	case string(StrategyFillFirst), "fill_first", "fillfirst":
 		return StrategyFillFirst
+	default:
+		// Default round-robin *within the hot set* so concurrent load spreads
+		// across the working set instead of stacking on one account.
+		return StrategyRoundRobin
 	}
 }
 
@@ -58,13 +60,15 @@ type Scheduler struct {
 
 func New(accounts []account.Account) *Scheduler {
 	scheduler := &Scheduler{
-		accounts:   make(map[string]*account.Account, len(accounts)),
-		notify:     make(chan struct{}, 1),
-		revision:   1,
-		sticky:     make(map[string]stickyEntry),
-		stickyTTL:  defaultStickyTTL,
-		stickyOn:   true,
-		strategy:   StrategyFillFirst,
+		accounts:  make(map[string]*account.Account, len(accounts)),
+		notify:    make(chan struct{}, 1),
+		revision:  1,
+		sticky:    make(map[string]stickyEntry),
+		stickyTTL: defaultStickyTTL,
+		stickyOn:  true,
+		strategy:  StrategyRoundRobin,
+		// Hot set: only this many ready accounts serve. Rest are cold reserve.
+		// Concurrent capacity ≈ activeSize * MaxActive (see ApplyMaxActive).
 		activeSize: 32,
 		hot:        make(map[string]struct{}),
 	}
@@ -207,8 +211,9 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 	}
 }
 
-// pickReadyLocked selects among free ready accounts using strategy.
-// Optional activeSize filters eligibility like a soft cap; 0 = full pool.
+// pickReadyLocked selects among free *eligible* ready accounts.
+// With activeSize>0, eligibility is the hot set only (cold ready never serve
+// until a hot slot frees). Strategy only orders within that set.
 func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 	candidates := make([]string, 0, len(s.ready))
 	for _, id := range s.ready {
@@ -227,7 +232,7 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 
 	strategy := s.strategy
 	if strategy == "" {
-		strategy = StrategyFillFirst
+		strategy = StrategyRoundRobin
 	}
 
 	var chosen string

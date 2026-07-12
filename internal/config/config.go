@@ -88,10 +88,10 @@ func Defaults() Config {
 		ClientVersion:       "0.2.93",
 		DefaultModel:        "grok-4.5",
 		DataDir:             "data",
-		MaxConcurrent:       1,
+		MaxConcurrent:       4,
 		AcquireTimeoutSec:   60,
 		MaxAttempts:         3,
-		Strategy:            "fill-first",
+		Strategy:            "round-robin",
 		ActiveSize:          32,
 		StickyPool:          true,
 		StickyTTLMinutes:    30,
@@ -158,12 +158,14 @@ func normalize(config *Config) {
 		config.MaxAttempts = 3
 	}
 	switch strings.ToLower(strings.TrimSpace(config.Strategy)) {
-	case "round-robin", "round_robin", "rr":
-		config.Strategy = "round-robin"
-	default:
-		// Default fill-first: concentrate traffic on a small set of free
-		// accounts instead of fanning out across the entire ready pool.
+	case "fill-first", "fill_first", "fillfirst":
 		config.Strategy = "fill-first"
+	default:
+		// Round-robin within the hot set (active_size).
+		config.Strategy = "round-robin"
+	}
+	if config.ActiveSize <= 0 {
+		config.ActiveSize = 32
 	}
 	if config.ActiveSize < 0 {
 		config.ActiveSize = 0
