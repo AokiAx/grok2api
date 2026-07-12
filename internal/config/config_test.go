@@ -108,24 +108,7 @@ func TestLoadUsesSafeDefaultsWhenFileMissing(t *testing.T) {
 	if got.DefaultModel == "" || got.ProxyBaseURL == "" {
 		t.Fatal("upstream defaults must be populated")
 	}
-}
-
-func TestTimeoutHelpers(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.TurnstileTimeoutSec = 12
-	cfg.EmailCodeTimeoutSec = 34
-	if cfg.TurnstileTimeout() != 12*time.Second || cfg.EmailCodeTimeout() != 34*time.Second {
-		t.Fatalf("timeouts = %v %v", cfg.TurnstileTimeout(), cfg.EmailCodeTimeout())
-	}
-}
-
-func TestNormalizeFillsEmptyRegisterDefaults(t *testing.T) {
-	// Load with empty file path triggers defaults + normalize.
-	cfg, err := config.Load(filepath.Join(t.TempDir(), "missing.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.AccountsBase == "" || cfg.EmailProvider == "" || cfg.TurnstileSolver == "" {
-		t.Fatalf("cfg=%#v", cfg)
+	if got.MaxAttempts != 3 || got.Strategy != "round-robin" {
+		t.Fatalf("pool defaults=%#v", got)
 	}
 }

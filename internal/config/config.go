@@ -10,14 +10,8 @@ import (
 	"time"
 )
 
-type CfmailAccount struct {
-	Name          string `json:"name"`
-	WorkerDomain  string `json:"worker_domain"`
-	EmailDomain   string `json:"email_domain"`
-	AdminPassword string `json:"admin_password"`
-	Enabled       *bool  `json:"enabled,omitempty"`
-}
-
+// Config holds API server and pool settings only.
+// Account registration lives in the external grok-register project.
 type Config struct {
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
@@ -31,13 +25,11 @@ type Config struct {
 	MaxConcurrent     int    `json:"cli_pool_max_concurrent"`
 	AcquireTimeoutSec int    `json:"cli_pool_acquire_timeout"`
 	// MaxAttempts caps how many ready accounts a single request may burn when
-	// rotating through quota/auth/permission-denied failures (like CPA
-	// max-retry-credentials). Without this, one bad request can park the pool.
+	// rotating through quota/auth/permission-denied failures.
 	MaxAttempts int `json:"cli_pool_max_attempts"`
-	// Strategy is fill-first (default) or round-robin.
+	// Strategy is round-robin (default) or fill-first.
 	Strategy string `json:"cli_pool_strategy"`
-	// ActiveSize is the hot-set size: only this many ready accounts serve
-	// traffic; the rest stay cold until a hot account is parked. 0 = unlimited.
+	// ActiveSize optionally caps hot-set size; 0 = full ready pool.
 	ActiveSize int `json:"cli_pool_active_size"`
 	// Sticky pool keeps the same Grok account for a client session / prompt
 	// fingerprint so prefix cache (cached_tokens) stays warm.
@@ -47,72 +39,33 @@ type Config struct {
 	RateRetrySeconds  int  `json:"rate_retry_seconds"`
 	RequestTimeoutSec int  `json:"timeout_secs"`
 
-	// Register / anti-bot settings (compatible with Python config.json keys).
-	AccountsBase         string          `json:"accounts_base"`
-	TurnstileSitekey     string          `json:"turnstile_sitekey"`
-	CapMonsterAPIBase    string          `json:"capmonster_api_base"`
-	CapMonsterAPIKey     string          `json:"capmonster_api_key"`
-	TurnstileSolver      string          `json:"turnstile_solver"`
-	TurnstileSolverURL   string          `json:"turnstile_solver_url"`
-	TurnstileTimeoutSec  int             `json:"turnstile_timeout"`
-	EmailCodeTimeoutSec  int             `json:"email_code_timeout"`
-	Proxy                string          `json:"proxy"`
-	ProxyPool            []string        `json:"proxy_pool"`
-	ProxyRotate          string          `json:"proxy_rotate"`
-	ImpersonateBrowser   string          `json:"impersonate_browser"`
-	TokenJSONDir         string          `json:"token_json_dir"`
-	EmailProvider        string          `json:"email_provider"`
-	CfmailProfile        string          `json:"cfmail_profile"`
-	CfmailAccounts       []CfmailAccount `json:"cfmail_accounts"`
-	MailtmAPIBase        string          `json:"mailtm_api_base"`
-	MailtmDomain         string          `json:"mailtm_domain"`
-	TotalAccounts        int             `json:"total_accounts"`
-	MaxWorkers           int             `json:"max_workers"`
-	FlareSolverrURL      string          `json:"flaresolverr_url"`
-	FlareSolverrEnabled  bool            `json:"flaresolverr_enabled"`
-	RegisterBackupTokens bool            `json:"register_backup_tokens"`
+	// Optional HTTP proxy for outbound (e.g. privoxy). Not required for pool.
+	Proxy string `json:"proxy"`
 
 	// Temporary request interceptor for protocol debugging.
-	// Enable via "debug_trace": true or GROK2API_DEBUG_TRACE=1.
-	DebugTrace    bool   `json:"debug_trace"`
-	DebugTraceDir string `json:"debug_trace_dir"`
-	// When true with debug_trace, only persist traces for status>=400 / errors.
-	DebugTraceErrorsOnly bool `json:"debug_trace_errors_only"`
+	DebugTrace           bool   `json:"debug_trace"`
+	DebugTraceDir        string `json:"debug_trace_dir"`
+	DebugTraceErrorsOnly bool   `json:"debug_trace_errors_only"`
 }
 
 func Defaults() Config {
 	return Config{
-		Host:                "127.0.0.1",
-		Port:                8787,
-		ProxyBaseURL:        "https://cli-chat-proxy.grok.com/v1",
-		ClientVersion:       "0.2.93",
-		DefaultModel:        "grok-4.5",
-		DataDir:             "data",
-		MaxConcurrent:       4,
-		AcquireTimeoutSec:   60,
-		MaxAttempts:         3,
-		Strategy:            "round-robin",
-		ActiveSize:          0,
-		StickyPool:          true,
-		StickyTTLMinutes:    30,
-		QuotaRetryMinutes:   1440,
-		RateRetrySeconds:    45,
-		RequestTimeoutSec:   600,
-		AccountsBase:        "https://accounts.x.ai",
-		TurnstileSitekey:    "0x4AAAAAAAhr9JGVDZbrZOo0",
-		CapMonsterAPIBase:   "https://api.capmonster.cloud",
-		TurnstileSolver:     "auto",
-		TurnstileSolverURL:  "http://127.0.0.1:5072",
-		TurnstileTimeoutSec: 120,
-		EmailCodeTimeoutSec: 120,
-		ProxyRotate:         "per_account",
-		ImpersonateBrowser:  "chrome136",
-		TokenJSONDir:        "register/output/grok_tokens",
-		EmailProvider:       "cfmail",
-		CfmailProfile:       "auto",
-		MailtmAPIBase:       "https://api.mail.tm",
-		TotalAccounts:       1,
-		MaxWorkers:          1,
+		Host:              "127.0.0.1",
+		Port:              8787,
+		ProxyBaseURL:      "https://cli-chat-proxy.grok.com/v1",
+		ClientVersion:     "0.2.93",
+		DefaultModel:      "grok-4.5",
+		DataDir:           "data",
+		MaxConcurrent:     4,
+		AcquireTimeoutSec: 60,
+		MaxAttempts:       3,
+		Strategy:          "round-robin",
+		ActiveSize:        0,
+		StickyPool:        true,
+		StickyTTLMinutes:  30,
+		QuotaRetryMinutes: 1440,
+		RateRetrySeconds:  45,
+		RequestTimeoutSec: 600,
 	}
 }
 
@@ -134,26 +87,6 @@ func Load(path string) (Config, error) {
 }
 
 func normalize(config *Config) {
-	if strings.TrimSpace(config.AccountsBase) == "" {
-		config.AccountsBase = Defaults().AccountsBase
-	}
-	config.AccountsBase = strings.TrimRight(strings.TrimSpace(config.AccountsBase), "/")
-	if strings.TrimSpace(config.TurnstileSolver) == "" {
-		config.TurnstileSolver = "auto"
-	}
-	config.TurnstileSolver = strings.ToLower(strings.TrimSpace(config.TurnstileSolver))
-	if config.TurnstileTimeoutSec <= 0 {
-		config.TurnstileTimeoutSec = 120
-	}
-	if config.EmailCodeTimeoutSec <= 0 {
-		config.EmailCodeTimeoutSec = 120
-	}
-	if config.TotalAccounts <= 0 {
-		config.TotalAccounts = 1
-	}
-	if config.MaxWorkers <= 0 {
-		config.MaxWorkers = 1
-	}
 	if config.MaxAttempts <= 0 {
 		config.MaxAttempts = 3
 	}
@@ -161,11 +94,7 @@ func normalize(config *Config) {
 	case "fill-first", "fill_first", "fillfirst":
 		config.Strategy = "fill-first"
 	default:
-		// Round-robin within the hot set (active_size).
 		config.Strategy = "round-robin"
-	}
-	if config.ActiveSize < 0 {
-		config.ActiveSize = 0
 	}
 	if config.ActiveSize < 0 {
 		config.ActiveSize = 0
@@ -173,69 +102,49 @@ func normalize(config *Config) {
 	if config.MaxConcurrent <= 0 {
 		config.MaxConcurrent = 1
 	}
-	if strings.TrimSpace(config.EmailProvider) == "" {
-		config.EmailProvider = "cfmail"
+	if strings.TrimSpace(config.ProxyBaseURL) == "" {
+		config.ProxyBaseURL = Defaults().ProxyBaseURL
 	}
-	config.EmailProvider = strings.ToLower(strings.TrimSpace(config.EmailProvider))
-	if strings.TrimSpace(config.ProxyRotate) == "" {
-		config.ProxyRotate = "per_account"
+	config.ProxyBaseURL = strings.TrimRight(strings.TrimSpace(config.ProxyBaseURL), "/")
+	if strings.TrimSpace(config.DefaultModel) == "" {
+		config.DefaultModel = Defaults().DefaultModel
 	}
-	config.ProxyRotate = strings.ToLower(strings.TrimSpace(config.ProxyRotate))
-	if strings.TrimSpace(config.CapMonsterAPIBase) == "" {
-		config.CapMonsterAPIBase = Defaults().CapMonsterAPIBase
+	if strings.TrimSpace(config.DataDir) == "" {
+		config.DataDir = "data"
 	}
-	config.CapMonsterAPIBase = strings.TrimRight(strings.TrimSpace(config.CapMonsterAPIBase), "/")
-	if strings.TrimSpace(config.MailtmAPIBase) == "" {
-		config.MailtmAPIBase = Defaults().MailtmAPIBase
+	if config.Port <= 0 {
+		config.Port = 8787
 	}
-	config.MailtmAPIBase = strings.TrimRight(strings.TrimSpace(config.MailtmAPIBase), "/")
-	if strings.TrimSpace(config.TurnstileSolverURL) != "" {
-		config.TurnstileSolverURL = strings.TrimRight(strings.TrimSpace(config.TurnstileSolverURL), "/")
+	if config.RequestTimeoutSec <= 0 {
+		config.RequestTimeoutSec = 600
 	}
-	if strings.TrimSpace(config.FlareSolverrURL) != "" {
-		config.FlareSolverrURL = strings.TrimRight(strings.TrimSpace(config.FlareSolverrURL), "/")
+	if config.QuotaRetryMinutes <= 0 {
+		config.QuotaRetryMinutes = 1440
+	}
+	if config.RateRetrySeconds <= 0 {
+		config.RateRetrySeconds = 45
+	}
+	if config.StickyTTLMinutes <= 0 {
+		config.StickyTTLMinutes = 30
+	}
+	if config.AcquireTimeoutSec <= 0 {
+		config.AcquireTimeoutSec = 60
 	}
 }
 
 func applyEnvironment(config *Config) error {
 	stringValues := map[string]*string{
-		"GROK2API_HOST":                 &config.Host,
-		"GROK2API_API_KEY":              &config.APIKey,
-		"GROK2API_APP_KEY":              &config.AppKey,
-		"GROK2API_PANEL_PASSWORD":       &config.PanelPassword,
-		"GROK2API_PROXY_BASE_URL":       &config.ProxyBaseURL,
-		"GROK2API_CLIENT_VERSION":       &config.ClientVersion,
-		"GROK2API_DEFAULT_MODEL":        &config.DefaultModel,
-		"GROK2API_DATA_DIR":             &config.DataDir,
-		"GROK2API_ACCOUNTS_BASE":        &config.AccountsBase,
-		"ACCOUNTS_BASE":                 &config.AccountsBase,
-		"GROK2API_TURNSTILE_SITEKEY":    &config.TurnstileSitekey,
-		"TURNSTILE_SITEKEY":             &config.TurnstileSitekey,
-		"GROK2API_CAPMONSTER_API_BASE":  &config.CapMonsterAPIBase,
-		"CAPMONSTER_API_BASE":           &config.CapMonsterAPIBase,
-		"GROK2API_CAPMONSTER_API_KEY":   &config.CapMonsterAPIKey,
-		"CAPMONSTER_API_KEY":            &config.CapMonsterAPIKey,
-		"GROK2API_TURNSTILE_SOLVER":     &config.TurnstileSolver,
-		"GROK_TURNSTILE_SOLVER":         &config.TurnstileSolver,
-		"GROK2API_TURNSTILE_SOLVER_URL": &config.TurnstileSolverURL,
-		"GROK_TURNSTILE_SOLVER_URL":     &config.TurnstileSolverURL,
-		"GROK2API_PROXY":                &config.Proxy,
-		"PROXY_URL":                     &config.Proxy,
-		"GROK2API_IMPERSONATE_BROWSER":  &config.ImpersonateBrowser,
-		"IMPERSONATE_BROWSER":           &config.ImpersonateBrowser,
-		"GROK2API_TOKEN_JSON_DIR":       &config.TokenJSONDir,
-		"GROK_TOKEN_DIR":                &config.TokenJSONDir,
-		"GROK2API_EMAIL_PROVIDER":       &config.EmailProvider,
-		"GROK_EMAIL_PROVIDER":           &config.EmailProvider,
-		"GROK2API_CFMAIL_PROFILE":       &config.CfmailProfile,
-		"GROK_CFMAIL_PROFILE":           &config.CfmailProfile,
-		"GROK2API_MAILTM_API_BASE":      &config.MailtmAPIBase,
-		"GROK_MAILTM_API_BASE":          &config.MailtmAPIBase,
-		"GROK2API_MAILTM_DOMAIN":        &config.MailtmDomain,
-		"GROK_MAILTM_DOMAIN":            &config.MailtmDomain,
-		"GROK2API_PROXY_ROTATE":         &config.ProxyRotate,
-		"GROK2API_FLARESOLVERR_URL":     &config.FlareSolverrURL,
-		"GROK2API_DEBUG_TRACE_DIR":      &config.DebugTraceDir,
+		"GROK2API_HOST":            &config.Host,
+		"GROK2API_API_KEY":         &config.APIKey,
+		"GROK2API_APP_KEY":         &config.AppKey,
+		"GROK2API_PANEL_PASSWORD":  &config.PanelPassword,
+		"GROK2API_PROXY_BASE_URL":  &config.ProxyBaseURL,
+		"GROK2API_CLIENT_VERSION":  &config.ClientVersion,
+		"GROK2API_DEFAULT_MODEL":   &config.DefaultModel,
+		"GROK2API_DATA_DIR":        &config.DataDir,
+		"GROK2API_PROXY":           &config.Proxy,
+		"PROXY_URL":                &config.Proxy,
+		"GROK2API_DEBUG_TRACE_DIR": &config.DebugTraceDir,
 	}
 	for name, target := range stringValues {
 		if value, ok := os.LookupEnv(name); ok {
@@ -251,14 +160,6 @@ func applyEnvironment(config *Config) error {
 		"GROK2API_QUOTA_RETRY_MINUTES":         &config.QuotaRetryMinutes,
 		"GROK2API_RATE_RETRY_SECONDS":          &config.RateRetrySeconds,
 		"GROK2API_TIMEOUT_SECS":                &config.RequestTimeoutSec,
-		"GROK2API_TURNSTILE_TIMEOUT":           &config.TurnstileTimeoutSec,
-		"TURNSTILE_TIMEOUT":                    &config.TurnstileTimeoutSec,
-		"GROK2API_EMAIL_CODE_TIMEOUT":          &config.EmailCodeTimeoutSec,
-		"EMAIL_CODE_TIMEOUT":                   &config.EmailCodeTimeoutSec,
-		"GROK2API_TOTAL_ACCOUNTS":              &config.TotalAccounts,
-		"TOTAL_ACCOUNTS":                       &config.TotalAccounts,
-		"GROK2API_MAX_WORKERS":                 &config.MaxWorkers,
-		"MAX_WORKERS":                          &config.MaxWorkers,
 	}
 	for name, target := range integerValues {
 		value, ok := os.LookupEnv(name)
@@ -273,8 +174,6 @@ func applyEnvironment(config *Config) error {
 	}
 
 	boolValues := map[string]*bool{
-		"GROK2API_FLARESOLVERR_ENABLED":    &config.FlareSolverrEnabled,
-		"GROK2API_REGISTER_BACKUP_TOKENS":  &config.RegisterBackupTokens,
 		"GROK2API_DEBUG_TRACE":             &config.DebugTrace,
 		"GROK2API_DEBUG_TRACE_ERRORS_ONLY": &config.DebugTraceErrorsOnly,
 		"GROK2API_CLI_POOL_STICKY":         &config.StickyPool,
@@ -311,12 +210,4 @@ func (c Config) AdminKey() string {
 		}
 	}
 	return ""
-}
-
-func (c Config) TurnstileTimeout() time.Duration {
-	return time.Duration(c.TurnstileTimeoutSec) * time.Second
-}
-
-func (c Config) EmailCodeTimeout() time.Duration {
-	return time.Duration(c.EmailCodeTimeoutSec) * time.Second
 }

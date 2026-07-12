@@ -16,10 +16,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/admin"
 	"github.com/AokiAx/grok2api/internal/bridge"
 	"github.com/AokiAx/grok2api/internal/compat"
-	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/intercept"
-	"github.com/AokiAx/grok2api/internal/register"
-	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/requestctx"
 	"github.com/AokiAx/grok2api/internal/service"
 	"github.com/AokiAx/grok2api/internal/upstream"
@@ -50,19 +47,17 @@ type LiveLeaseProvider interface {
 }
 
 type Server struct {
-	gateway          Gateway
-	status           StatusProvider
-	apiKey           string
-	defaultModel     string
-	modelCatalog     *upstream.Catalog
-	preferResponses  bool
-	bridge           *bridge.Pipeline
-	tracer           *intercept.Tracer
-	admin            AdminService
-	adminKey         string
-	registerJobs     RegisterJobService
-	registerSettings RegisterSettingsService
-	handler          http.Handler
+	gateway         Gateway
+	status          StatusProvider
+	apiKey          string
+	defaultModel    string
+	modelCatalog    *upstream.Catalog
+	preferResponses bool
+	bridge          *bridge.Pipeline
+	tracer          *intercept.Tracer
+	admin           AdminService
+	adminKey        string
+	handler         http.Handler
 }
 
 type Option func(*Server)
@@ -109,31 +104,6 @@ func WithAdmin(service AdminService, key string) Option {
 	}
 }
 
-type RegisterJobService interface {
-	Start(register.RunConfig) (string, error)
-	Stop() error
-	Status() register.JobStatus
-	Health(context.Context) register.HealthReport
-	Settings() config.Config
-}
-
-type RegisterSettingsService interface {
-	Get() config.Config
-	Update(config.Config) (config.Config, error)
-}
-
-func WithRegisterJobs(service RegisterJobService) Option {
-	return func(server *Server) {
-		server.registerJobs = service
-	}
-}
-
-func WithRegisterSettings(service RegisterSettingsService) Option {
-	return func(server *Server) {
-		server.registerSettings = service
-	}
-}
-
 func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ...Option) *Server {
 	server := &Server{
 		gateway:         gateway,
@@ -169,16 +139,6 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		mux.HandleFunc("POST /admin/api/cli-accounts/{id}/recover", server.adminRecover)
 		mux.HandleFunc("POST /admin/api/accounts/import/preview", server.adminImportPreview)
 		mux.HandleFunc("POST /admin/api/accounts/import", server.adminImport)
-	}
-	if server.registerJobs != nil {
-		mux.HandleFunc("GET /admin/api/register/status", server.registerStatus)
-		mux.HandleFunc("POST /admin/api/register/start", server.registerStart)
-		mux.HandleFunc("POST /admin/api/register/stop", server.registerStop)
-		mux.HandleFunc("GET /admin/api/register/health", server.registerHealth)
-	}
-	if server.registerSettings != nil {
-		mux.HandleFunc("GET /admin/api/register/settings", server.registerSettingsGet)
-		mux.HandleFunc("PUT /admin/api/register/settings", server.registerSettingsPut)
 	}
 	var handler http.Handler = mux
 	if server.tracer != nil && server.tracer.Enabled() {
@@ -345,121 +305,6 @@ func (s *Server) handleAdminImport(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
-}
-
-func (s *Server) registerStatus(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
-		return
-	}
-	if s.registerJobs == nil {
-		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
-		return
-	}
-	writeJSON(writer, http.StatusOK, s.registerJobs.Status())
-}
-
-func (s *Server) registerHealth(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
-		return
-	}
-	if s.registerJobs == nil {
-		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
-		return
-	}
-	writeJSON(writer, http.StatusOK, s.registerJobs.Health(request.Context()))
-}
-
-func (s *Server) registerStart(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
-		return
-	}
-	if s.registerJobs == nil {
-		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
-		return
-	}
-	var payload struct {
-		Count   int    `json:"count"`
-		Workers int    `json:"workers"`
-		DryRun  bool   `json:"dry_run"`
-		Proxy   string `json:"proxy"`
-	}
-	_ = json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&payload)
-	jobID, err := s.registerJobs.Start(register.RunConfig{
-		Count:    payload.Count,
-		Workers:  payload.Workers,
-		DryRun:   payload.DryRun,
-		ProxyURL: payload.Proxy,
-	})
-	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, register.ErrJobRunning) {
-			status = http.StatusConflict
-		}
-		writeOpenAIError(writer, status, err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"job_id": jobID, "started": true})
-}
-
-func (s *Server) registerStop(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
-		return
-	}
-	if s.registerJobs == nil {
-		writeOpenAIError(writer, http.StatusNotFound, "register jobs unavailable")
-		return
-	}
-	if err := s.registerJobs.Stop(); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, register.ErrNoJob) {
-			status = http.StatusConflict
-		}
-		writeOpenAIError(writer, status, err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"stopped": true})
-}
-
-func (s *Server) registerSettingsGet(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
-		return
-	}
-	if s.registerSettings == nil {
-		writeOpenAIError(writer, http.StatusNotFound, "register settings unavailable")
-		return
-	}
-	writeJSON(writer, http.StatusOK, regsettings.EditorView(s.registerSettings.Get()))
-}
-
-func (s *Server) registerSettingsPut(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
-		return
-	}
-	if s.registerSettings == nil {
-		writeOpenAIError(writer, http.StatusNotFound, "register settings unavailable")
-		return
-	}
-	var patch config.Config
-	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 2<<20)).Decode(&patch); err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid settings payload")
-		return
-	}
-	updated, err := s.registerSettings.Update(patch)
-	if err != nil {
-		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"saved":    true,
-		"settings": regsettings.EditorView(updated),
-		"summary":  regsettings.PublicView(updated),
-	})
 }
 
 func (s *Server) Handler() http.Handler {

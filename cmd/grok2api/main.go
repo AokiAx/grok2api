@@ -48,12 +48,6 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(output)
 	configPath := flags.String("config", "config.json", "configuration file")
-	count := flags.Int("count", 0, "register account count")
-	workers := flags.Int("workers", 0, "register worker concurrency")
-	dryRun := flags.Bool("dry-run", false, "register without persisting accounts")
-	proxyURL := flags.String("proxy", "", "override proxy URL for register/mint")
-	ssoCookie := flags.String("sso-cookie", "", "SSO cookie for mint command")
-	email := flags.String("email", "", "email metadata for mint command")
 	exportPath := flags.String("out", "", "output file path for export command (default data/export_accounts.json)")
 	exportPool := flags.String("pool", "", "export only accounts in this pool (ready|unavailable); empty = all")
 	if err := flags.Parse(arguments); err != nil {
@@ -81,12 +75,10 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 		return printStatus(ctx, output, repo)
 	case "serve":
 		return serve(ctx, settings, repo)
-	case "register":
-		return runRegister(ctx, output, settings, repo, *count, *workers, *dryRun, *proxyURL)
-	case "mint":
-		return runMint(ctx, output, settings, repo, *ssoCookie, *email, *dryRun)
 	case "export":
 		return runExport(ctx, output, settings, repo, *exportPath, *exportPool)
+	case "register", "mint":
+		return fmt.Errorf("%s moved to external project grok-register (see docs/EXTERNAL_REGISTER.md)", command)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -294,34 +286,6 @@ func (p poolStatusProvider) PoolStatus() api.PoolStatus {
 
 func (p poolStatusProvider) ActiveByID() map[string]int {
 	return p.scheduler.ActiveByID()
-}
-
-func runRegister(
-	_ context.Context,
-	output io.Writer,
-	_ config.Config,
-	_ *repository.SQLite,
-	_, _ int,
-	_ bool,
-	_ string,
-) error {
-	_, _ = fmt.Fprintln(output, `{"error":"register moved to external project grok-register","hint":"cd ../grok-register && go run ./cmd/grok-register register --config config.json"}`)
-	return fmt.Errorf("register is external: use github.com/AokiAx/grok-register (sibling repo ../grok-register)")
-}
-
-func runMint(
-	_ context.Context,
-	output io.Writer,
-	_ config.Config,
-	_ *repository.SQLite,
-	ssoCookie, _ string,
-	_ bool,
-) error {
-	if strings.TrimSpace(ssoCookie) == "" {
-		return fmt.Errorf("mint requires --sso-cookie (and lives in external grok-register)")
-	}
-	_, _ = fmt.Fprintln(output, `{"error":"mint moved to external project grok-register","hint":"cd ../grok-register && go run ./cmd/grok-register mint --config config.json --sso-cookie ..."}`)
-	return fmt.Errorf("mint is external: use github.com/AokiAx/grok-register")
 }
 
 // exportAccount mirrors admin.ImportAccount so the emitted file can be pasted

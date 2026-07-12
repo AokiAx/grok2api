@@ -533,7 +533,7 @@
     <nav class="tabs" aria-label="分区">
       <button type="button" class="active" data-view="overview">总览</button>
       <button type="button" data-view="accounts">账号</button>
-      <button type="button" data-view="register">注册</button>
+      
       <button type="button" data-view="import">导入</button>
       <button type="button" data-view="settings">设置</button>
     </nav>
@@ -651,33 +651,12 @@
     </section>
 
     <section class="view" id="view-register">
-      <div class="card" id="registerPanel">
-        <div class="toolbar">
-          <div>
-            <h2 style="margin:0;color:var(--text);font-size:14px">账号注册</h2>
-            <div class="meta" id="registerHealthNote">成功后直写号池</div>
-          </div>
-          <div class="meta" id="registerState">idle</div>
-        </div>
-        <div class="form-grid">
-          <div class="stack">
-            <label for="regCount">数量</label>
-            <input id="regCount" type="number" min="1" value="1">
-            <label for="regWorkers">并发</label>
-            <input id="regWorkers" type="number" min="1" value="1">
-            <label class="check"><input id="regDryRun" type="checkbox"> Dry-run</label>
-            <div class="row">
-              <button type="button" class="btn primary" id="registerStartButton">开始注册</button>
-              <button type="button" class="btn danger" id="registerStopButton">停止</button>
-              <button type="button" class="btn" id="registerRefreshButton">刷新</button>
-            </div>
-            <div class="meta" id="registerProgress">requested 0 · ok 0 · failed 0</div>
-          </div>
-          <div class="stack">
-            <label>日志</label>
-            <pre id="registerLogs">等待任务</pre>
-          </div>
-        </div>
+      <div class="card">
+        <h2>账号注册（外部）</h2>
+        <p class="meta">批注册已迁至独立项目 <code>grok-register</code>。本面板只负责导入凭证与号池管理。</p>
+        <pre style="white-space:pre-wrap;font-size:12px">cd ../grok-register
+go run ./cmd/grok-register register --config config.json --count 10 --workers 2
+# 或将 output/import/*.json 粘贴到本页「导入」</pre>
       </div>
     </section>
 

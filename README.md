@@ -223,11 +223,7 @@ docker compose up -d
 | POST | `/admin/api/accounts/import` | 验证并导入 |
 | DELETE | `/admin/api/cli-accounts/{id}` | 删除 |
 | POST | `/admin/api/cli-accounts/{id}/recover` | 验证并尝试恢复 |
-| GET/PUT | `/admin/api/register/settings` | 注册设置（落盘 `register_settings.json`） |
-| GET | `/admin/api/register/status` | 注册任务状态 |
-| POST | `/admin/api/register/start` | 启动批注册 |
-| POST | `/admin/api/register/stop` | 停止批注册 |
-| GET | `/admin/api/register/health` | 注册依赖健康 |
+
 
 示例：
 
