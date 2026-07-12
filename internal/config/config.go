@@ -92,7 +92,7 @@ func Defaults() Config {
 		AcquireTimeoutSec:   60,
 		MaxAttempts:         3,
 		Strategy:            "round-robin",
-		ActiveSize:          32,
+		ActiveSize:          0,
 		StickyPool:          true,
 		StickyTTLMinutes:    30,
 		QuotaRetryMinutes:   1440,
@@ -164,8 +164,8 @@ func normalize(config *Config) {
 		// Round-robin within the hot set (active_size).
 		config.Strategy = "round-robin"
 	}
-	if config.ActiveSize <= 0 {
-		config.ActiveSize = 32
+	if config.ActiveSize < 0 {
+		config.ActiveSize = 0
 	}
 	if config.ActiveSize < 0 {
 		config.ActiveSize = 0

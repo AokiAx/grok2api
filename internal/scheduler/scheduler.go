@@ -69,7 +69,7 @@ func New(accounts []account.Account) *Scheduler {
 		strategy:  StrategyRoundRobin,
 		// Hot set: only this many ready accounts serve. Rest are cold reserve.
 		// Concurrent capacity ≈ activeSize * MaxActive (see ApplyMaxActive).
-		activeSize: 32,
+		activeSize: 0,
 		hot:        make(map[string]struct{}),
 	}
 	for index := range accounts {
