@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/admin"
@@ -69,7 +70,12 @@ func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (
 }
 
 func (a *fakeAdmin) Stats(context.Context) (admin.AccountStats, error) {
-	stats := admin.AccountStats{Reasons: map[string]int{}}
+	now := time.Now().UTC()
+	soon := now.Add(time.Hour)
+	stats := admin.AccountStats{
+		Reasons:    map[string]int{},
+		ErrorCodes: map[string]int{},
+	}
 	for _, item := range a.accounts {
 		stats.TotalAccounts++
 		if item.Pool == account.PoolReady {
@@ -78,6 +84,9 @@ func (a *fakeAdmin) Stats(context.Context) (admin.AccountStats, error) {
 			stats.UnavailableAccounts++
 			if item.UnavailableReason != "" {
 				stats.Reasons[string(item.UnavailableReason)]++
+			}
+			if !item.RetryAt.IsZero() && !item.RetryAt.After(now) {
+				stats.RetryDue++
 			}
 		}
 		stats.ActiveLeases += item.Active
@@ -89,6 +98,22 @@ func (a *fakeAdmin) Stats(context.Context) (admin.AccountStats, error) {
 		stats.TotalRequests += item.RequestCount
 		if item.RefreshToken != "" {
 			stats.RefreshableAccounts++
+		} else {
+			stats.NoRefreshToken++
+		}
+		if item.AuthenticationFails > 0 {
+			stats.AuthFailAccounts++
+			stats.TotalAuthFails += int64(item.AuthenticationFails)
+		}
+		if !item.ExpiresAt.IsZero() {
+			if item.ExpiresAt.Before(now) {
+				stats.AccessExpired++
+			} else if item.ExpiresAt.Before(soon) {
+				stats.AccessExpiringSoon++
+			}
+		}
+		if item.LastErrorCode != "" {
+			stats.ErrorCodes[item.LastErrorCode]++
 		}
 		if item.QuotaLimit > 0 {
 			used := item.QuotaActual
@@ -179,7 +204,9 @@ func TestAdminListNeverReturnsTokens(t *testing.T) {
 			ReadyQuotaRemaining int64          `json:"ready_quota_remaining"`
 			QuotaObserved       int            `json:"quota_observed_accounts"`
 			ReadyQuotaObserved  int            `json:"ready_quota_observed_accounts"`
+			NoRefreshToken      int            `json:"no_refresh_token"`
 			Reasons             map[string]int `json:"reasons"`
+			ErrorCodes          map[string]int `json:"error_codes"`
 		} `json:"summary"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
@@ -204,6 +231,9 @@ func TestAdminListNeverReturnsTokens(t *testing.T) {
 	}
 	if summary.Reasons["quota"] != 1 || summary.Reasons["auth"] != 1 {
 		t.Fatalf("reasons = %#v", summary.Reasons)
+	}
+	if summary.NoRefreshToken != 1 {
+		t.Fatalf("no_refresh_token = %d", summary.NoRefreshToken)
 	}
 	var pageMeta struct {
 		Total      int `json:"total"`
@@ -337,8 +367,11 @@ func TestPanelRouteIsEmbedded(t *testing.T) {
 	for _, marker := range []string{
 		`id="totalAccounts"`, `id="totalRequests"`, `id="activeLeases"`,
 		`id="refreshableAccounts"`, `id="quotaUsage"`, `id="reasonBars"`,
+		`id="errorCodeBars"`, `id="accessExpiry"`, `id="retryDue"`,
+		`id="authFailAccounts"`, `id="noRefreshToken"`, `id="rememberLogin"`,
 		`id="lastUpdated"`, "renderSummary", "setInterval(refresh,15000)",
 		`id="pagePrev"`, `id="pageNext"`, `id="pageSize"`, "accountsQuery",
+		"localStorage", "persistPassword",
 	} {
 		if !strings.Contains(recorder.Body.String(), marker) {
 			t.Fatalf("panel statistics marker missing: %s", marker)

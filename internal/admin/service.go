@@ -43,7 +43,14 @@ type AccountStats struct {
 	ReadyQuotaRemaining int64          `json:"ready_quota_remaining"`
 	QuotaObserved       int            `json:"quota_observed_accounts"`
 	ReadyQuotaObserved  int            `json:"ready_quota_observed_accounts"`
+	AuthFailAccounts    int            `json:"auth_fail_accounts"`
+	TotalAuthFails      int64          `json:"total_auth_fails"`
+	AccessExpired       int            `json:"access_expired"`
+	AccessExpiringSoon  int            `json:"access_expiring_soon"`
+	RetryDue            int            `json:"retry_due"`
+	NoRefreshToken      int            `json:"no_refresh_token"`
 	Reasons             map[string]int `json:"reasons"`
+	ErrorCodes          map[string]int `json:"error_codes"`
 }
 
 type Repository interface {
@@ -164,6 +171,10 @@ func (s *Service) Stats(ctx context.Context) (AccountStats, error) {
 	if reasons == nil {
 		reasons = map[string]int{}
 	}
+	errorCodes := raw.ErrorCodes
+	if errorCodes == nil {
+		errorCodes = map[string]int{}
+	}
 	return AccountStats{
 		TotalAccounts:       raw.TotalAccounts,
 		ReadyAccounts:       raw.ReadyAccounts,
@@ -177,7 +188,14 @@ func (s *Service) Stats(ctx context.Context) (AccountStats, error) {
 		ReadyQuotaRemaining: raw.ReadyQuotaRemaining,
 		QuotaObserved:       raw.QuotaObserved,
 		ReadyQuotaObserved:  raw.ReadyQuotaObserved,
+		AuthFailAccounts:    raw.AuthFailAccounts,
+		TotalAuthFails:      raw.TotalAuthFails,
+		AccessExpired:       raw.AccessExpired,
+		AccessExpiringSoon:  raw.AccessExpiringSoon,
+		RetryDue:            raw.RetryDue,
+		NoRefreshToken:      raw.NoRefreshToken,
 		Reasons:             reasons,
+		ErrorCodes:          errorCodes,
 	}, nil
 }
 

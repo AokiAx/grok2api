@@ -245,6 +245,12 @@ func TestListAccountsPageAndStats(t *testing.T) {
 	if stats.Reasons["quota"] != 1 || stats.Reasons["auth"] != 1 {
 		t.Fatalf("reasons = %#v", stats.Reasons)
 	}
+	if stats.NoRefreshToken != 6 {
+		t.Fatalf("no_refresh_token = %d", stats.NoRefreshToken)
+	}
+	if stats.ErrorCodes["refresh-failed"] != 1 {
+		t.Fatalf("error_codes = %#v", stats.ErrorCodes)
+	}
 }
 
 func TestAccountCount(t *testing.T) {

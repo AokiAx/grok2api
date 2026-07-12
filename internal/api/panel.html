@@ -179,11 +179,38 @@
       gap: 10px;
       margin-bottom: 12px;
     }
+    .grid-stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
     .grid-2 {
       display: grid;
       grid-template-columns: 1.2fr 0.8fr;
       gap: 10px;
       margin-bottom: 12px;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      user-select: none;
+    }
+    .check-row input { width: 14px; height: 14px; accent-color: var(--blue); }
+    .session-note {
+      margin-top: 8px;
+      color: var(--dim);
+      font-size: 11px;
     }
     .card {
       background: var(--panel);
@@ -489,13 +516,13 @@
     }
 
     @media (max-width: 900px) {
-      .grid-4, .grid-2, .form-grid { grid-template-columns: 1fr 1fr; }
+      .grid-4, .grid-stats, .grid-3, .grid-2, .form-grid { grid-template-columns: 1fr 1fr; }
       header { flex-direction: column; }
       .status { justify-content: flex-start; }
     }
     @media (max-width: 560px) {
       .wrap { width: min(100% - 20px, 1120px); padding-top: 18px; }
-      .grid-4, .grid-2, .form-grid { grid-template-columns: 1fr; }
+      .grid-4, .grid-stats, .grid-3, .grid-2, .form-grid { grid-template-columns: 1fr; }
       .stat-value { font-size: 22px; }
     }
   </style>
@@ -508,9 +535,14 @@
       <p>输入面板密码后进入管理台</p>
       <label for="key">面板密码</label>
       <input id="key" type="password" autocomplete="current-password" placeholder="panel_password" required>
+      <label class="check-row">
+        <input id="rememberLogin" type="checkbox" checked>
+        <span>记住登录（跨标签页 / 关闭浏览器后仍有效）</span>
+      </label>
       <p class="login-error" id="loginError"></p>
       <button type="submit" class="btn primary" id="loginButton">登录</button>
       <div class="login-hint" id="loginHint">使用 config 中的 panel_password / app_key / api_key</div>
+      <div class="session-note">凭证仅保存在本机浏览器；点「退出」会清除。</div>
     </form>
   </div>
 
@@ -519,7 +551,7 @@
     <header>
       <div>
         <h1>grok2api</h1>
-        <p>账号池 · 注册 · 导入</p>
+        <p>账号池 · 导入</p>
       </div>
       <div class="status">
         <span class="dot" id="healthDot"></span>
@@ -533,42 +565,41 @@
     <nav class="tabs" aria-label="分区">
       <button type="button" class="active" data-view="overview">总览</button>
       <button type="button" data-view="accounts">账号</button>
-      
       <button type="button" data-view="import">导入</button>
-      <button type="button" data-view="settings">设置</button>
+      <button type="button" data-view="register">注册</button>
     </nav>
 
     <section class="view active" id="view-overview">
-      <div class="grid-4" aria-label="账号池统计">
+      <div class="grid-stats" aria-label="账号池统计">
         <div class="card">
           <div class="stat-label">总账号</div>
           <div class="stat-value" id="totalAccounts">—</div>
-          <div class="stat-note">持久化账号</div>
+          <div class="stat-note" id="totalAccountsNote">持久化账号</div>
         </div>
         <div class="card">
           <div class="stat-label">Ready Pool</div>
           <div class="stat-value green" id="ready">—</div>
-          <div class="stat-note">可轮询</div>
+          <div class="stat-note" id="readyNote">可轮询</div>
         </div>
         <div class="card">
           <div class="stat-label">Unavailable Pool</div>
           <div class="stat-value red" id="unavailable">—</div>
-          <div class="stat-note">已隔离</div>
+          <div class="stat-note" id="unavailableNote">已隔离</div>
         </div>
         <div class="card">
           <div class="stat-label">累计请求</div>
           <div class="stat-value" id="totalRequests">—</div>
-          <div class="stat-note">全账号</div>
+          <div class="stat-note" id="requestsNote">全账号</div>
         </div>
         <div class="card">
           <div class="stat-label">在途并发</div>
           <div class="stat-value" id="activeLeases">—</div>
-          <div class="stat-note">占用 / 槽位</div>
+          <div class="stat-note" id="leasesNote">占用 / 槽位</div>
         </div>
         <div class="card">
           <div class="stat-label">可自动刷新</div>
           <div class="stat-value" id="refreshableAccounts">—</div>
-          <div class="stat-note">有 refresh token</div>
+          <div class="stat-note" id="refreshNote">有 refresh token</div>
         </div>
         <div class="card">
           <div class="stat-label">Free Token 剩余</div>
@@ -580,9 +611,29 @@
           <div class="stat-value" id="circuit">—</div>
           <div class="stat-note" id="circuitNote">全池熔断</div>
         </div>
+        <div class="card">
+          <div class="stat-label">到期 / 将到期</div>
+          <div class="stat-value amber" id="accessExpiry">—</div>
+          <div class="stat-note" id="accessExpiryNote">access token</div>
+        </div>
+        <div class="card">
+          <div class="stat-label">待恢复</div>
+          <div class="stat-value" id="retryDue">—</div>
+          <div class="stat-note" id="retryDueNote">retry_at 已到期</div>
+        </div>
+        <div class="card">
+          <div class="stat-label">认证失败号</div>
+          <div class="stat-value red" id="authFailAccounts">—</div>
+          <div class="stat-note" id="authFailNote">authentication_fails &gt; 0</div>
+        </div>
+        <div class="card">
+          <div class="stat-label">无 refresh</div>
+          <div class="stat-value" id="noRefreshToken">—</div>
+          <div class="stat-note" id="noRefreshNote">无法自动续期</div>
+        </div>
       </div>
 
-      <div class="grid-2">
+      <div class="grid-3">
         <div class="card">
           <h2>池分布 <span id="poolPercent" style="color:var(--dim);font-weight:500"></span></h2>
           <div class="bar" aria-label="Ready 与 Unavailable 比例">
@@ -597,6 +648,10 @@
         <div class="card">
           <h2>不可用原因</h2>
           <div class="reasons" id="reasonBars"><div class="empty">暂无不可用账号</div></div>
+        </div>
+        <div class="card">
+          <h2>错误码 Top</h2>
+          <div class="reasons" id="errorCodeBars"><div class="empty">暂无错误码</div></div>
         </div>
       </div>
     </section>
@@ -650,16 +705,6 @@
       </div>
     </section>
 
-    <section class="view" id="view-register">
-      <div class="card">
-        <h2>账号注册（外部）</h2>
-        <p class="meta">批注册已迁至独立项目 <code>grok-register</code>。本面板只负责导入凭证与号池管理。</p>
-        <pre style="white-space:pre-wrap;font-size:12px">cd ../grok-register
-go run ./cmd/grok-register register --config config.json --count 10 --workers 2
-# 或将 output/import/*.json 粘贴到本页「导入」</pre>
-      </div>
-    </section>
-
     <section class="view" id="view-import">
       <div class="card">
         <div class="toolbar">
@@ -706,142 +751,17 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
       </div>
     </section>
 
-    <section class="view" id="view-settings">
-      <div class="toolbar" style="margin-bottom:12px">
-        <div>
-          <h2 style="margin:0;color:var(--text);font-size:14px">注册配置</h2>
-          <div class="meta">常用项默认展开 · 高级项折叠 · 保存到 data/register_settings.json</div>
-        </div>
-        <div class="row">
-          <button type="button" class="btn" id="settingsReloadButton">重新加载</button>
-          <button type="button" class="btn primary" id="settingsSaveButton">保存</button>
-        </div>
-      </div>
+    <section class="view" id="view-register">
+      <div class="card">
+        <h2>账号注册（外部）</h2>
+        <p class="meta">批注册已迁至独立项目 <code>grok-register</code>。本面板只负责导入凭证与号池管理。</p>
+        <pre style="white-space:pre-wrap;font-size:12px;margin-top:12px">cd ../grok-register
+go run ./cmd/grok-register register --config config.json --count 10 --workers 2
+# 或将 output/import/*.json 粘贴到本页「导入」
 
-      <div class="settings-grid">
-        <div class="settings-card">
-          <h3>邮箱</h3>
-          <div class="field">
-            <label for="setEmailProvider">Provider</label>
-            <select id="setEmailProvider">
-              <option value="cfmail">cfmail</option>
-              <option value="mailtm">mailtm</option>
-            </select>
-          </div>
-          <div class="field-row" id="cfmailBasicFields">
-            <div class="field">
-              <label for="setCfmailProfile">cfmail profile</label>
-              <input id="setCfmailProfile" placeholder="auto">
-            </div>
-            <div class="field">
-              <label for="setMailTimeout">验证码超时（秒）</label>
-              <input id="setMailTimeout" type="number" min="30" value="120">
-            </div>
-          </div>
-          <div id="cfmailAccountsWrap">
-            <div class="toolbar" style="margin:4px 0 8px">
-              <div class="meta" style="margin:0">cfmail 账号</div>
-              <button type="button" class="btn sm" id="addCfmailButton">添加账号</button>
-            </div>
-            <div class="cfmail-list" id="cfmailList"></div>
-            <div class="help">至少保留一个启用中的账号。</div>
-          </div>
-          <div id="mailtmFields" class="hidden">
-            <div class="field">
-              <label for="setMailtmBase">mailtm API</label>
-              <input id="setMailtmBase" placeholder="https://api.mail.tm">
-            </div>
-            <div class="field">
-              <label for="setMailtmDomain">mailtm domain</label>
-              <input id="setMailtmDomain" placeholder="可空">
-            </div>
-          </div>
-        </div>
-
-        <div class="settings-card">
-          <h3>过盾</h3>
-          <div class="field">
-            <label for="setSolver">Turnstile solver</label>
-            <select id="setSolver">
-              <option value="auto">auto（本地优先）</option>
-              <option value="local">local</option>
-              <option value="capmonster">capmonster</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="setSolverURL">本地 solver URL</label>
-            <input id="setSolverURL" placeholder="http://127.0.0.1:5072">
-          </div>
-          <div class="field">
-            <label for="setCapKey">CapMonster API key</label>
-            <input id="setCapKey" type="password" placeholder="留空=不修改；输入空格=清空">
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label for="setTsTimeout">Turnstile 超时（秒）</label>
-              <input id="setTsTimeout" type="number" min="30" value="120">
-            </div>
-            <div class="field">
-              <label for="setSitekey">sitekey</label>
-              <input id="setSitekey" placeholder="通常不用改">
-            </div>
-          </div>
-        </div>
-
-        <div class="settings-card">
-          <h3>代理</h3>
-          <div class="field">
-            <label for="setProxy">主代理</label>
-            <input id="setProxy" placeholder="http://127.0.0.1:8118">
-          </div>
-          <div class="field">
-            <label for="setProxyPool">代理池（每行一个）</label>
-            <textarea id="setProxyPool" style="min-height:96px" placeholder="http://user:pass@host:port"></textarea>
-          </div>
-          <div class="field">
-            <label for="setProxyRotate">轮换策略</label>
-            <input id="setProxyRotate" placeholder="per_account">
-          </div>
-        </div>
-
-        <div class="settings-card">
-          <h3>批跑默认值</h3>
-          <div class="field-row">
-            <div class="field">
-              <label for="setTotal">默认数量</label>
-              <input id="setTotal" type="number" min="1" value="1">
-            </div>
-            <div class="field">
-              <label for="setWorkers">默认并发</label>
-              <input id="setWorkers" type="number" min="1" value="1">
-            </div>
-          </div>
-          <div class="help">注册页可临时覆盖；这里只改默认值。</div>
-          <div style="margin-top:12px">
-            <details class="advanced">
-              <summary>高级选项</summary>
-              <div class="body">
-                <div class="field">
-                  <label for="setCapBase">CapMonster API base</label>
-                  <input id="setCapBase" placeholder="https://api.capmonster.cloud">
-                </div>
-                <div class="field">
-                  <label class="check"><input id="setFlareEnabled" type="checkbox"> 启用 FlareSolverr</label>
-                </div>
-                <div class="field">
-                  <label for="setFlareURL">FlareSolverr URL</label>
-                  <input id="setFlareURL" placeholder="http://127.0.0.1:8191">
-                </div>
-                <div class="help">FlareSolverr 可选，不能替代 Turnstile token。</div>
-              </div>
-            </details>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:12px">
-        <div class="meta" style="margin-top:0">状态</div>
-        <pre id="settingsOutput" style="min-height:64px;margin-top:8px">尚未加载</pre>
+# 可选：在 grok-register 配置 grok2api_base_url + grok2api_api_key
+# 注册成功后自动 POST /admin/api/accounts/import</pre>
+        <div class="help" style="margin-top:12px">详见仓库 docs/EXTERNAL_REGISTER.md</div>
       </div>
     </section>
 
@@ -849,16 +769,20 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
 
   <script>
     const STORAGE_KEY = 'grok2api.panel_password';
+    const REMEMBER_KEY = 'grok2api.panel_remember';
+    const PREFS_KEY = 'grok2api.panel_prefs';
     const byId = id => document.getElementById(id);
     const state = {
       accounts: [],
       authed: false,
       authRequired: true,
+      panelKey: '',
       page: 1,
       pageSize: 50,
       total: 0,
       totalPages: 0,
-      searchTimer: null
+      searchTimer: null,
+      refreshInFlight: false
     };
     const number = new Intl.NumberFormat('zh-CN');
     const reasonNames = {
@@ -872,11 +796,74 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
       'refresh-revoked': 'refresh 已吊销',
       'refresh-failed': '刷新失败',
       'validation-failed': '校验失败',
-      'invalid_grant': 'refresh 已吊销'
+      'invalid_grant': 'refresh 已吊销',
+      'permission-denied': '权限拒绝',
+      'quota-exhausted': '额度耗尽'
     };
 
+    function loadPrefs() {
+      try {
+        return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function savePrefs(patch) {
+      const next = { ...loadPrefs(), ...patch };
+      localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+      return next;
+    }
+
+    function rememberEnabled() {
+      const remembered = localStorage.getItem(REMEMBER_KEY);
+      if (remembered === null) return true;
+      return remembered !== '0';
+    }
+
+    function setRememberEnabled(enabled) {
+      localStorage.setItem(REMEMBER_KEY, enabled ? '1' : '0');
+      const box = byId('rememberLogin');
+      if (box) box.checked = enabled;
+    }
+
+    function readStoredPassword() {
+      const local = localStorage.getItem(STORAGE_KEY) || '';
+      if (local) return local;
+      // migrate older session-only logins
+      const session = sessionStorage.getItem(STORAGE_KEY) || '';
+      if (session && rememberEnabled()) {
+        localStorage.setItem(STORAGE_KEY, session);
+        sessionStorage.removeItem(STORAGE_KEY);
+      }
+      return session;
+    }
+
+    function persistPassword(password, remember) {
+      state.panelKey = password || '';
+      byId('key').value = state.panelKey;
+      setRememberEnabled(Boolean(remember));
+      if (!password) {
+        localStorage.removeItem(STORAGE_KEY);
+        sessionStorage.removeItem(STORAGE_KEY);
+        return;
+      }
+      if (remember) {
+        localStorage.setItem(STORAGE_KEY, password);
+        sessionStorage.removeItem(STORAGE_KEY);
+      } else {
+        sessionStorage.setItem(STORAGE_KEY, password);
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    }
+
+    function clearPassword() {
+      persistPassword('', rememberEnabled());
+    }
+
     const auth = () => {
-      const value = byId('key').value.trim();
+      const value = (state.panelKey || byId('key').value || '').trim();
+      if (value && !state.panelKey) state.panelKey = value;
       return value ? { Authorization: 'Bearer ' + value } : {};
     };
 
@@ -943,28 +930,62 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
       state.authed = true;
       byId('loginPage').classList.add('hidden');
       byId('appShell').classList.remove('hidden');
+      // keep password field in sync for subsequent requests / reloads
+      if (state.panelKey) byId('key').value = state.panelKey;
     }
 
     function setView(name) {
+      const allowed = new Set(['overview', 'accounts', 'import', 'register']);
+      const view = allowed.has(name) ? name : 'overview';
       document.querySelectorAll('.view').forEach(node => {
-        node.classList.toggle('active', node.id === `view-${name}`);
+        node.classList.toggle('active', node.id === `view-${view}`);
       });
       document.querySelectorAll('.tabs button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.view === name);
+        btn.classList.toggle('active', btn.dataset.view === view);
       });
+      savePrefs({ view });
     }
 
     function renderSummary(summary, health) {
       const total = summary.total_accounts || 0;
       const ready = summary.ready_accounts || 0;
       const unavailable = summary.unavailable_accounts || 0;
+      const maxActive = summary.max_active || 0;
+      const activeLeases = summary.active_leases || 0;
+      const refreshable = summary.refreshable_accounts || 0;
+      const noRefresh = summary.no_refresh_token || 0;
+      const retryDue = summary.retry_due || 0;
+      const authFails = summary.auth_fail_accounts || 0;
+      const totalAuthFails = summary.total_auth_fails || 0;
+      const expired = summary.access_expired || 0;
+      const expiring = summary.access_expiring_soon || 0;
+      const readyPercent = percent(ready, total);
+      const utilPercent = percent(activeLeases, maxActive);
 
       byId('totalAccounts').textContent = number.format(total);
+      byId('totalAccountsNote').textContent = total
+        ? `Ready ${readyPercent}% · 观测额度 ${number.format(summary.quota_observed_accounts || 0)}`
+        : '持久化账号';
       byId('ready').textContent = number.format(ready);
+      byId('readyNote').textContent = total
+        ? `占比 ${readyPercent}% · 可调度`
+        : '可轮询';
       byId('unavailable').textContent = number.format(unavailable);
+      byId('unavailableNote').textContent = retryDue > 0
+        ? `其中待恢复 ${number.format(retryDue)}`
+        : '已隔离';
       byId('totalRequests').textContent = number.format(summary.total_requests || 0);
-      byId('activeLeases').textContent = `${number.format(summary.active_leases || 0)} / ${number.format(summary.max_active || 0)}`;
-      byId('refreshableAccounts').textContent = number.format(summary.refreshable_accounts || 0);
+      byId('requestsNote').textContent = total > 0
+        ? `均 ${compact((summary.total_requests || 0) / total)} / 号`
+        : '全账号';
+      byId('activeLeases').textContent = `${number.format(activeLeases)} / ${number.format(maxActive)}`;
+      byId('leasesNote').textContent = maxActive > 0
+        ? `利用率 ${utilPercent}%`
+        : '占用 / 槽位';
+      byId('refreshableAccounts').textContent = number.format(refreshable);
+      byId('refreshNote').textContent = total
+        ? `覆盖 ${percent(refreshable, total)}%`
+        : '有 refresh token';
       byId('quotaUsage').textContent = summaryQuotaText(summary || {});
       byId('quotaNote').textContent = summaryQuotaNote(summary || {});
 
@@ -973,32 +994,46 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
       byId('circuit').style.color = open ? 'var(--red)' : 'var(--green)';
       byId('circuitNote').textContent = open ? `恢复 ${timeText(health.quota_circuit.retry_at)}` : '全池额度熔断未触发';
 
-      const readyPercent = percent(ready, total);
+      byId('accessExpiry').textContent = `${number.format(expired)} / ${number.format(expiring)}`;
+      byId('accessExpiryNote').textContent = '已过期 / 1h 内将过期';
+      byId('retryDue').textContent = number.format(retryDue);
+      byId('retryDueNote').textContent = retryDue > 0 ? '恢复 worker 应处理' : '暂无到期重试';
+      byId('authFailAccounts').textContent = number.format(authFails);
+      byId('authFailNote').textContent = totalAuthFails
+        ? `累计失败 ${number.format(totalAuthFails)} 次`
+        : 'authentication_fails = 0';
+      byId('noRefreshToken').textContent = number.format(noRefresh);
+      byId('noRefreshNote').textContent = total
+        ? `占比 ${percent(noRefresh, total)}%`
+        : '无法自动续期';
+
       const unavailablePercent = total > 0 ? 100 - readyPercent : 0;
       byId('readyBar').style.width = `${readyPercent}%`;
       byId('unavailableBar').style.width = `${unavailablePercent}%`;
       byId('readyLegend').textContent = number.format(ready);
       byId('unavailableLegend').textContent = number.format(unavailable);
       byId('poolPercent').textContent = `· Ready ${readyPercent}%`;
-      renderReasons(summary.reasons || {}, unavailable);
+      renderBreakdown(byId('reasonBars'), summary.reasons || {}, unavailable, reasonNames, '暂无不可用账号');
+      renderBreakdown(byId('errorCodeBars'), summary.error_codes || {}, total || 1, errorCodeNames, '暂无错误码');
     }
 
-    function renderReasons(reasons, total) {
-      const root = byId('reasonBars');
+    function renderBreakdown(root, items, total, names, emptyText) {
+      if (!root) return;
       root.replaceChildren();
-      const entries = Object.entries(reasons).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1]);
+      const entries = Object.entries(items).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1]);
       if (!entries.length) {
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = '暂无不可用账号';
+        empty.textContent = emptyText;
         root.appendChild(empty);
         return;
       }
-      for (const [reason, count] of entries) {
+      for (const [key, count] of entries.slice(0, 8)) {
         const row = document.createElement('div');
         row.className = 'reason';
         const label = document.createElement('span');
-        label.textContent = reasonNames[reason] || reason;
+        label.textContent = names[key] || key;
+        label.title = key;
         const track = document.createElement('div');
         track.className = 'track';
         const fill = document.createElement('div');
@@ -1130,13 +1165,12 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
       } else {
         await refresh();
       }
-      await refreshRegister();
-      await loadSettings();
     }
 
     async function handleLogin(event) {
       event.preventDefault();
       const password = byId('key').value.trim();
+      const remember = byId('rememberLogin') ? byId('rememberLogin').checked : true;
       const btn = byId('loginButton');
       byId('loginError').textContent = '';
       if (state.authRequired && !password) {
@@ -1144,12 +1178,22 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
         return;
       }
       btn.disabled = true;
+      // seed auth header before verify
+      state.panelKey = password;
       try {
         const data = await verifyPassword();
-        sessionStorage.setItem(STORAGE_KEY, password);
-        await enterApp(data);
+        persistPassword(password, remember);
+        try {
+          await enterApp(data);
+        } catch (error) {
+          // Password already verified; keep session and surface load errors in-app.
+          showApp();
+          byId('healthDot').classList.add('error');
+          byId('connectionState').textContent = String(error.message || error);
+          byId('lastUpdated').textContent = '进入面板后加载失败';
+        }
       } catch (error) {
-        sessionStorage.removeItem(STORAGE_KEY);
+        clearPassword();
         byId('loginError').textContent = String(error.message || error);
         showLogin(String(error.message || error));
       } finally {
@@ -1158,13 +1202,18 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
     }
 
     function logout() {
-      sessionStorage.removeItem(STORAGE_KEY);
-      byId('key').value = '';
+      clearPassword();
       showLogin('');
     }
 
+    function forceReauth(message) {
+      clearPassword();
+      showLogin(message || '登录已失效，请重新输入密码');
+    }
+
     async function refresh() {
-      if (!state.authed) return;
+      if (!state.authed || state.refreshInFlight) return;
+      state.refreshInFlight = true;
       try {
         const healthResponse = await fetch('/health');
         if (!healthResponse.ok) throw new Error(`health ${healthResponse.status}`);
@@ -1178,13 +1227,15 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
         byId('lastUpdated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
       } catch (error) {
         if (error && error.status === 401) {
-          logout();
-          byId('loginError').textContent = '登录已失效，请重新输入密码';
+          forceReauth('登录已失效，请重新输入密码');
           return;
         }
+        // network / server blips must not drop the session
         byId('healthDot').classList.add('error');
         byId('connectionState').textContent = String(error.message || error);
-        byId('lastUpdated').textContent = '更新失败';
+        byId('lastUpdated').textContent = '更新失败（会话保留）';
+      } finally {
+        state.refreshInFlight = false;
       }
     }
 
@@ -1211,10 +1262,15 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
         headers: auth()
       });
       if (response.status === 401) {
-        logout();
+        forceReauth('登录已失效，请重新输入密码');
         return;
       }
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = (data && data.error && data.error.message) || data.message || `${action} failed (${response.status})`;
+        setImportOutput(message);
+        return;
+      }
       setImportOutput(JSON.stringify(data, null, 2));
       await refresh();
     }
@@ -1389,7 +1445,7 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
           body: JSON.stringify({ accounts: parsed })
         });
         if (response.status === 401) {
-          logout();
+          forceReauth('登录已失效，请重新输入密码');
           return;
         }
         const data = await response.json().catch(() => ({ error: { message: `HTTP ${response.status}` } }));
@@ -1414,262 +1470,20 @@ go run ./cmd/grok-register register --config config.json --count 10 --workers 2
       }
     }
 
-    async function refreshRegister() {
-      if (!state.authed) return;
-      try {
-        const [statusResp, healthResp] = await Promise.all([
-          fetch('/admin/api/register/status', { headers: auth() }),
-          fetch('/admin/api/register/health', { headers: auth() })
-        ]);
-        if (statusResp.status === 401) {
-          logout();
-          return;
-        }
-        if (!statusResp.ok) {
-          throw new Error(`register status ${statusResp.status}`);
-        }
-        const status = await statusResp.json();
-        const health = healthResp.ok ? await healthResp.json() : {};
-        byId('registerState').textContent = status.state || 'idle';
-        byId('registerProgress').textContent =
-          `requested ${status.requested || 0} · ok ${status.ok || 0} · failed ${status.failed || 0}`;
-        byId('registerLogs').textContent = (status.logs || []).slice(-30).join('\n') || '暂无日志';
-        if (health) {
-          byId('registerHealthNote').textContent =
-            `solver=${health.turnstile || '-'} · mail=${health.email || '-'} · proxy=${health.proxy || '-'}`;
-        }
-      } catch (error) {
-        byId('registerState').textContent = 'error';
-        byId('registerLogs').textContent = String(error.message || error);
-      }
-    }
-
-    async function startRegister() {
-      const count = Number(byId('regCount').value || 1);
-      const workers = Number(byId('regWorkers').value || 1);
-      if (count > 20 && !confirm(`确认启动注册 ${count} 个账号？`)) return;
-      const btn = byId('registerStartButton');
-      btn.disabled = true;
-      try {
-        const response = await fetch('/admin/api/register/start', {
-          method: 'POST',
-          headers: { ...auth(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            count,
-            workers,
-            dry_run: byId('regDryRun').checked
-          })
-        });
-        if (response.status === 401) {
-          logout();
-          return;
-        }
-        const payload = await response.json();
-        byId('registerLogs').textContent = JSON.stringify(payload, null, 2);
-        await refreshRegister();
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    
-    
-    let cfmailDraft = [];
-
-    function providerChanged(){
-      const provider = byId('setEmailProvider').value;
-      const isCf = provider === 'cfmail';
-      byId('cfmailAccountsWrap').classList.toggle('hidden', !isCf);
-      byId('cfmailBasicFields').classList.toggle('hidden', !isCf);
-      byId('mailtmFields').classList.toggle('hidden', isCf);
-    }
-
-    function escapeAttr(value){
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('"', '&quot;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
-    }
-
-    function renderCfmailList(){
-      const root = byId('cfmailList');
-      root.replaceChildren();
-      if(!cfmailDraft.length){
-        const empty = document.createElement('div');
-        empty.className = 'help';
-        empty.textContent = '还没有 cfmail 账号，点“添加账号”。';
-        root.appendChild(empty);
-        return;
-      }
-      cfmailDraft.forEach((item, index) => {
-        const box = document.createElement('div');
-        box.className = 'cfmail-item';
-        box.innerHTML = `
-          <div class="cfmail-item-head">
-            <strong>账号 ${index + 1}</strong>
-            <button type="button" class="btn sm danger" data-remove="${index}">删除</button>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label>名称</label>
-              <input data-k="name" data-i="${index}" value="${escapeAttr(item.name || '')}" placeholder="main">
-            </div>
-            <div class="field">
-              <label class="check" style="margin-top:22px"><input type="checkbox" data-k="enabled" data-i="${index}" ${item.enabled !== false ? 'checked' : ''}> 启用</label>
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label>worker_domain</label>
-              <input data-k="worker_domain" data-i="${index}" value="${escapeAttr(item.worker_domain || '')}" placeholder="mail.example.com">
-            </div>
-            <div class="field">
-              <label>email_domain</label>
-              <input data-k="email_domain" data-i="${index}" value="${escapeAttr(item.email_domain || '')}" placeholder="example.com">
-            </div>
-          </div>
-          <div class="field">
-            <label>admin_password</label>
-            <input data-k="admin_password" data-i="${index}" type="password" value="${escapeAttr(item.admin_password || '')}" placeholder="管理密码">
-          </div>`;
-        root.appendChild(box);
-      });
-      root.querySelectorAll('[data-remove]').forEach(btn => {
-        btn.onclick = () => {
-          const i = Number(btn.getAttribute('data-remove'));
-          cfmailDraft.splice(i, 1);
-          renderCfmailList();
-        };
-      });
-      root.querySelectorAll('input[data-k]').forEach(input => {
-        input.oninput = () => {
-          const i = Number(input.getAttribute('data-i'));
-          const k = input.getAttribute('data-k');
-          if (!cfmailDraft[i]) return;
-          if (k === 'enabled') cfmailDraft[i].enabled = input.checked;
-          else cfmailDraft[i][k] = input.value;
-        };
-      });
-    }
-
-    function fillSettings(s){
-      byId('setEmailProvider').value = s.email_provider || 'cfmail';
-      byId('setCfmailProfile').value = s.cfmail_profile || 'auto';
-      byId('setMailtmBase').value = s.mailtm_api_base || '';
-      byId('setMailtmDomain').value = s.mailtm_domain || '';
-      byId('setTotal').value = s.total_accounts || 1;
-      byId('setWorkers').value = s.max_workers || 1;
-      byId('setSolver').value = s.turnstile_solver || 'auto';
-      byId('setSolverURL').value = s.turnstile_solver_url || '';
-      byId('setSitekey').value = s.turnstile_sitekey || '';
-      byId('setCapBase').value = s.capmonster_api_base || '';
-      byId('setCapKey').value = s.capmonster_api_key || '';
-      byId('setTsTimeout').value = s.turnstile_timeout || 120;
-      byId('setMailTimeout').value = s.email_code_timeout || 120;
-      byId('setProxy').value = s.proxy || '';
-      byId('setProxyPool').value = Array.isArray(s.proxy_pool) ? s.proxy_pool.join('\n') : '';
-      byId('setProxyRotate').value = s.proxy_rotate || 'per_account';
-      byId('setFlareEnabled').checked = Boolean(s.flaresolverr_enabled);
-      byId('setFlareURL').value = s.flaresolverr_url || '';
-      cfmailDraft = Array.isArray(s.cfmail_accounts)
-        ? s.cfmail_accounts.map(item => ({
-            name: item.name || '',
-            worker_domain: item.worker_domain || '',
-            email_domain: item.email_domain || '',
-            admin_password: item.admin_password || '',
-            enabled: item.enabled !== false
-          }))
-        : [];
-      renderCfmailList();
-      providerChanged();
-    }
-
-    async function loadSettings(){
-      if(!state.authed) return;
-      try{
-        const resp=await fetch('/admin/api/register/settings',{headers:auth()});
-        if(resp.status===401){ logout(); return; }
-        if(!resp.ok) throw new Error('settings '+resp.status);
-        const data=await resp.json();
-        fillSettings(data);
-        byId('settingsOutput').textContent='已加载当前配置';
-      }catch(error){
-        byId('settingsOutput').textContent=String(error.message||error);
-      }
-    }
-
-    async function saveSettings(){
-      if(!state.authed) return;
-      const provider = byId('setEmailProvider').value;
-      if(provider === 'cfmail'){
-        const enabled = cfmailDraft.filter(item => item.enabled !== false && item.name && item.worker_domain && item.email_domain && item.admin_password);
-        if(!enabled.length){
-          byId('settingsOutput').textContent = '请至少配置一个完整且启用的 cfmail 账号';
-          return;
-        }
-      }
-      const proxyPool=byId('setProxyPool').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-      const payload={
-        email_provider: provider,
-        cfmail_profile: byId('setCfmailProfile').value,
-        mailtm_api_base: byId('setMailtmBase').value,
-        mailtm_domain: byId('setMailtmDomain').value,
-        total_accounts: Number(byId('setTotal').value||1),
-        max_workers: Number(byId('setWorkers').value||1),
-        turnstile_solver: byId('setSolver').value,
-        turnstile_solver_url: byId('setSolverURL').value,
-        turnstile_sitekey: byId('setSitekey').value,
-        capmonster_api_base: byId('setCapBase').value,
-        capmonster_api_key: byId('setCapKey').value,
-        turnstile_timeout: Number(byId('setTsTimeout').value||120),
-        email_code_timeout: Number(byId('setMailTimeout').value||120),
-        proxy: byId('setProxy').value,
-        proxy_pool: proxyPool,
-        proxy_rotate: byId('setProxyRotate').value,
-        flaresolverr_enabled: byId('setFlareEnabled').checked,
-        flaresolverr_url: byId('setFlareURL').value,
-        cfmail_accounts: cfmailDraft
-      };
-      const btn=byId('settingsSaveButton');
-      btn.disabled=true;
-      try{
-        const resp=await fetch('/admin/api/register/settings',{
-          method:'PUT',
-          headers:{...auth(),'Content-Type':'application/json'},
-          body:JSON.stringify(payload)
-        });
-        if(resp.status===401){ logout(); return; }
-        const data=await resp.json();
-        if(!resp.ok) throw new Error((data.error&&data.error.message)||('save '+resp.status));
-        if(data.settings) fillSettings(data.settings);
-        byId('settingsOutput').textContent='已保存';
-        await refreshRegister();
-      }catch(error){
-        byId('settingsOutput').textContent=String(error.message||error);
-      }finally{
-        btn.disabled=false;
-      }
-    }
-
-async function stopRegister() {
-      const response = await fetch('/admin/api/register/stop', {
-        method: 'POST',
-        headers: auth()
-      });
-      if (response.status === 401) {
-        logout();
-        return;
-      }
-      const payload = await response.json();
-      byId('registerLogs').textContent = JSON.stringify(payload, null, 2);
-      await refreshRegister();
-    }
-
     async function bootstrap() {
-      // restore remembered password for convenience
-      const saved = sessionStorage.getItem(STORAGE_KEY) || '';
-      if (saved) byId('key').value = saved;
+      const prefs = loadPrefs();
+      if (prefs.pageSize) {
+        state.pageSize = Number(prefs.pageSize) || 50;
+        byId('pageSize').value = String(state.pageSize);
+      }
+      if (prefs.poolFilter) byId('poolFilter').value = prefs.poolFilter;
+      setRememberEnabled(rememberEnabled());
+
+      const saved = readStoredPassword();
+      if (saved) {
+        state.panelKey = saved;
+        byId('key').value = saved;
+      }
 
       try {
         const metaResp = await fetch('/admin/api/panel-meta');
@@ -1689,11 +1503,28 @@ async function stopRegister() {
       // try auto-login with saved password / open panel
       try {
         const data = await verifyPassword();
-        await enterApp(data);
+        // successful verify — refresh persistence with current remember preference
+        if (saved || !state.authRequired) {
+          persistPassword(state.panelKey || saved || '', rememberEnabled());
+        }
+        try {
+          await enterApp(data);
+          if (prefs.view) setView(prefs.view);
+        } catch (error) {
+          showApp();
+          if (prefs.view) setView(prefs.view);
+          byId('healthDot').classList.add('error');
+          byId('connectionState').textContent = String(error.message || error);
+          byId('lastUpdated').textContent = '自动登录后加载失败';
+        }
         return;
       } catch (error) {
-        if (saved) sessionStorage.removeItem(STORAGE_KEY);
-        showLogin(saved ? '上次登录已失效，请重新输入' : '');
+        if (error && error.status === 401 && saved) {
+          clearPassword();
+          showLogin('上次登录已失效，请重新输入');
+          return;
+        }
+        showLogin(saved ? '自动登录失败，请重新输入' : '');
       }
     }
 
@@ -1702,31 +1533,47 @@ async function stopRegister() {
     });
     byId('loginForm').addEventListener('submit', handleLogin);
     byId('logoutButton').onclick = logout;
+    if (byId('rememberLogin')) {
+      byId('rememberLogin').onchange = () => {
+        setRememberEnabled(byId('rememberLogin').checked);
+        if (state.panelKey) {
+          persistPassword(state.panelKey, byId('rememberLogin').checked);
+        }
+      };
+    }
     byId('loadFileButton').onclick = () => loadImportFile();
     byId('importFile').onchange = () => loadImportFile();
     if (byId('clearImportButton')) byId('clearImportButton').onclick = () => clearImport();
     byId('previewButton').onclick = () => send(true);
     byId('importButton').onclick = () => send(false);
     byId('search').oninput = () => scheduleAccountsReload(true);
-    byId('poolFilter').onchange = () => scheduleAccountsReload(true);
+    byId('poolFilter').onchange = () => {
+      savePrefs({ poolFilter: byId('poolFilter').value });
+      scheduleAccountsReload(true);
+    };
     byId('pageSize').onchange = () => {
       state.pageSize = Number(byId('pageSize').value) || 50;
       state.page = 1;
+      savePrefs({ pageSize: state.pageSize });
       refresh();
     };
     byId('pagePrev').onclick = () => changePage(-1);
     byId('pageNext').onclick = () => changePage(1);
-    byId('registerStartButton').onclick = startRegister;
-    byId('registerStopButton').onclick = stopRegister;
-    byId('registerRefreshButton').onclick = refreshRegister;
-    byId('settingsReloadButton').onclick = () => loadSettings();
-    byId('settingsSaveButton').onclick = saveSettings;
-    byId('setEmailProvider').onchange = providerChanged;
-    byId('addCfmailButton').onclick = () => { cfmailDraft.push({name:'',worker_domain:'',email_domain:'',admin_password:'',enabled:true}); renderCfmailList(); };
+
+    // re-sync session when tab becomes visible again
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && state.authed) {
+        const stored = readStoredPassword();
+        if (stored) {
+          state.panelKey = stored;
+          byId('key').value = stored;
+        }
+        refresh();
+      }
+    });
 
     bootstrap();
     setInterval(refresh,15000);
-    setInterval(refreshRegister,5000);
   </script>
 </body>
 </html>

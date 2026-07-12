@@ -90,7 +90,12 @@ func (r *memoryRepository) ListAccountsPage(_ context.Context, query repository.
 
 func (r *memoryRepository) AccountStats(context.Context) (repository.AccountStats, error) {
 	all, _ := r.ListAccounts(context.Background())
-	stats := repository.AccountStats{Reasons: map[string]int{}}
+	now := time.Now().UTC()
+	soon := now.Add(time.Hour)
+	stats := repository.AccountStats{
+		Reasons:    map[string]int{},
+		ErrorCodes: map[string]int{},
+	}
 	for _, item := range all {
 		stats.TotalAccounts++
 		if item.Pool == account.PoolReady {
@@ -99,6 +104,9 @@ func (r *memoryRepository) AccountStats(context.Context) (repository.AccountStat
 			stats.UnavailableAccounts++
 			if item.UnavailableReason != "" {
 				stats.Reasons[string(item.UnavailableReason)]++
+			}
+			if !item.RetryAt.IsZero() && !item.RetryAt.After(now) {
+				stats.RetryDue++
 			}
 		}
 		stats.TotalRequests += item.RequestCount
@@ -109,6 +117,22 @@ func (r *memoryRepository) AccountStats(context.Context) (repository.AccountStat
 		stats.MaxActive += maxActive
 		if item.RefreshToken != "" {
 			stats.RefreshableAccounts++
+		} else {
+			stats.NoRefreshToken++
+		}
+		if item.AuthenticationFails > 0 {
+			stats.AuthFailAccounts++
+			stats.TotalAuthFails += int64(item.AuthenticationFails)
+		}
+		if !item.ExpiresAt.IsZero() {
+			if item.ExpiresAt.Before(now) {
+				stats.AccessExpired++
+			} else if item.ExpiresAt.Before(soon) {
+				stats.AccessExpiringSoon++
+			}
+		}
+		if item.LastErrorCode != "" {
+			stats.ErrorCodes[item.LastErrorCode]++
 		}
 		if item.QuotaLimit > 0 {
 			used := item.QuotaActual

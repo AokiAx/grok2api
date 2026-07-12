@@ -606,7 +606,21 @@ type AccountStats struct {
 	ReadyQuotaRemaining int64
 	QuotaObserved       int
 	ReadyQuotaObserved  int
-	Reasons             map[string]int
+	// AuthFailAccounts: accounts with authentication_fails > 0.
+	AuthFailAccounts int
+	// TotalAuthFails: sum of authentication_fails.
+	TotalAuthFails int64
+	// AccessExpired: non-empty expires_at earlier than now.
+	AccessExpired int
+	// AccessExpiringSoon: expires within the next hour (and not already expired).
+	AccessExpiringSoon int
+	// RetryDue: unavailable accounts whose retry_at is due.
+	RetryDue int
+	// NoRefreshToken: accounts without a refresh_token.
+	NoRefreshToken int
+	Reasons        map[string]int
+	// ErrorCodes aggregates last_error_code for accounts that still have one set.
+	ErrorCodes map[string]int
 }
 
 const (
@@ -774,7 +788,12 @@ func scanAccount(rows accountScanner) (account.Account, error) {
 
 // AccountStats returns global pool aggregates without loading token rows.
 func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
-	stats := AccountStats{Reasons: make(map[string]int)}
+	stats := AccountStats{
+		Reasons:    make(map[string]int),
+		ErrorCodes: make(map[string]int),
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	soon := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 	err := r.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
@@ -812,8 +831,18 @@ func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
 				ELSE 0
 			END), 0),
 			COALESCE(SUM(CASE WHEN quota_limit > 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN pool = 'ready' AND quota_limit > 0 THEN 1 ELSE 0 END), 0)
-		FROM accounts`).Scan(
+			COALESCE(SUM(CASE WHEN pool = 'ready' AND quota_limit > 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN authentication_fails > 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(authentication_fails), 0),
+			COALESCE(SUM(CASE WHEN expires_at != '' AND expires_at < ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE
+				WHEN expires_at != '' AND expires_at >= ? AND expires_at < ? THEN 1 ELSE 0
+			END), 0),
+			COALESCE(SUM(CASE
+				WHEN pool = 'unavailable' AND retry_at != '' AND retry_at <= ? THEN 1 ELSE 0
+			END), 0),
+			COALESCE(SUM(CASE WHEN refresh_token = '' THEN 1 ELSE 0 END), 0)
+		FROM accounts`, now, now, soon, now).Scan(
 		&stats.TotalAccounts,
 		&stats.ReadyAccounts,
 		&stats.UnavailableAccounts,
@@ -826,6 +855,12 @@ func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
 		&stats.ReadyQuotaRemaining,
 		&stats.QuotaObserved,
 		&stats.ReadyQuotaObserved,
+		&stats.AuthFailAccounts,
+		&stats.TotalAuthFails,
+		&stats.AccessExpired,
+		&stats.AccessExpiringSoon,
+		&stats.RetryDue,
+		&stats.NoRefreshToken,
 	)
 	if err != nil {
 		return AccountStats{}, fmt.Errorf("account stats: %w", err)
@@ -850,6 +885,29 @@ func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return AccountStats{}, fmt.Errorf("iterate reason stats: %w", err)
+	}
+
+	codeRows, err := r.db.QueryContext(ctx, `
+		SELECT last_error_code, COUNT(*)
+		FROM accounts
+		WHERE last_error_code != ''
+		GROUP BY last_error_code
+		ORDER BY COUNT(*) DESC
+		LIMIT 20`)
+	if err != nil {
+		return AccountStats{}, fmt.Errorf("account error code stats: %w", err)
+	}
+	defer codeRows.Close()
+	for codeRows.Next() {
+		var code string
+		var count int
+		if err := codeRows.Scan(&code, &count); err != nil {
+			return AccountStats{}, fmt.Errorf("scan error code stats: %w", err)
+		}
+		stats.ErrorCodes[code] = count
+	}
+	if err := codeRows.Err(); err != nil {
+		return AccountStats{}, fmt.Errorf("iterate error code stats: %w", err)
 	}
 	return stats, nil
 }
