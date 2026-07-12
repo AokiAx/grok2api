@@ -90,7 +90,7 @@ func Defaults() Config {
 		MaxConcurrent:       1,
 		AcquireTimeoutSec:   60,
 		MaxAttempts:         3,
-		Strategy:            "round-robin",
+		Strategy:            "fill-first",
 		ActiveSize:          0,
 		StickyPool:          true,
 		StickyTTLMinutes:    30,
@@ -157,10 +157,12 @@ func normalize(config *Config) {
 		config.MaxAttempts = 3
 	}
 	switch strings.ToLower(strings.TrimSpace(config.Strategy)) {
-	case "fill-first", "fill_first", "fillfirst":
-		config.Strategy = "fill-first"
-	default:
+	case "round-robin", "round_robin", "rr":
 		config.Strategy = "round-robin"
+	default:
+		// Default fill-first: concentrate traffic on a small set of free
+		// accounts instead of fanning out across the entire ready pool.
+		config.Strategy = "fill-first"
 	}
 	if config.ActiveSize < 0 {
 		config.ActiveSize = 0

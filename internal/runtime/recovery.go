@@ -640,13 +640,11 @@ func WithQuotaProber(prober QuotaProber) RecoveryOption {
 	}
 }
 
-// RecoverQuota probes due free-quota accounts before re-entry.
-// Unlike cooldown, quota is NOT blindly promoted by retry_at alone:
-// we only return an account to ready when a real probe succeeds.
+// RecoverQuota returns due free-quota accounts to ready after the sliding
+// window (retry_at, typically 24h). Free-tier usage is a rolling window:
+// once parked until retry_at, re-entry is time-based — no chat probe.
 //
-// refresher may be nil. When set, expired / near-expiry access tokens are
-// refreshed before the chat probe so stale credentials do not fake-fail quota
-// recovery.
+// prober/validator/refresher are ignored (kept in the signature for callers).
 func RecoverQuota(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
@@ -657,11 +655,12 @@ func RecoverQuota(
 	quotaRetry time.Duration,
 	refresher CredentialRefresher,
 ) (QuotaRecoveryResult, error) {
-	if store == nil || (prober == nil && validator == nil) {
+	_ = prober
+	_ = validator
+	_ = refresher
+	_ = quotaRetry
+	if store == nil {
 		return QuotaRecoveryResult{}, nil
-	}
-	if quotaRetry <= 0 {
-		quotaRetry = 24 * time.Hour
 	}
 	accounts, err := store.ListAccounts(ctx)
 	if err != nil {
@@ -698,133 +697,19 @@ func RecoverQuota(
 		result.Skipped += len(candidates) - maxQuotaProbesPerTick
 		candidates = candidates[:maxQuotaProbesPerTick]
 	}
-	if len(candidates) == 0 {
-		return result, nil
-	}
-
-	type quotaOutcome struct {
-		item      account.Account
-		reason    account.UnavailableReason
-		errorCode string
-		actual    int64
-		limit     int64
-		hasUsage  bool
-		probeErr  error
-		// permanent refresh death — apply before probe path.
-		refreshErr error
-	}
-	outcomes := make([]quotaOutcome, len(candidates))
-	workers := quotaProbeWorkers
-	if workers > len(candidates) {
-		workers = len(candidates)
-	}
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range jobs {
-				item := candidates[index]
-				if refresher != nil && accessTokenNeedsRefresh(item, now) {
-					refreshed, refreshErr := refresher.Refresh(ctx, item)
-					if refreshErr != nil {
-						if isPermanentRefresh(refreshErr) {
-							outcomes[index] = quotaOutcome{item: item, refreshErr: refreshErr}
-							continue
-						}
-						// Transient refresh failure: still try probe with current token.
-					} else {
-						item = refreshed
-					}
-				}
-				reason, errorCode, actual, limit, hasUsage, probeErr := probeQuota(ctx, prober, validator, item)
-				outcomes[index] = quotaOutcome{
-					item:      item,
-					reason:    reason,
-					errorCode: errorCode,
-					actual:    actual,
-					limit:     limit,
-					hasUsage:  hasUsage,
-					probeErr:  probeErr,
-				}
-			}
-		}()
-	}
-	for index := range candidates {
-		jobs <- index
-	}
-	close(jobs)
-	wg.Wait()
-
-	for _, outcome := range outcomes {
-		item := outcome.item
-		if outcome.refreshErr != nil {
-			applyRefreshFailure(&item, outcome.refreshErr, now)
-			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
-				result.Failed++
-				continue
-			}
-			result.Failed++
-			continue
-		}
-		if outcome.probeErr != nil {
-			// Transport/infra failures: keep unavailable and retry later without
-			// treating the account as still quota-exhausted.
-			item.RetryAt = now.Add(5 * time.Minute)
-			item.LastErrorCode = "quota-probe-error"
-			item.UpdatedAt = now.UTC()
-			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
-				result.Failed++
-				continue
-			}
-			result.Failed++
-			continue
-		}
-		if outcome.reason == "" {
-			item.Pool = account.PoolReady
-			item.UnavailableReason = ""
-			item.RetryAt = time.Time{}
-			item.LastErrorCode = ""
-			item.UpdatedAt = now.UTC()
-			if outcome.hasUsage {
-				item.QuotaActual = outcome.actual
-				item.QuotaLimit = outcome.limit
-				item.LastSuccessAt = now.UTC()
-			} else if item.QuotaLimit > 0 && item.QuotaActual >= item.QuotaLimit {
-				// Clear "looks full" counters when probe succeeded without headers.
-				item.QuotaActual = 0
-			}
-			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
-				result.Failed++
-				continue
-			}
-			result.Recovered++
-			continue
-		}
-
-		// Still bad: keep unavailable with reason-specific backoff.
-		item.Pool = account.PoolUnavailable
-		item.UnavailableReason = outcome.reason
-		item.LastErrorCode = firstNonEmpty(outcome.errorCode, "quota-probe-failed")
-		item.RetryAt = credentialRetryAt(outcome.reason, now)
-		if outcome.reason == account.ReasonQuota {
-			item.RetryAt = nextQuotaRetry(now, quotaRetry)
-		}
-		if outcome.hasUsage {
-			item.QuotaActual = outcome.actual
-			item.QuotaLimit = outcome.limit
-		}
+	for _, item := range candidates {
+		item.Pool = account.PoolReady
+		item.UnavailableReason = ""
+		item.RetryAt = time.Time{}
+		item.LastErrorCode = ""
+		// Sliding window has elapsed; clear local counters for the new window.
+		item.QuotaActual = 0
 		item.UpdatedAt = now.UTC()
 		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
 			result.Failed++
 			continue
 		}
-		if outcome.reason == account.ReasonQuota {
-			result.Deferred++
-		} else {
-			result.Failed++
-		}
+		result.Recovered++
 	}
 	return result, nil
 }
@@ -905,8 +790,8 @@ func RecoverDue(
 	store AccountStore,
 	now time.Time,
 ) error {
-	// Only cooldown re-enters without an upstream probe.
-	// Quota is recovered via RecoverQuota after a real probe.
+	// Cooldown re-enters without an upstream probe. Quota uses RecoverQuota
+	// (time-based sliding window, no chat probe).
 	for _, item := range pool.PromoteDue(now) {
 		if err := store.SaveAccount(ctx, item); err != nil {
 			// Do not abort the whole recovery tick for one account.
@@ -941,7 +826,7 @@ func RunRecovery(
 			}
 		}
 		runQuota := func(label string) {
-			if config.credentialStore == nil || (config.quotaProber == nil && config.validator == nil) {
+			if config.credentialStore == nil {
 				return
 			}
 			if res, err := RecoverQuota(

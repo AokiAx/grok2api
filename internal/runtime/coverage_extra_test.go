@@ -54,53 +54,23 @@ func TestRecoverQuotaWritesUsageAndCapsProbeBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	// Budget is 256 probes/tick for large due queues.
+	// Budget is 256 promotes/tick for large due queues; no probe.
 	const want = 256
-	if prober.calls.Load() != want {
-		t.Fatalf("calls=%d; want max %d", prober.calls.Load(), want)
+	if prober.calls.Load() != 0 {
+		t.Fatalf("calls=%d; want 0 (time-based restore)", prober.calls.Load())
 	}
 	if result.Recovered != want || result.Skipped < n-want {
 		t.Fatalf("result=%#v", result)
 	}
 	found := false
 	for _, item := range store.saved {
-		if item.Pool == account.PoolReady && item.QuotaActual == 10 && item.QuotaLimit == 100 {
+		if item.Pool == account.PoolReady && item.QuotaActual == 0 {
 			found = true
 			break
 		}
 	}
 	if !found {
 		t.Fatalf("saved=%#v", store.saved)
-	}
-}
-
-func TestRecoverQuotaDeferredKeepsUsage(t *testing.T) {
-	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
-	item := account.Account{
-		ID:                "q1",
-		Pool:              account.PoolUnavailable,
-		UnavailableReason: account.ReasonQuota,
-		RetryAt:           now.Add(-time.Minute),
-		MaxActive:         1,
-	}
-	store := &recoveryStore{accounts: []account.Account{item}}
-	pool := scheduler.New([]account.Account{item})
-	prober := &usageProbe{
-		reason: account.ReasonQuota,
-		code:   "subscription:free-usage-exhausted",
-		actual: 100,
-		limit:  100,
-		has:    true,
-	}
-	result, err := runtime.RecoverQuota(context.Background(), pool, store, prober, nil, now, time.Hour, nil)
-	if err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	if result.Deferred != 1 || len(store.saved) != 1 {
-		t.Fatalf("result=%#v saved=%#v", result, store.saved)
-	}
-	if store.saved[0].QuotaActual != 100 || store.saved[0].QuotaLimit != 100 {
-		t.Fatalf("usage not kept: %#v", store.saved[0])
 	}
 }
 

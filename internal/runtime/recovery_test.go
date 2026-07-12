@@ -108,7 +108,7 @@ func TestRecoverDuePromotesCooldownButNotQuota(t *testing.T) {
 	lease.Release()
 }
 
-func TestRecoverQuotaPromotesOnlyAfterSuccessfulProbe(t *testing.T) {
+func TestRecoverQuotaPromotesWhenSlidingWindowDue(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
 	item := account.Account{
 		ID:                "quota",
@@ -116,6 +116,8 @@ func TestRecoverQuotaPromotesOnlyAfterSuccessfulProbe(t *testing.T) {
 		Pool:              account.PoolUnavailable,
 		UnavailableReason: account.ReasonQuota,
 		RetryAt:           now.Add(-time.Minute),
+		QuotaActual:       100,
+		QuotaLimit:        100,
 		MaxActive:         1,
 	}
 	store := &recoveryStore{accounts: []account.Account{item}}
@@ -129,17 +131,21 @@ func TestRecoverQuotaPromotesOnlyAfterSuccessfulProbe(t *testing.T) {
 		prober,
 		nil,
 		now,
-		30*time.Minute,
+		24*time.Hour,
 		nil,
 	)
 	if err != nil {
 		t.Fatalf("recover quota: %v", err)
 	}
-	if result.Recovered != 1 || prober.calls.Load() != 1 {
+	// Sliding-window restore is time-based — no probe.
+	if result.Recovered != 1 || prober.calls.Load() != 0 {
 		t.Fatalf("result=%#v calls=%d", result, prober.calls.Load())
 	}
 	if len(store.saved) != 1 || store.saved[0].Pool != account.PoolReady {
 		t.Fatalf("saved = %#v", store.saved)
+	}
+	if store.saved[0].QuotaActual != 0 {
+		t.Fatalf("quota counters should clear on window roll: %#v", store.saved[0])
 	}
 	lease, err := pool.Acquire(context.Background())
 	if err != nil {
@@ -149,78 +155,6 @@ func TestRecoverQuotaPromotesOnlyAfterSuccessfulProbe(t *testing.T) {
 		t.Fatalf("selected %q", lease.Account().ID)
 	}
 	lease.Release()
-}
-
-func TestRecoverQuotaDefersWhenProbeStillExhausted(t *testing.T) {
-	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
-	item := account.Account{
-		ID:                "quota",
-		AccessToken:       "token",
-		Pool:              account.PoolUnavailable,
-		UnavailableReason: account.ReasonQuota,
-		RetryAt:           now.Add(-time.Minute),
-		MaxActive:         1,
-	}
-	store := &recoveryStore{accounts: []account.Account{item}}
-	pool := scheduler.New([]account.Account{item})
-	prober := &quotaProber{reason: account.ReasonQuota, code: "subscription:free-usage-exhausted"}
-
-	result, err := runtime.RecoverQuota(
-		context.Background(),
-		pool,
-		store,
-		prober,
-		nil,
-		now,
-		45*time.Minute,
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("recover quota: %v", err)
-	}
-	if result.Deferred != 1 || result.Recovered != 0 {
-		t.Fatalf("result = %#v", result)
-	}
-	if len(store.saved) != 1 {
-		t.Fatalf("saved = %#v", store.saved)
-	}
-	got := store.saved[0]
-	if got.Pool != account.PoolUnavailable || got.UnavailableReason != account.ReasonQuota {
-		t.Fatalf("saved state = %#v", got)
-	}
-	// Configured retry tighter than default 2h recheck → honor 45m.
-	if !got.RetryAt.Equal(now.Add(45 * time.Minute)) {
-		t.Fatalf("retry_at = %s; want +45m", got.RetryAt)
-	}
-	if pool.ReadyCount() != 0 {
-		t.Fatalf("ready count = %d; want 0", pool.ReadyCount())
-	}
-}
-
-func TestRecoverQuotaRecheckUsesShorterBackoff(t *testing.T) {
-	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
-	item := account.Account{
-		ID: "quota", AccessToken: "token",
-		Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota,
-		RetryAt: now.Add(-time.Minute), MaxActive: 1,
-	}
-	store := &recoveryStore{accounts: []account.Account{item}}
-	pool := scheduler.New([]account.Account{item})
-	prober := &quotaProber{reason: account.ReasonQuota, code: "subscription:free-usage-exhausted"}
-
-	result, err := runtime.RecoverQuota(
-		context.Background(), pool, store, prober, nil, now, 24*time.Hour, nil,
-	)
-	if err != nil {
-		t.Fatalf("recover quota: %v", err)
-	}
-	if result.Deferred != 1 {
-		t.Fatalf("result=%#v", result)
-	}
-	// After a re-probe, do not wait another full day.
-	if !store.saved[0].RetryAt.Equal(now.Add(2 * time.Hour)) {
-		t.Fatalf("retry_at=%s; want +2h recheck", store.saved[0].RetryAt)
-	}
 }
 
 func TestRecoverQuotaOldestDueFirst(t *testing.T) {
@@ -288,7 +222,7 @@ func TestRecoverQuotaSkipsFutureRetryAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover quota: %v", err)
 	}
-	if result.Skipped != 1 || prober.calls.Load() != 0 || len(store.saved) != 0 {
+	if result.Skipped != 1 || prober.calls.Load() != 0 || result.Recovered != 0 || len(store.saved) != 0 {
 		t.Fatalf("result=%#v calls=%d saved=%d", result, prober.calls.Load(), len(store.saved))
 	}
 }
@@ -468,26 +402,27 @@ func (errQuotaProbe) ProbeFreeQuota(context.Context, account.Account) (account.U
 	return "", "", context.DeadlineExceeded
 }
 
-func TestRecoverQuotaTransportErrorDefers(t *testing.T) {
+func TestRecoverQuotaIgnoresProberAndPromotesDue(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
 	quota := account.Account{ID: "q", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota, RetryAt: now.Add(-time.Minute)}
 	store := &recoveryStore{accounts: []account.Account{quota}}
 	pool := scheduler.New([]account.Account{quota})
+	// Prober would fail; time-based path must still promote.
 	result, err := runtime.RecoverQuota(context.Background(), pool, store, errQuotaProbe{}, credentialValidator{}, now, time.Hour, nil)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if result.Failed != 1 || len(store.saved) != 1 {
+	if result.Recovered != 1 || store.saved[0].Pool != account.PoolReady {
 		t.Fatalf("result=%#v saved=%#v", result, store.saved)
 	}
 }
 
-func TestRecoverQuotaUsesValidatorWhenProberNil(t *testing.T) {
+func TestRecoverQuotaWorksWithoutProber(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
 	quota := account.Account{ID: "q", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota, RetryAt: now.Add(-time.Minute)}
 	store := &recoveryStore{accounts: []account.Account{quota}}
 	pool := scheduler.New([]account.Account{quota})
-	result, err := runtime.RecoverQuota(context.Background(), pool, store, nil, credentialValidator{}, now, time.Hour, nil)
+	result, err := runtime.RecoverQuota(context.Background(), pool, store, nil, nil, now, time.Hour, nil)
 	if err != nil || result.Recovered != 1 {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}

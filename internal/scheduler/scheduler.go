@@ -27,10 +27,10 @@ const (
 
 func ParseStrategy(raw string) Strategy {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case string(StrategyFillFirst), "fill_first", "fillfirst":
-		return StrategyFillFirst
-	default:
+	case string(StrategyRoundRobin), "round_robin", "rr":
 		return StrategyRoundRobin
+	default:
+		return StrategyFillFirst
 	}
 }
 
@@ -64,7 +64,7 @@ func New(accounts []account.Account) *Scheduler {
 		sticky:     make(map[string]stickyEntry),
 		stickyTTL:  defaultStickyTTL,
 		stickyOn:   true,
-		strategy:   StrategyRoundRobin,
+		strategy:   StrategyFillFirst,
 		activeSize: 0,
 		hot:        make(map[string]struct{}),
 	}
