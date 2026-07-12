@@ -56,3 +56,29 @@ func TestJobManagerStatusDefaultsIdle(t *testing.T) {
 	}
 	_ = time.Second
 }
+
+func TestJobManagerHealthFlagsMissingEmail(t *testing.T) {
+	settings := config.Defaults()
+	settings.EmailProvider = "cfmail"
+	settings.CfmailAccounts = nil
+	settings.TurnstileSolver = "local"
+	settings.TurnstileSolverURL = "http://127.0.0.1:9" // closed port → unreachable
+	manager := register.NewJobManager(settings, register.NewPipeline(settings, &fakeImporter{}))
+	report := manager.Health(context.Background())
+	if report.OK {
+		t.Fatalf("expected not ok: %#v", report)
+	}
+	if report.Email == "unconfigured" {
+		t.Fatalf("email should surface misconfig: %#v", report)
+	}
+}
+
+func TestHTTPClientRejectsBadProxy(t *testing.T) {
+	if _, err := register.HTTPClient("://bad", time.Second, false); err == nil {
+		t.Fatal("expected proxy parse error")
+	}
+	client, err := register.HTTPClient("", time.Second, true)
+	if err != nil || client == nil || client.Jar == nil {
+		t.Fatalf("client=%v err=%v", client, err)
+	}
+}

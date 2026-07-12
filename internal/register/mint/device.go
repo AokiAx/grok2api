@@ -47,6 +47,26 @@ func NewDeviceMinter(client *http.Client) *DeviceMinter {
 	return &DeviceMinter{client: client}
 }
 
+// NewDeviceMinterWithProxy builds a minter that uses the same proxy egress as
+// the registration HTTP client (critical when accounts.x.ai is geo-restricted).
+func NewDeviceMinterWithProxy(proxyURL string) (*DeviceMinter, error) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	var transport http.RoundTripper = http.DefaultTransport
+	if proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse mint proxy: %w", err)
+		}
+		transport = &http.Transport{Proxy: http.ProxyURL(parsed)}
+	}
+	jar, _ := cookiejar.New(nil)
+	return NewDeviceMinter(&http.Client{
+		Timeout:   45 * time.Second,
+		Jar:       jar,
+		Transport: transport,
+	}), nil
+}
+
 func (m *DeviceMinter) MintFromSSO(ctx context.Context, ssoCookie, email string) (TokenResult, error) {
 	ssoCookie = strings.TrimSpace(ssoCookie)
 	if ssoCookie == "" {

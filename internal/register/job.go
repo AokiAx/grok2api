@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/config"
+	"github.com/AokiAx/grok2api/internal/register/mail"
+	"github.com/AokiAx/grok2api/internal/register/turnstile"
 )
 
 var (
@@ -147,6 +151,8 @@ type HealthReport struct {
 	Email        string `json:"email"`
 	Proxy        string `json:"proxy"`
 	FlareSolverr string `json:"flaresolverr"`
+	OK           bool   `json:"ok"`
+	Detail       string `json:"detail,omitempty"`
 }
 
 func (m *JobManager) Health(ctx context.Context) HealthReport {
@@ -154,23 +160,97 @@ func (m *JobManager) Health(ctx context.Context) HealthReport {
 	if m.settings != nil {
 		settings = m.settings.Get()
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
 	report := HealthReport{
 		Turnstile:    "unconfigured",
 		Email:        "unconfigured",
 		Proxy:        "direct",
 		FlareSolverr: "disabled",
 	}
+	var problems []string
+
 	if settings.Proxy != "" || len(settings.ProxyPool) > 0 {
 		report.Proxy = "configured"
 	}
-	if settings.FlareSolverrEnabled && settings.FlareSolverrURL != "" {
-		report.FlareSolverr = "configured"
+	if settings.FlareSolverrEnabled && strings.TrimSpace(settings.FlareSolverrURL) != "" {
+		// Optional side-car; not on the register hot path.
+		client := &http.Client{Timeout: 4 * time.Second}
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, strings.TrimRight(settings.FlareSolverrURL, "/")+"/", nil)
+		if err != nil {
+			report.FlareSolverr = "error"
+			problems = append(problems, "flaresolverr: "+err.Error())
+		} else if resp, err := client.Do(req); err != nil {
+			report.FlareSolverr = "unreachable"
+			problems = append(problems, "flaresolverr unreachable")
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode >= 500 {
+				report.FlareSolverr = "unhealthy"
+			} else {
+				report.FlareSolverr = "ok"
+			}
+		}
 	}
-	if settings.TurnstileSolverURL != "" || settings.CapMonsterAPIKey != "" {
-		report.Turnstile = settings.TurnstileSolver
+
+	// Email: config completeness (do not create mailboxes in health).
+	providerName := strings.ToLower(strings.TrimSpace(settings.EmailProvider))
+	if providerName == "" {
+		providerName = "cfmail"
 	}
-	if len(settings.CfmailAccounts) > 0 || settings.EmailProvider == "mailtm" {
-		report.Email = settings.EmailProvider
+	switch providerName {
+	case "cfmail":
+		if len(settings.CfmailAccounts) == 0 {
+			report.Email = "missing_cfmail"
+			problems = append(problems, "no cfmail accounts")
+		} else {
+			report.Email = "ok:cfmail"
+		}
+	case "mailtm":
+		report.Email = "ok:mailtm"
+	default:
+		report.Email = "unsupported"
+		problems = append(problems, "email provider "+providerName)
+	}
+	// Soft-check provider factory so misconfig surfaces early.
+	if client, err := HTTPClient("", 5*time.Second, false); err == nil {
+		if _, err := mail.NewProvider(settings, client); err != nil {
+			report.Email = "error"
+			problems = append(problems, "email: "+err.Error())
+		}
+	}
+
+	// Turnstile: real probe against local solver or CapMonster key presence.
+	mode := strings.ToLower(strings.TrimSpace(settings.TurnstileSolver))
+	if mode == "" {
+		mode = "auto"
+	}
+	solverClient, _ := HTTPClient("", 5*time.Second, false)
+	solver, err := turnstile.NewFromMode(
+		mode,
+		settings.TurnstileSolverURL,
+		settings.CapMonsterAPIBase,
+		settings.CapMonsterAPIKey,
+		8*time.Second,
+		solverClient,
+	)
+	if err != nil {
+		report.Turnstile = "error"
+		problems = append(problems, "turnstile: "+err.Error())
+	} else if err := solver.Healthy(probeCtx); err != nil {
+		report.Turnstile = "unreachable:" + solver.Name()
+		problems = append(problems, "turnstile: "+err.Error())
+	} else {
+		report.Turnstile = "ok:" + solver.Name()
+	}
+
+	report.OK = len(problems) == 0
+	if len(problems) > 0 {
+		report.Detail = strings.Join(problems, "; ")
 	}
 	return report
 }

@@ -2,8 +2,10 @@ package register
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -152,8 +154,16 @@ func (p *Pipeline) registerOne(ctx context.Context, index int, cfg RunConfig, on
 	if proxyURL == "" {
 		proxyURL = regproxy.New(settings.Proxy, settings.ProxyPool).Next()
 	}
-	httpClient := &http.Client{Timeout: 45 * time.Second}
-	mailProvider, err := mail.NewProvider(settings, httpClient)
+	// Shared egress for mailbox admin, turnstile client, signup, and OIDC mint.
+	mailClient, err := HTTPClient(proxyURL, 45*time.Second, false)
+	if err != nil {
+		return AccountOutcome{Index: index, Error: "proxy: " + err.Error()}
+	}
+	mailProvider, err := mail.NewProvider(settings, mailClient)
+	if err != nil {
+		return AccountOutcome{Index: index, Error: err.Error()}
+	}
+	solverClient, err := HTTPClient("", 30*time.Second, false)
 	if err != nil {
 		return AccountOutcome{Index: index, Error: err.Error()}
 	}
@@ -163,7 +173,7 @@ func (p *Pipeline) registerOne(ctx context.Context, index int, cfg RunConfig, on
 		settings.CapMonsterAPIBase,
 		settings.CapMonsterAPIKey,
 		settings.TurnstileTimeout(),
-		httpClient,
+		solverClient,
 	)
 	if err != nil {
 		return AccountOutcome{Index: index, Error: err.Error()}
@@ -199,9 +209,17 @@ func (p *Pipeline) registerOne(ctx context.Context, index int, cfg RunConfig, on
 		return AccountOutcome{Index: index, Email: email, Error: "register: " + err.Error()}
 	}
 	mailProvider.RecordSuccess()
+	if settings.RegisterBackupTokens {
+		if path, bakErr := backupRegistration(settings, email, password, regResult.SSO, regResult.SSORW); bakErr == nil {
+			onEvent(fmt.Sprintf("[%d] backup %s", index, filepath.Base(path)))
+		}
+	}
 	onEvent(fmt.Sprintf("[%d] registered, minting CLI tokens", index))
 
-	minter := mint.NewDeviceMinter(nil)
+	minter, err := mint.NewDeviceMinterWithProxy(proxyURL)
+	if err != nil {
+		return AccountOutcome{Index: index, Email: email, Error: "mint client: " + err.Error()}
+	}
 	minted, err := minter.MintFromSSO(ctx, regResult.SSO, email)
 	if err != nil {
 		return AccountOutcome{Index: index, Email: email, Error: "mint: " + err.Error()}
@@ -227,7 +245,12 @@ func (p *Pipeline) registerOne(ctx context.Context, index int, cfg RunConfig, on
 }
 
 func (p *Pipeline) MintSSO(ctx context.Context, ssoCookie, email string, dryRun bool) (AccountOutcome, error) {
-	minter := mint.NewDeviceMinter(nil)
+	settings := p.current()
+	proxyURL := regproxy.New(settings.Proxy, settings.ProxyPool).Next()
+	minter, err := mint.NewDeviceMinterWithProxy(proxyURL)
+	if err != nil {
+		return AccountOutcome{OK: false, Error: err.Error()}, err
+	}
 	minted, err := minter.MintFromSSO(ctx, ssoCookie, email)
 	if err != nil {
 		return AccountOutcome{OK: false, Error: err.Error()}, err
@@ -246,6 +269,34 @@ func (p *Pipeline) MintSSO(ctx context.Context, ssoCookie, email string, dryRun 
 		accountID = result.Items[0].AccountID
 	}
 	return AccountOutcome{OK: true, Email: minted.Email, AccountID: accountID, Pool: "imported"}, nil
+}
+
+func backupRegistration(settings config.Config, email, password, sso, ssoRW string) (string, error) {
+	dir := strings.TrimSpace(settings.TokenJSONDir)
+	if dir == "" {
+		dir = "register/output/grok_tokens"
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"type":          "cli_register_backup",
+		"email":         email,
+		"password":      password,
+		"sso":           sso,
+		"sso_rw":        ssoRW,
+		"registered_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	safe := strings.ReplaceAll(email, "@", "_at_")
+	path := filepath.Join(dir, safe+".json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func maskEmail(email string) string {
