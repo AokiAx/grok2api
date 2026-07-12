@@ -13,44 +13,43 @@ venv/
 *.log
 .DS_Store
 
-# Go build / coverage artifacts
+# Go build / coverage
 *.exe
 grok2api
-grok2api-linux
-grok2api-hotfix
+grok2api-linux*
+grok2api-hotfix*
 coverage
 coverage.out
 coverage_funcs.txt
 *.out
 *.test
 
-# Local debug dumps (never commit)
+# Local debug dumps
 tmp_*.jsonl
 tmp_*.json
 *.ipynb
 
-# Secrets & runtime data (never push)
+# Secrets & runtime
 .env
 config.json
 data/
-
-# Private: auto-registration stack (kept local only)
-/register/
-scripts/start-turnstile.ps1
 
 # Editor / OS
 .idea/
 .vscode/
 *.swp
 Thumbs.db
-
 auth.json
 
-# Register / token artifacts
-register/output/
-auth_from_tokens.json
+# Account / SSO dumps (never commit)
+accounts_*.txt
+sso_*.txt
+*_combined.txt
+newat.txt
+oldat.txt
 tokens-*.json
 tokens-*.txt
-**/grok_tokens/
 auth_from_sso_*.json
+auth_from_tokens.json
 grok_sso_*.txt
+**/grok_tokens/
