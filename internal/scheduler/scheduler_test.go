@@ -18,6 +18,7 @@ func readyAccount(id string) account.Account {
 }
 
 func TestReadyPoolUsesSimpleRoundRobin(t *testing.T) {
+	// Unlimited active size: least-used still alternates a/b when both free.
 	s := scheduler.New([]account.Account{
 		readyAccount("a"),
 		readyAccount("b"),
@@ -33,6 +34,35 @@ func TestReadyPoolUsesSimpleRoundRobin(t *testing.T) {
 			t.Fatalf("acquire %d = %q; want %q", index, lease.Account().ID, expected)
 		}
 		lease.Release()
+	}
+}
+
+func TestActiveSizeKeepsColdAccountsUnused(t *testing.T) {
+	// Only 2 accounts may serve; the other three stay cold reserve.
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+		readyAccount("c"),
+		readyAccount("d"),
+		readyAccount("e"),
+	}).ApplyActiveSize(2)
+
+	seen := map[string]int{}
+	for i := 0; i < 20; i++ {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		seen[lease.Account().ID]++
+		lease.Release()
+	}
+	if len(seen) != 2 {
+		t.Fatalf("used %d distinct accounts %#v; want only hot set of 2", len(seen), seen)
+	}
+	for _, id := range []string{"c", "d", "e"} {
+		if seen[id] != 0 {
+			t.Fatalf("cold account %s received traffic", id)
+		}
 	}
 }
 

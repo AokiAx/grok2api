@@ -151,6 +151,11 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		maxConcurrent = 1
 	}
 	pool.ApplyMaxActive(maxConcurrent)
+	activeSize := settings.ActiveSize
+	if activeSize < 0 {
+		activeSize = 0
+	}
+	pool.ApplyActiveSize(activeSize)
 	stickyTTL := time.Duration(settings.StickyTTLMinutes) * time.Minute
 	if stickyTTL <= 0 {
 		stickyTTL = 30 * time.Minute
@@ -163,9 +168,13 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
+	if activeSize > 0 && maxAttempts > activeSize {
+		maxAttempts = activeSize
+	}
 	slog.Info("account pool concurrency",
 		"max_active_per_account", maxConcurrent,
 		"max_attempts_per_request", maxAttempts,
+		"active_size", activeSize,
 	)
 	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
 	upstreamClient := upstream.NewClient(
