@@ -31,11 +31,12 @@ type Config struct {
 	MaxConcurrent     int    `json:"cli_pool_max_concurrent"`
 	AcquireTimeoutSec int    `json:"cli_pool_acquire_timeout"`
 	// MaxAttempts caps how many ready accounts a single request may burn when
-	// rotating through quota/auth/permission-denied failures. Without this,
-	// one bad request can park the entire ready pool.
+	// rotating through quota/auth/permission-denied failures (like CPA
+	// max-retry-credentials). Without this, one bad request can park the pool.
 	MaxAttempts int `json:"cli_pool_max_attempts"`
-	// ActiveSize is the hot-set size: only this many ready accounts receive
-	// traffic; others stay cold reserve. 0 disables (not recommended).
+	// Strategy is round-robin (default) or fill-first — CLIProxyAPI-style.
+	Strategy string `json:"cli_pool_strategy"`
+	// ActiveSize optionally caps distinct serving accounts. 0 = full ready pool.
 	ActiveSize int `json:"cli_pool_active_size"`
 	// Sticky pool keeps the same Grok account for a client session / prompt
 	// fingerprint so prefix cache (cached_tokens) stays warm.
@@ -89,7 +90,8 @@ func Defaults() Config {
 		MaxConcurrent:       1,
 		AcquireTimeoutSec:   60,
 		MaxAttempts:         3,
-		ActiveSize:          8,
+		Strategy:            "round-robin",
+		ActiveSize:          0,
 		StickyPool:          true,
 		StickyTTLMinutes:    30,
 		QuotaRetryMinutes:   1440,
@@ -154,11 +156,14 @@ func normalize(config *Config) {
 	if config.MaxAttempts <= 0 {
 		config.MaxAttempts = 3
 	}
+	switch strings.ToLower(strings.TrimSpace(config.Strategy)) {
+	case "fill-first", "fill_first", "fillfirst":
+		config.Strategy = "fill-first"
+	default:
+		config.Strategy = "round-robin"
+	}
 	if config.ActiveSize < 0 {
 		config.ActiveSize = 0
-	}
-	if config.ActiveSize > 0 && config.MaxAttempts > config.ActiveSize {
-		config.MaxAttempts = config.ActiveSize
 	}
 	if config.MaxConcurrent <= 0 {
 		config.MaxConcurrent = 1

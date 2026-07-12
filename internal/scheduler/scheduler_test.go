@@ -17,12 +17,11 @@ func readyAccount(id string) account.Account {
 	}
 }
 
-func TestReadyPoolUsesSimpleRoundRobin(t *testing.T) {
-	// Unlimited active size: least-used still alternates a/b when both free.
+func TestReadyPoolUsesRoundRobin(t *testing.T) {
 	s := scheduler.New([]account.Account{
 		readyAccount("a"),
 		readyAccount("b"),
-	})
+	}).WithStrategy(scheduler.StrategyRoundRobin)
 
 	want := []string{"a", "b", "a", "b"}
 	for index, expected := range want {
@@ -37,15 +36,54 @@ func TestReadyPoolUsesSimpleRoundRobin(t *testing.T) {
 	}
 }
 
-func TestActiveSizeKeepsColdAccountsUnused(t *testing.T) {
-	// Only 2 accounts may serve; the other three stay cold reserve.
+func TestFillFirstBurnsOneAccountBeforeNext(t *testing.T) {
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+		readyAccount("c"),
+	}).WithStrategy(scheduler.StrategyFillFirst)
+
+	for i := 0; i < 5; i++ {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		if lease.Account().ID != "a" {
+			t.Fatalf("fill-first %d = %q; want a", i, lease.Account().ID)
+		}
+		lease.Release()
+	}
+}
+
+func TestRoundRobinUsesFullPoolWhenActiveSizeZero(t *testing.T) {
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+		readyAccount("c"),
+	}).WithStrategy(scheduler.StrategyRoundRobin).ApplyActiveSize(0)
+
+	seen := map[string]int{}
+	for i := 0; i < 30; i++ {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		seen[lease.Account().ID]++
+		lease.Release()
+	}
+	if len(seen) != 3 {
+		t.Fatalf("used %#v; want all 3 ready accounts", seen)
+	}
+}
+
+func TestActiveSizeOptionalCap(t *testing.T) {
 	s := scheduler.New([]account.Account{
 		readyAccount("a"),
 		readyAccount("b"),
 		readyAccount("c"),
 		readyAccount("d"),
 		readyAccount("e"),
-	}).ApplyActiveSize(2)
+	}).WithStrategy(scheduler.StrategyRoundRobin).ApplyActiveSize(2)
 
 	seen := map[string]int{}
 	for i := 0; i < 20; i++ {
@@ -57,12 +95,7 @@ func TestActiveSizeKeepsColdAccountsUnused(t *testing.T) {
 		lease.Release()
 	}
 	if len(seen) != 2 {
-		t.Fatalf("used %d distinct accounts %#v; want only hot set of 2", len(seen), seen)
-	}
-	for _, id := range []string{"c", "d", "e"} {
-		if seen[id] != 0 {
-			t.Fatalf("cold account %s received traffic", id)
-		}
+		t.Fatalf("used %d distinct %#v; want optional cap of 2", len(seen), seen)
 	}
 }
 

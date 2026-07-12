@@ -151,6 +151,8 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		maxConcurrent = 1
 	}
 	pool.ApplyMaxActive(maxConcurrent)
+	strategy := scheduler.ParseStrategy(settings.Strategy)
+	pool.WithStrategy(strategy)
 	activeSize := settings.ActiveSize
 	if activeSize < 0 {
 		activeSize = 0
@@ -168,10 +170,8 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
-	if activeSize > 0 && maxAttempts > activeSize {
-		maxAttempts = activeSize
-	}
-	slog.Info("account pool concurrency",
+	slog.Info("account pool",
+		"strategy", string(strategy),
 		"max_active_per_account", maxConcurrent,
 		"max_attempts_per_request", maxAttempts,
 		"active_size", activeSize,

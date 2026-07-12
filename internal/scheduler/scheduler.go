@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,26 @@ import (
 var ErrNoReadyAccount = errors.New("no ready account")
 
 const defaultStickyTTL = 30 * time.Minute
+
+// Strategy selects among free ready accounts (CLIProxyAPI-style).
+type Strategy string
+
+const (
+	// StrategyRoundRobin cycles through free ready accounts (default).
+	StrategyRoundRobin Strategy = "round-robin"
+	// StrategyFillFirst always prefers the first free ready account (by id),
+	// burning one credential before opening the next.
+	StrategyFillFirst Strategy = "fill-first"
+)
+
+func ParseStrategy(raw string) Strategy {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(StrategyFillFirst), "fill_first", "fillfirst":
+		return StrategyFillFirst
+	default:
+		return StrategyRoundRobin
+	}
+}
 
 type stickyEntry struct {
 	accountID string
@@ -27,9 +48,10 @@ type Scheduler struct {
 	sticky    map[string]stickyEntry
 	stickyTTL time.Duration
 	stickyOn  bool
-	// activeSize is the max number of ready accounts that may serve traffic
-	// at once (hot set). Remaining ready accounts stay cold reserve until a
-	// hot slot frees (account parked or deleted). 0 = unlimited (legacy).
+	strategy  Strategy
+	rrCursor  uint64
+	// activeSize optionally caps how many distinct ready ids may serve
+	// (0 = all ready, CLIProxyAPI default behavior).
 	activeSize int
 	hot        map[string]struct{}
 }
@@ -42,6 +64,7 @@ func New(accounts []account.Account) *Scheduler {
 		sticky:     make(map[string]stickyEntry),
 		stickyTTL:  defaultStickyTTL,
 		stickyOn:   true,
+		strategy:   StrategyRoundRobin,
 		activeSize: 0,
 		hot:        make(map[string]struct{}),
 	}
@@ -58,8 +81,18 @@ func New(accounts []account.Account) *Scheduler {
 	return scheduler
 }
 
+// WithStrategy sets round-robin or fill-first selection.
+func (s *Scheduler) WithStrategy(strategy Strategy) *Scheduler {
+	if s == nil {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.strategy = ParseStrategy(string(strategy))
+	return s
+}
+
 // WithSticky configures session stickiness for prompt-cache affinity.
-// key empty or ttl<=0 disables sticky selection (Acquire still works).
 func (s *Scheduler) WithSticky(enabled bool, ttl time.Duration) *Scheduler {
 	if s == nil {
 		return s
@@ -74,7 +107,6 @@ func (s *Scheduler) WithSticky(enabled bool, ttl time.Duration) *Scheduler {
 }
 
 // ApplyMaxActive sets MaxActive on every in-memory account (cli_pool_max_concurrent).
-// Values <= 0 are treated as 1. Does not rewrite SQLite; call after New/load.
 func (s *Scheduler) ApplyMaxActive(n int) *Scheduler {
 	if s == nil {
 		return s
@@ -93,8 +125,7 @@ func (s *Scheduler) ApplyMaxActive(n int) *Scheduler {
 	return s
 }
 
-// ApplyActiveSize limits how many ready accounts may receive traffic (hot set).
-// Values <= 0 disable the limit (all ready accounts eligible).
+// ApplyActiveSize optionally limits the serving set. 0 = all ready (recommended).
 func (s *Scheduler) ApplyActiveSize(n int) *Scheduler {
 	if s == nil {
 		return s
@@ -105,9 +136,11 @@ func (s *Scheduler) ApplyActiveSize(n int) *Scheduler {
 		n = 0
 	}
 	s.activeSize = n
-	// Shrink hot set if config tightened.
-	if n > 0 && len(s.hot) > n {
-		// Keep arbitrary first n ids currently hot.
+	if n == 0 {
+		s.hot = make(map[string]struct{})
+		return s
+	}
+	if len(s.hot) > n {
 		kept := 0
 		for id := range s.hot {
 			if kept >= n {
@@ -124,8 +157,7 @@ func (s *Scheduler) Acquire(ctx context.Context) (*Lease, error) {
 	return s.AcquireSticky(ctx, "")
 }
 
-// AcquireSticky prefers the account last used for stickyKey (when enabled),
-// so repeated client sessions stay on a warm Grok credential for prefix cache.
+// AcquireSticky prefers the account last used for stickyKey (when enabled).
 func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease, error) {
 	for {
 		s.mu.Lock()
@@ -134,12 +166,11 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 			return nil, ErrNoReadyAccount
 		}
 		now := time.Now()
-		// 1) Prefer sticky account when free and still ready (may join hot set).
 		if s.stickyOn && stickyKey != "" {
 			if entry, ok := s.sticky[stickyKey]; ok {
 				if entry.expiresAt.Before(now) {
 					delete(s.sticky, stickyKey)
-				} else if item := s.accounts[entry.accountID]; item != nil && item.Available(now) {
+				} else if item := s.accounts[entry.accountID]; item != nil && item.Available(now) && s.eligibleLocked(entry.accountID) {
 					item.Active++
 					item.RequestCount++
 					s.ensureHotLocked(entry.accountID)
@@ -148,16 +179,12 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 					s.mu.Unlock()
 					return lease, nil
 				} else if item == nil || item.Pool != account.PoolReady {
-					// Account gone or not ready — drop sticky binding.
 					delete(s.sticky, stickyKey)
 				}
-				// Busy sticky account: fall through to another ready account.
 			}
 		}
-		// 2) Only serve from the hot set (size-capped). Cold ready accounts
-		// stay unused until a hot slot opens — this stops concurrent load
-		// from fanning out across every ready credential.
-		id, item := s.pickEligibleReadyLocked(now)
+
+		id, item := s.pickReadyLocked(now)
 		if item != nil {
 			item.Active++
 			item.RequestCount++
@@ -179,46 +206,72 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 	}
 }
 
-// pickEligibleReadyLocked chooses among free ready accounts that are allowed
-// to serve: members of the hot set, or cold accounts if the hot set still has
-// spare slots (activeSize not yet full). When activeSize is 0, all ready are
-// eligible (legacy). Among candidates, pick lowest RequestCount.
-func (s *Scheduler) pickEligibleReadyLocked(now time.Time) (string, *account.Account) {
-	var bestID string
-	var best *account.Account
-	hotFull := s.activeSize > 0 && len(s.hot) >= s.activeSize
+// pickReadyLocked selects among free ready accounts using strategy.
+// Optional activeSize filters eligibility like a soft cap; 0 = full pool.
+func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
+	candidates := make([]string, 0, len(s.ready))
 	for _, id := range s.ready {
 		item := s.accounts[id]
 		if item == nil || !item.Available(now) {
 			continue
 		}
-		_, inHot := s.hot[id]
-		if hotFull && !inHot {
-			// Cold reserve — do not open a new account while hot set is full.
+		if !s.eligibleLocked(id) {
 			continue
 		}
-		if best == nil ||
-			item.RequestCount < best.RequestCount ||
-			(item.RequestCount == best.RequestCount && id < bestID) {
-			best = item
-			bestID = id
-		}
+		candidates = append(candidates, id)
 	}
-	return bestID, best
+	if len(candidates) == 0 {
+		return "", nil
+	}
+
+	strategy := s.strategy
+	if strategy == "" {
+		strategy = StrategyRoundRobin
+	}
+
+	var chosen string
+	switch strategy {
+	case StrategyFillFirst:
+		// Deterministic: smallest id among free eligible accounts.
+		chosen = candidates[0]
+		for _, id := range candidates[1:] {
+			if id < chosen {
+				chosen = id
+			}
+		}
+	default:
+		// Round-robin over free eligible accounts.
+		idx := int(s.rrCursor % uint64(len(candidates)))
+		s.rrCursor++
+		chosen = candidates[idx]
+	}
+	return chosen, s.accounts[chosen]
+}
+
+func (s *Scheduler) eligibleLocked(id string) bool {
+	if s.activeSize <= 0 {
+		return true
+	}
+	if _, inHot := s.hot[id]; inHot {
+		return true
+	}
+	return len(s.hot) < s.activeSize
 }
 
 func (s *Scheduler) ensureHotLocked(id string) {
+	if s.activeSize <= 0 {
+		return
+	}
 	if s.hot == nil {
 		s.hot = make(map[string]struct{})
 	}
 	if _, ok := s.hot[id]; ok {
 		return
 	}
-	// Free a slot if needed: drop non-ready first, then idle hot members.
-	if s.activeSize > 0 && len(s.hot) >= s.activeSize {
+	if len(s.hot) >= s.activeSize {
 		for hid := range s.hot {
 			item := s.accounts[hid]
-			if item == nil || item.Pool != account.PoolReady {
+			if item == nil || item.Pool != account.PoolReady || item.Active == 0 {
 				delete(s.hot, hid)
 				if len(s.hot) < s.activeSize {
 					break
@@ -226,18 +279,9 @@ func (s *Scheduler) ensureHotLocked(id string) {
 			}
 		}
 	}
-	if s.activeSize > 0 && len(s.hot) >= s.activeSize {
-		for hid := range s.hot {
-			item := s.accounts[hid]
-			if item != nil && item.Active == 0 {
-				delete(s.hot, hid)
-				if len(s.hot) < s.activeSize {
-					break
-				}
-			}
-		}
+	if len(s.hot) < s.activeSize {
+		s.hot[id] = struct{}{}
 	}
-	s.hot[id] = struct{}{}
 }
 
 func (s *Scheduler) dropHotLocked(id string) {
@@ -250,7 +294,6 @@ func (s *Scheduler) bumpStickyLocked(key, accountID string, now time.Time) {
 		ttl = defaultStickyTTL
 	}
 	s.sticky[key] = stickyEntry{accountID: accountID, expiresAt: now.Add(ttl)}
-	// Opportunistic prune to keep the map bounded under many keys.
 	if len(s.sticky) > 10000 {
 		for k, e := range s.sticky {
 			if e.expiresAt.Before(now) {
@@ -284,7 +327,6 @@ func (s *Scheduler) Status() (int, int, map[account.UnavailableReason]int) {
 }
 
 // ActiveByID returns in-memory lease counts keyed by account ID.
-// Active is intentionally not persisted; admin views must merge this snapshot.
 func (s *Scheduler) ActiveByID() map[string]int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -320,8 +362,6 @@ func (s *Scheduler) PromoteDue(now time.Time) []account.Account {
 		if item.Pool != account.PoolUnavailable {
 			continue
 		}
-		// Quota accounts require a real probe before re-entry; only cooldown
-		// is safe to promote purely by retry_at.
 		if item.UnavailableReason != account.ReasonCooldown {
 			continue
 		}
