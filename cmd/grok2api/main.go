@@ -21,8 +21,6 @@ import (
 	"github.com/AokiAx/grok2api/internal/api"
 	"github.com/AokiAx/grok2api/internal/config"
 	"github.com/AokiAx/grok2api/internal/intercept"
-	"github.com/AokiAx/grok2api/internal/register"
-	regsettings "github.com/AokiAx/grok2api/internal/register/settings"
 	"github.com/AokiAx/grok2api/internal/repository"
 	runtimeworker "github.com/AokiAx/grok2api/internal/runtime"
 	"github.com/AokiAx/grok2api/internal/scheduler"
@@ -211,17 +209,11 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		}
 	}
 	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
-	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
-	if err != nil {
-		return err
-	}
-	registerPipeline := register.NewPipelineFromSource(registerStore, adminService)
-	registerJobs := register.NewJobManagerFromSource(registerStore, registerPipeline)
+	// Registration is an external project (grok-register). This service only
+	// imports credentials via the admin import API / panel.
 	serverOptions := []api.Option{
 		api.WithDefaultModel(settings.DefaultModel),
 		api.WithAdmin(adminService, settings.AdminKey()),
-		api.WithRegisterJobs(registerJobs),
-		api.WithRegisterSettings(registerStore),
 	}
 	if tracer != nil {
 		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
@@ -305,66 +297,31 @@ func (p poolStatusProvider) ActiveByID() map[string]int {
 }
 
 func runRegister(
-	ctx context.Context,
+	_ context.Context,
 	output io.Writer,
-	settings config.Config,
-	repo *repository.SQLite,
-	count, workers int,
-	dryRun bool,
-	proxyURL string,
+	_ config.Config,
+	_ *repository.SQLite,
+	_, _ int,
+	_ bool,
+	_ string,
 ) error {
-	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
-	upstreamClient := upstream.NewClient(settings.ProxyBaseURL, settings.ClientVersion, httpClient)
-	adminService := admin.NewService(repo, upstreamClient)
-	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
-	if err != nil {
-		return err
-	}
-	pipeline := register.NewPipelineFromSource(registerStore, adminService)
-	summary, err := pipeline.Run(ctx, register.RunConfig{
-		Count:    count,
-		Workers:  workers,
-		DryRun:   dryRun,
-		ProxyURL: proxyURL,
-	}, func(message string) {
-		slog.Info("register", "event", message)
-	})
-	if encodeErr := json.NewEncoder(output).Encode(summary); encodeErr != nil {
-		return encodeErr
-	}
-	if err != nil {
-		return err
-	}
-	if summary.Failed > 0 {
-		return fmt.Errorf("register finished with %d failures", summary.Failed)
-	}
-	return nil
+	_, _ = fmt.Fprintln(output, `{"error":"register moved to external project grok-register","hint":"cd ../grok-register && go run ./cmd/grok-register register --config config.json"}`)
+	return fmt.Errorf("register is external: use github.com/AokiAx/grok-register (sibling repo ../grok-register)")
 }
 
 func runMint(
-	ctx context.Context,
+	_ context.Context,
 	output io.Writer,
-	settings config.Config,
-	repo *repository.SQLite,
-	ssoCookie, email string,
-	dryRun bool,
+	_ config.Config,
+	_ *repository.SQLite,
+	ssoCookie, _ string,
+	_ bool,
 ) error {
 	if strings.TrimSpace(ssoCookie) == "" {
-		return fmt.Errorf("mint requires --sso-cookie")
+		return fmt.Errorf("mint requires --sso-cookie (and lives in external grok-register)")
 	}
-	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
-	upstreamClient := upstream.NewClient(settings.ProxyBaseURL, settings.ClientVersion, httpClient)
-	adminService := admin.NewService(repo, upstreamClient)
-	registerStore, err := regsettings.NewStore(settings.DataDir, settings)
-	if err != nil {
-		return err
-	}
-	pipeline := register.NewPipelineFromSource(registerStore, adminService)
-	outcome, err := pipeline.MintSSO(ctx, ssoCookie, email, dryRun)
-	if encodeErr := json.NewEncoder(output).Encode(outcome); encodeErr != nil {
-		return encodeErr
-	}
-	return err
+	_, _ = fmt.Fprintln(output, `{"error":"mint moved to external project grok-register","hint":"cd ../grok-register && go run ./cmd/grok-register mint --config config.json --sso-cookie ..."}`)
+	return fmt.Errorf("mint is external: use github.com/AokiAx/grok-register")
 }
 
 // exportAccount mirrors admin.ImportAccount so the emitted file can be pasted
