@@ -225,6 +225,55 @@ func TestBadRequestIsReturnedWithoutMovingAccount(t *testing.T) {
 	}
 }
 
+func TestPermissionDeniedRotatesToNextAccount(t *testing.T) {
+	// Regression: classifying post-mint 403 permission-denied as validating
+	// must not leak 403 to clients — rotate and succeed on the next account.
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(403, `{"code":"permission-denied","error":"Access to the chat endpoint is denied."}`)},
+		"b": {response(200, `{"choices":[{"message":{"content":"ok"}}]}`)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a"), ready("b")}),
+		store,
+		upstream,
+		service.WithValidatingRetry(30*time.Second),
+	)
+
+	got, err := gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if got.Status != http.StatusOK || string(got.Body) != `{"choices":[{"message":{"content":"ok"}}]}` {
+		t.Fatalf("response = %d %s", got.Status, got.Body)
+	}
+	if len(store.saved) < 1 {
+		t.Fatalf("expected validating park, saved=%d", len(store.saved))
+	}
+	parked := store.saved[0]
+	if parked.UnavailableReason != account.ReasonValidating || parked.LastErrorCode != "permission-denied" {
+		t.Fatalf("parked = %#v", parked)
+	}
+}
+
+func TestPermissionDeniedAloneReturnsPoolUnavailable(t *testing.T) {
+	store := &fakeStore{}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		&fakeUpstream{responses: map[string][]*http.Response{
+			"a": {response(403, `{"code":"permission-denied","error":"Access to the chat endpoint is denied."}`)},
+		}},
+	)
+	_, err := gateway.Chat(context.Background(), []byte(`{}`), false)
+	if _, ok := service.AsPoolUnavailable(err); !ok {
+		t.Fatalf("error = %v; want pool unavailable, not raw 403", err)
+	}
+	if len(store.saved) != 1 || store.saved[0].UnavailableReason != account.ReasonValidating {
+		t.Fatalf("saved = %#v", store.saved)
+	}
+}
+
 func TestGenericRequestUsesSameRotationAndLeasePipeline(t *testing.T) {
 	store := &fakeStore{}
 	upstream := &fakeUpstream{responses: map[string][]*http.Response{

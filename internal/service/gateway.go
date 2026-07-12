@@ -31,14 +31,15 @@ type ChatResult struct {
 }
 
 type Gateway struct {
-	scheduler  *scheduler.Scheduler
-	store      AccountStore
-	upstream   Upstream
-	quotaRetry time.Duration
-	rateRetry  time.Duration
-	now        func() time.Time
-	circuitMu  sync.Mutex
-	circuit    CircuitStatus
+	scheduler       *scheduler.Scheduler
+	store           AccountStore
+	upstream        Upstream
+	quotaRetry      time.Duration
+	rateRetry       time.Duration
+	validatingRetry time.Duration
+	now             func() time.Time
+	circuitMu       sync.Mutex
+	circuit         CircuitStatus
 }
 
 type CircuitStatus struct {
@@ -61,6 +62,12 @@ func WithRateRetry(duration time.Duration) Option {
 	}
 }
 
+func WithValidatingRetry(duration time.Duration) Option {
+	return func(gateway *Gateway) {
+		gateway.validatingRetry = duration
+	}
+}
+
 func NewGateway(
 	scheduler *scheduler.Scheduler,
 	store AccountStore,
@@ -68,12 +75,13 @@ func NewGateway(
 	options ...Option,
 ) *Gateway {
 	gateway := &Gateway{
-		scheduler:  scheduler,
-		store:      store,
-		upstream:   upstream,
-		quotaRetry: 24 * time.Hour,
-		rateRetry:  45 * time.Second,
-		now:        time.Now,
+		scheduler:       scheduler,
+		store:           store,
+		upstream:        upstream,
+		quotaRetry:      24 * time.Hour,
+		rateRetry:       45 * time.Second,
+		validatingRetry: 45 * time.Second,
+		now:             time.Now,
 	}
 	for _, option := range options {
 		option(gateway)
@@ -171,16 +179,19 @@ func (g *Gateway) Request(
 				failure.QuotaLimit = usage.QuotaLimit()
 			}
 		}
-		switch failure.Kind {
-		case upstream.FailureQuota, upstream.FailureAuth, upstream.FailureRateLimit:
+		// Account-level failures: park this credential and try the next ready
+		// account. Includes transient 403 permission-denied (ReasonValidating)
+		// so provisioning lag does not surface as a client-facing 403.
+		if shouldRotateAccount(failure) {
 			if failure.Kind == upstream.FailureQuota {
 				quotaFailures++
 			}
-			retryAt := g.now().Add(g.rateRetry)
-			if failure.Kind == upstream.FailureQuota {
-				retryAt = g.now().Add(g.quotaRetry)
+			retryAt := g.retryAtFor(failure)
+			reason := failure.Reason
+			if reason == "" {
+				reason = account.ReasonCooldown
 			}
-			lease.MoveUnavailable(failure.Reason, retryAt, failure.Code)
+			lease.MoveUnavailable(reason, retryAt, failure.Code)
 			updated := lease.Account()
 			if failure.QuotaLimit > 0 || failure.QuotaActual > 0 {
 				updated.QuotaActual = failure.QuotaActual
@@ -192,15 +203,14 @@ func (g *Gateway) Request(
 			}
 			lease.Release()
 			continue
-		default:
-			lease.Release()
-			g.resetCircuit()
-			return ChatResult{
-				Status: response.StatusCode,
-				Header: response.Header.Clone(),
-				Body:   body,
-			}, nil
 		}
+		lease.Release()
+		g.resetCircuit()
+		return ChatResult{
+			Status: response.StatusCode,
+			Header: response.Header.Clone(),
+			Body:   body,
+		}, nil
 	}
 	if attempted > 0 && quotaFailures == attempted {
 		g.openQuotaCircuit()
@@ -283,6 +293,39 @@ func (g *Gateway) resetCircuit() {
 	g.circuitMu.Lock()
 	g.circuit = CircuitStatus{}
 	g.circuitMu.Unlock()
+}
+
+// shouldRotateAccount reports whether this upstream failure is tied to the
+// current credential/pool state (not the client request). Those accounts are
+// parked and the request is retried on another ready credential.
+func shouldRotateAccount(failure upstream.Failure) bool {
+	switch failure.Kind {
+	case upstream.FailureQuota, upstream.FailureAuth, upstream.FailureRateLimit:
+		return true
+	}
+	// Transient post-mint chat denials (403 permission-denied) land as
+	// FailureUpstream + ReasonValidating so import does not quarantine them as
+	// auth. Live traffic must still rotate instead of returning 403 to clients.
+	if failure.Reason == account.ReasonValidating {
+		return true
+	}
+	return false
+}
+
+func (g *Gateway) retryAtFor(failure upstream.Failure) time.Time {
+	now := g.now()
+	switch {
+	case failure.Kind == upstream.FailureQuota:
+		return now.Add(g.quotaRetry)
+	case failure.Reason == account.ReasonValidating:
+		retry := g.validatingRetry
+		if retry <= 0 {
+			retry = 45 * time.Second
+		}
+		return now.Add(retry)
+	default:
+		return now.Add(g.rateRetry)
+	}
 }
 
 func (g *Gateway) refreshCircuitLocked() {
