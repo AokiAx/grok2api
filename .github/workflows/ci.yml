@@ -34,8 +34,8 @@ jobs:
         run: go test -race ./...
 
       - name: Measure internal package coverage
-        # Register protocol clients (mail/mint/turnstile/registrar) are integration-heavy.
         # Keep unit coverage gate on the runtime core packages.
+        # Account registration lives in external grok-register; not covered here.
         run: |
           go test -coverprofile=coverage.out \
             ./internal/account \
@@ -48,10 +48,7 @@ jobs:
             ./internal/runtime \
             ./internal/scheduler \
             ./internal/service \
-            ./internal/upstream \
-            ./internal/register/settings \
-            ./internal/register/codec \
-            ./internal/register/proxy
+            ./internal/upstream
 
       - name: Enforce coverage floor
         # Floor temporarily 75% while Anthropic↔Responses stream state machine lands.
