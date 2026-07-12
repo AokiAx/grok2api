@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
@@ -57,10 +58,12 @@ type QuotaRecoveryResult struct {
 }
 
 const (
-	// Per recovery tick (default interval ~20s). Sized for multi-thousand
-	// account pools so expired access tokens drain in minutes, not hours.
-	maxQuotaProbesPerTick        = 32
-	maxValidatingProbesPerTick   = 64
+	// Per recovery tick (default interval ~10s). Sized for multi-thousand
+	// account pools so due quota/auth backlogs drain in minutes, not hours.
+	maxQuotaProbesPerTick        = 256
+	quotaProbeWorkers            = 32
+	maxValidatingProbesPerTick   = 128
+	validatingProbeWorkers       = 16
 	maxAuthRefreshesPerTick      = 256
 	maxProactiveRefreshesPerTick = 256
 	maxIsolatePerTick            = 500
@@ -68,6 +71,10 @@ const (
 	authTransientBackoff         = 5 * time.Minute
 	authValidationBackoff        = 10 * time.Minute
 	validatingBackoff            = 45 * time.Second
+	// After the initial quota park window, re-probes that are still exhausted
+	// use this shorter cadence (capped by configured quota_retry) so a rolling
+	// free-tier window is rechecked without waiting another full day.
+	quotaRecheckBackoff = 2 * time.Hour
 	// After this many failed validating re-probes, escalate to auth so truly
 	// blocked accounts stop burning probe budget forever.
 	maxValidatingFails = 12
@@ -406,16 +413,59 @@ func RecoverValidating(
 		candidates = append(candidates, item)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
+		// Oldest parked first so long-waiting accounts do not starve.
+		if candidates[i].UpdatedAt.Equal(candidates[j].UpdatedAt) {
+			return candidates[i].ID < candidates[j].ID
+		}
 		return candidates[i].UpdatedAt.Before(candidates[j].UpdatedAt)
 	})
 	if len(candidates) > maxValidatingProbesPerTick {
 		result.Skipped += len(candidates) - maxValidatingProbesPerTick
 		candidates = candidates[:maxValidatingProbesPerTick]
 	}
-	for _, item := range candidates {
-		reason, errorCode, validateErr := validator.Validate(ctx, item)
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	type validateOutcome struct {
+		item      account.Account
+		reason    account.UnavailableReason
+		errorCode string
+		err       error
+	}
+	outcomes := make([]validateOutcome, len(candidates))
+	workers := validatingProbeWorkers
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				item := candidates[index]
+				reason, errorCode, validateErr := validator.Validate(ctx, item)
+				outcomes[index] = validateOutcome{
+					item:      item,
+					reason:    reason,
+					errorCode: errorCode,
+					err:       validateErr,
+				}
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, outcome := range outcomes {
+		item := outcome.item
 		item.UpdatedAt = now.UTC()
-		if validateErr != nil {
+		if outcome.err != nil {
 			item.RetryAt = now.Add(validatingBackoff)
 			item.LastErrorCode = "validation-failed"
 			item.AuthenticationFails++
@@ -423,7 +473,7 @@ func RecoverValidating(
 			_ = saveAccountBestEffort(ctx, store, pool, item)
 			continue
 		}
-		if reason == "" {
+		if outcome.reason == "" {
 			item.Pool = account.PoolReady
 			item.UnavailableReason = ""
 			item.RetryAt = time.Time{}
@@ -435,19 +485,19 @@ func RecoverValidating(
 		}
 		// Still bad.
 		item.AuthenticationFails++
-		item.LastErrorCode = firstNonEmpty(errorCode, string(reason))
+		item.LastErrorCode = firstNonEmpty(outcome.errorCode, string(outcome.reason))
 		switch {
-		case reason == account.ReasonQuota:
+		case outcome.reason == account.ReasonQuota:
 			item.Pool = account.PoolUnavailable
 			item.UnavailableReason = account.ReasonQuota
-			item.RetryAt = now.Add(24 * time.Hour)
+			item.RetryAt = nextQuotaRetry(now, 24*time.Hour)
 			result.Failed++
-		case reason == account.ReasonCooldown:
+		case outcome.reason == account.ReasonCooldown:
 			item.Pool = account.PoolUnavailable
 			item.UnavailableReason = account.ReasonCooldown
 			item.RetryAt = now.Add(45 * time.Second)
 			result.Failed++
-		case reason == account.ReasonAuth || item.AuthenticationFails >= maxValidatingFails:
+		case outcome.reason == account.ReasonAuth || item.AuthenticationFails >= maxValidatingFails:
 			// Hard auth, or too many validating failures → park as auth for
 			// refresh-based recovery / operator attention.
 			item.Pool = account.PoolUnavailable
@@ -508,6 +558,10 @@ func WithQuotaProber(prober QuotaProber) RecoveryOption {
 // RecoverQuota probes due free-quota accounts before re-entry.
 // Unlike cooldown, quota is NOT blindly promoted by retry_at alone:
 // we only return an account to ready when a real probe succeeds.
+//
+// refresher may be nil. When set, expired / near-expiry access tokens are
+// refreshed before the chat probe so stale credentials do not fake-fail quota
+// recovery.
 func RecoverQuota(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
@@ -516,6 +570,7 @@ func RecoverQuota(
 	validator CredentialValidator,
 	now time.Time,
 	quotaRetry time.Duration,
+	refresher CredentialRefresher,
 ) (QuotaRecoveryResult, error) {
 	if store == nil || (prober == nil && validator == nil) {
 		return QuotaRecoveryResult{}, nil
@@ -528,7 +583,7 @@ func RecoverQuota(
 		return QuotaRecoveryResult{}, fmt.Errorf("list accounts for quota recovery: %w", err)
 	}
 	result := QuotaRecoveryResult{}
-	probed := 0
+	candidates := make([]account.Account, 0, maxQuotaProbesPerTick)
 	for _, item := range accounts {
 		if item.Pool != account.PoolUnavailable || item.UnavailableReason != account.ReasonQuota {
 			result.Skipped++
@@ -538,15 +593,97 @@ func RecoverQuota(
 			result.Skipped++
 			continue
 		}
-		if probed >= maxQuotaProbesPerTick {
-			// Leave remaining due accounts for the next worker tick.
-			result.Skipped++
+		candidates = append(candidates, item)
+	}
+	// Oldest-due first so a large backlog does not starve early accounts.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ai, aj := candidates[i].RetryAt, candidates[j].RetryAt
+		if ai.IsZero() && !aj.IsZero() {
+			return true
+		}
+		if !ai.IsZero() && aj.IsZero() {
+			return false
+		}
+		if !ai.Equal(aj) {
+			return ai.Before(aj)
+		}
+		return candidates[i].ID < candidates[j].ID
+	})
+	if len(candidates) > maxQuotaProbesPerTick {
+		result.Skipped += len(candidates) - maxQuotaProbesPerTick
+		candidates = candidates[:maxQuotaProbesPerTick]
+	}
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	type quotaOutcome struct {
+		item      account.Account
+		reason    account.UnavailableReason
+		errorCode string
+		actual    int64
+		limit     int64
+		hasUsage  bool
+		probeErr  error
+		// permanent refresh death — apply before probe path.
+		refreshErr error
+	}
+	outcomes := make([]quotaOutcome, len(candidates))
+	workers := quotaProbeWorkers
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				item := candidates[index]
+				if refresher != nil && accessTokenNeedsRefresh(item, now) {
+					refreshed, refreshErr := refresher.Refresh(ctx, item)
+					if refreshErr != nil {
+						if isPermanentRefresh(refreshErr) {
+							outcomes[index] = quotaOutcome{item: item, refreshErr: refreshErr}
+							continue
+						}
+						// Transient refresh failure: still try probe with current token.
+					} else {
+						item = refreshed
+					}
+				}
+				reason, errorCode, actual, limit, hasUsage, probeErr := probeQuota(ctx, prober, validator, item)
+				outcomes[index] = quotaOutcome{
+					item:      item,
+					reason:    reason,
+					errorCode: errorCode,
+					actual:    actual,
+					limit:     limit,
+					hasUsage:  hasUsage,
+					probeErr:  probeErr,
+				}
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, outcome := range outcomes {
+		item := outcome.item
+		if outcome.refreshErr != nil {
+			applyRefreshFailure(&item, outcome.refreshErr, now)
+			if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
+				result.Failed++
+				continue
+			}
+			result.Failed++
 			continue
 		}
-		probed++
-
-		reason, errorCode, actual, limit, hasUsage, probeErr := probeQuota(ctx, prober, validator, item)
-		if probeErr != nil {
+		if outcome.probeErr != nil {
 			// Transport/infra failures: keep unavailable and retry later without
 			// treating the account as still quota-exhausted.
 			item.RetryAt = now.Add(5 * time.Minute)
@@ -559,15 +696,15 @@ func RecoverQuota(
 			result.Failed++
 			continue
 		}
-		if reason == "" {
+		if outcome.reason == "" {
 			item.Pool = account.PoolReady
 			item.UnavailableReason = ""
 			item.RetryAt = time.Time{}
 			item.LastErrorCode = ""
 			item.UpdatedAt = now.UTC()
-			if hasUsage {
-				item.QuotaActual = actual
-				item.QuotaLimit = limit
+			if outcome.hasUsage {
+				item.QuotaActual = outcome.actual
+				item.QuotaLimit = outcome.limit
 				item.LastSuccessAt = now.UTC()
 			} else if item.QuotaLimit > 0 && item.QuotaActual >= item.QuotaLimit {
 				// Clear "looks full" counters when probe succeeded without headers.
@@ -583,28 +720,56 @@ func RecoverQuota(
 
 		// Still bad: keep unavailable with reason-specific backoff.
 		item.Pool = account.PoolUnavailable
-		item.UnavailableReason = reason
-		item.LastErrorCode = firstNonEmpty(errorCode, "quota-probe-failed")
-		item.RetryAt = credentialRetryAt(reason, now)
-		if reason == account.ReasonQuota {
-			item.RetryAt = now.Add(quotaRetry)
+		item.UnavailableReason = outcome.reason
+		item.LastErrorCode = firstNonEmpty(outcome.errorCode, "quota-probe-failed")
+		item.RetryAt = credentialRetryAt(outcome.reason, now)
+		if outcome.reason == account.ReasonQuota {
+			item.RetryAt = nextQuotaRetry(now, quotaRetry)
 		}
-		if hasUsage {
-			item.QuotaActual = actual
-			item.QuotaLimit = limit
+		if outcome.hasUsage {
+			item.QuotaActual = outcome.actual
+			item.QuotaLimit = outcome.limit
 		}
 		item.UpdatedAt = now.UTC()
 		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
 			result.Failed++
 			continue
 		}
-		if reason == account.ReasonQuota {
+		if outcome.reason == account.ReasonQuota {
 			result.Deferred++
 		} else {
 			result.Failed++
 		}
 	}
 	return result, nil
+}
+
+// nextQuotaRetry returns the re-probe deadline after a still-exhausted quota
+// check. Uses the shorter recheck cadence unless the configured retry is
+// tighter (tests / ops override).
+func nextQuotaRetry(now time.Time, quotaRetry time.Duration) time.Time {
+	if quotaRetry <= 0 {
+		quotaRetry = 24 * time.Hour
+	}
+	recheck := quotaRecheckBackoff
+	if quotaRetry < recheck {
+		recheck = quotaRetry
+	}
+	return now.Add(recheck)
+}
+
+func accessTokenNeedsRefresh(item account.Account, now time.Time) bool {
+	if strings.TrimSpace(item.RefreshToken) == "" ||
+		strings.TrimSpace(item.OIDCIssuer) == "" ||
+		strings.TrimSpace(item.OIDCClientID) == "" {
+		return false
+	}
+	if item.ExpiresAt.IsZero() {
+		// Unknown expiry on a long-parked quota account: refresh proactively
+		// before spending a chat probe.
+		return true
+	}
+	return !item.ExpiresAt.After(now.Add(5 * time.Minute))
 }
 
 func probeQuota(
@@ -691,7 +856,7 @@ func RunRecovery(
 			}
 		}
 		if config.credentialStore != nil && (config.quotaProber != nil || config.validator != nil) {
-			if _, err := RecoverQuota(
+			if res, err := RecoverQuota(
 				ctx,
 				pool,
 				config.credentialStore,
@@ -699,16 +864,24 @@ func RunRecovery(
 				config.validator,
 				now,
 				config.quotaRetry,
+				config.refresher,
 			); err != nil {
 				slog.Error("recovery quota tick failed", "error", err)
+			} else if res.Recovered > 0 || res.Deferred > 0 || res.Failed > 0 {
+				slog.Info("recovery quota tick",
+					"recovered", res.Recovered,
+					"deferred", res.Deferred,
+					"failed", res.Failed,
+					"skipped", res.Skipped,
+				)
 			}
 		}
 		// Re-probe post-mint permission-denied accounts before spending refresh budget.
 		if config.credentialStore != nil && config.validator != nil {
 			if res, err := RecoverValidating(ctx, pool, config.credentialStore, config.validator, now); err != nil {
 				slog.Error("recovery validating tick failed", "error", err)
-			} else if res.Recovered > 0 {
-				slog.Info("recovery validated accounts", "recovered", res.Recovered, "failed", res.Failed)
+			} else if res.Recovered > 0 || res.Failed > 0 {
+				slog.Info("recovery validated accounts", "recovered", res.Recovered, "failed", res.Failed, "skipped", res.Skipped)
 			}
 		}
 		if config.credentialStore != nil && config.refresher != nil {

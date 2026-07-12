@@ -56,6 +56,8 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	proxyURL := flags.String("proxy", "", "override proxy URL for register/mint")
 	ssoCookie := flags.String("sso-cookie", "", "SSO cookie for mint command")
 	email := flags.String("email", "", "email metadata for mint command")
+	exportPath := flags.String("out", "", "output file path for export command (default data/export_accounts.json)")
+	exportPool := flags.String("pool", "", "export only accounts in this pool (ready|unavailable); empty = all")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -85,6 +87,8 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 		return runRegister(ctx, output, settings, repo, *count, *workers, *dryRun, *proxyURL)
 	case "mint":
 		return runMint(ctx, output, settings, repo, *ssoCookie, *email, *dryRun)
+	case "export":
+		return runExport(ctx, output, settings, repo, *exportPath, *exportPool)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -224,13 +228,13 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 	go func() {
 		defer close(recoveryDone)
 		// RunRecovery only exits on context cancel; per-account errors are logged.
-		// 20s ticks + higher per-tick refresh caps clear multi-thousand
-		// expired access-token backlogs much faster than the old 1m/8 rate.
+		// 10s ticks + parallel quota/validating probes clear multi-thousand
+		// due backlogs much faster than the old sequential 20s/32 rate.
 		if err := runtimeworker.RunRecovery(
 			recoveryCtx,
 			pool,
 			repo,
-			20*time.Second,
+			10*time.Second,
 			runtimeworker.WithCredentialRecovery(repo, upstreamClient, upstreamClient),
 			runtimeworker.WithQuotaProber(upstreamClient),
 			runtimeworker.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
@@ -344,4 +348,97 @@ func runMint(
 		return encodeErr
 	}
 	return err
+}
+
+// exportAccount mirrors admin.ImportAccount so the emitted file can be pasted
+// back into /panel import (or another grok2api instance) without field drift.
+type exportAccount struct {
+	ID           string `json:"id"`
+	Key          string `json:"key"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	ExpiresIn    int    `json:"expires_in,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	Email        string `json:"email,omitempty"`
+	OIDCIssuer   string `json:"oidc_issuer,omitempty"`
+	OIDCClientID string `json:"oidc_client_id,omitempty"`
+	UserID       string `json:"user_id,omitempty"`
+	TeamID       string `json:"team_id,omitempty"`
+	Pool         string `json:"pool"`
+	CreatedAt    string `json:"created_at,omitempty"`
+}
+
+func runExport(
+	ctx context.Context,
+	output io.Writer,
+	settings config.Config,
+	repo *repository.SQLite,
+	outPath string,
+	poolFilter string,
+) error {
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		return fmt.Errorf("list accounts: %w", err)
+	}
+
+	wantPool := account.Pool(strings.TrimSpace(poolFilter))
+	filtered := make([]account.Account, 0, len(accounts))
+	for _, a := range accounts {
+		if wantPool != "" && a.Pool != wantPool {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+
+	exported := make([]exportAccount, 0, len(filtered))
+	var withRefresh int
+	for _, a := range filtered {
+		item := exportAccount{
+			ID:           a.ID,
+			Key:          a.AccessToken,
+			RefreshToken: a.RefreshToken,
+			Email:        a.Email,
+			OIDCIssuer:   a.OIDCIssuer,
+			OIDCClientID: a.OIDCClientID,
+			UserID:       a.UserID,
+			TeamID:       a.TeamID,
+			Pool:         string(a.Pool),
+			CreatedAt:    a.CreatedAt.Format(time.RFC3339),
+		}
+		if a.ExpiresAt.IsZero() {
+			if a.AccessToken != "" {
+				item.ExpiresIn = 3600
+			}
+		} else {
+			remaining := max(0, int(time.Until(a.ExpiresAt).Round(time.Second)/time.Second))
+			item.ExpiresIn = remaining
+			item.ExpiresAt = a.ExpiresAt.Format(time.RFC3339)
+		}
+		if a.RefreshToken != "" {
+			withRefresh++
+		}
+		exported = append(exported, item)
+	}
+
+	if strings.TrimSpace(outPath) == "" {
+		outPath = filepath.Join(settings.DataDir, "export_accounts.json")
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
+		return fmt.Errorf("create export dir: %w", err)
+	}
+	data, err := json.MarshalIndent(exported, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode export: %w", err)
+	}
+	if err := os.WriteFile(outPath, data, 0o600); err != nil {
+		return fmt.Errorf("write export: %w", err)
+	}
+
+	summary := map[string]any{
+		"total":        len(filtered),
+		"with_refresh": withRefresh,
+		"pool_filter":  string(wantPool),
+		"output":       outPath,
+	}
+	_ = json.NewEncoder(output).Encode(summary)
+	return nil
 }

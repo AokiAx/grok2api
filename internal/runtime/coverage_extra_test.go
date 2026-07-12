@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,22 +19,22 @@ type usageProbe struct {
 	limit  int64
 	has    bool
 	err    error
-	calls  int
+	calls  atomic.Int64
 }
 
 func (p *usageProbe) ProbeFreeQuota(context.Context, account.Account) (account.UnavailableReason, string, error) {
-	p.calls++
+	p.calls.Add(1)
 	return p.reason, p.code, p.err
 }
 
 func (p *usageProbe) ProbeFreeQuotaUsage(context.Context, account.Account) (account.UnavailableReason, string, int64, int64, bool, error) {
-	p.calls++
+	p.calls.Add(1)
 	return p.reason, p.code, p.actual, p.limit, p.has, p.err
 }
 
 func TestRecoverQuotaWritesUsageAndCapsProbeBudget(t *testing.T) {
 	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
-	const n = 40
+	const n = 300
 	accounts := make([]account.Account, 0, n)
 	for i := 0; i < n; i++ {
 		accounts = append(accounts, account.Account{
@@ -49,14 +50,16 @@ func TestRecoverQuotaWritesUsageAndCapsProbeBudget(t *testing.T) {
 	store := &recoveryStore{accounts: accounts}
 	pool := scheduler.New(accounts)
 	prober := &usageProbe{actual: 10, limit: 100, has: true}
-	result, err := runtime.RecoverQuota(context.Background(), pool, store, prober, nil, now, 0)
+	result, err := runtime.RecoverQuota(context.Background(), pool, store, prober, nil, now, 0, nil)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if prober.calls != 32 {
-		t.Fatalf("calls=%d; want max 32", prober.calls)
+	// Budget is 256 probes/tick for large due queues.
+	const want = 256
+	if prober.calls.Load() != want {
+		t.Fatalf("calls=%d; want max %d", prober.calls.Load(), want)
 	}
-	if result.Recovered != 32 || result.Skipped < 2 {
+	if result.Recovered != want || result.Skipped < n-want {
 		t.Fatalf("result=%#v", result)
 	}
 	found := false
@@ -89,7 +92,7 @@ func TestRecoverQuotaDeferredKeepsUsage(t *testing.T) {
 		limit:  100,
 		has:    true,
 	}
-	result, err := runtime.RecoverQuota(context.Background(), pool, store, prober, nil, now, time.Hour)
+	result, err := runtime.RecoverQuota(context.Background(), pool, store, prober, nil, now, time.Hour, nil)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
