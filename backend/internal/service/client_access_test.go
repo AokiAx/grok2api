@@ -1,0 +1,111 @@
+package service
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
+)
+
+type clientAccessRepository struct {
+	required bool
+	items    map[[32]byte]clientkey.Credential
+	lookup   [32]byte
+}
+
+func (r *clientAccessRepository) ClientAuthRequired(context.Context) (bool, error) {
+	return r.required, nil
+}
+
+func (r *clientAccessRepository) FindClientKeyByHash(_ context.Context, hash [32]byte) (clientkey.Credential, bool, error) {
+	r.lookup = hash
+	item, found := r.items[hash]
+	return item, found, nil
+}
+
+func (r *clientAccessRepository) ConsumeClientKeyRPM(context.Context, string, time.Time) (repository.RateLimitDecision, error) {
+	panic("not used by authentication tests")
+}
+
+func accessCredential(t *testing.T, id, secret string, now time.Time, mutate func(*clientkey.ClientKey)) clientkey.Credential {
+	t.Helper()
+	key := clientkey.ClientKey{
+		ID: id, Name: id, Origin: clientkey.OriginManaged, KeyHash: sha256.Sum256([]byte(secret)),
+		KeyPrefix: "g2a_preview", ModelPolicy: clientkey.ModelPolicyAll,
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
+	}
+	if mutate != nil {
+		mutate(&key)
+	}
+	credential, err := clientkey.NewCredential(key, nil)
+	if err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+	return credential
+}
+
+func TestClientAccessAuthenticatesByHashAndReturnsOpaquePrincipal(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
+	secret := "g2a_super_secret"
+	credential := accessCredential(t, "ck_123", secret, now, nil)
+	repo := &clientAccessRepository{required: true, items: map[[32]byte]clientkey.Credential{
+		credential.Key.KeyHash: credential,
+	}}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+
+	grant, err := access.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if repo.lookup != sha256.Sum256([]byte(secret)) {
+		t.Fatalf("lookup hash=%x", repo.lookup)
+	}
+	if grant.KeyID != "ck_123" || grant.Principal != "client-key:ck_123" || !grant.Authenticated {
+		t.Fatalf("grant=%+v", grant)
+	}
+	if grant.Principal == secret || grant.Principal == "auth:"+secret {
+		t.Fatal("principal retained plaintext credential")
+	}
+}
+
+func TestClientAccessUnifiesMissingRevokedExpiredAndUnknownCredentials(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
+	active := accessCredential(t, "active", "active-secret", now, nil)
+	revokedLegacy := accessCredential(t, "client-key-legacy-config", "legacy-secret", now, func(key *clientkey.ClientKey) {
+		key.Origin = clientkey.OriginConfigAPIKey
+		key.RevokedAt = now.Add(-time.Minute)
+	})
+	expired := accessCredential(t, "expired", "expired-secret", now, func(key *clientkey.ClientKey) {
+		key.ExpiresAt = now
+	})
+	repo := &clientAccessRepository{required: true, items: map[[32]byte]clientkey.Credential{
+		active.Key.KeyHash:        active,
+		revokedLegacy.Key.KeyHash: revokedLegacy,
+		expired.Key.KeyHash:       expired,
+	}}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+
+	for _, secret := range []string{"", "unknown", "legacy-secret", "expired-secret"} {
+		grant, err := access.Authenticate(context.Background(), secret)
+		if !errors.Is(err, ErrClientUnauthorized) {
+			t.Fatalf("secret=%q grant=%+v err=%v want unified unauthorized", secret, grant, err)
+		}
+	}
+}
+
+func TestClientAccessAllowsAnonymousOnlyBeforeStickyAuthMarker(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
+	repo := &clientAccessRepository{required: false}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+	grant, err := access.Authenticate(context.Background(), "")
+	if err != nil || grant.Authenticated || grant.Principal != "" {
+		t.Fatalf("pre-marker anonymous grant=%+v err=%v", grant, err)
+	}
+	if _, err := access.Authenticate(context.Background(), "present-but-unknown"); !errors.Is(err, ErrClientUnauthorized) {
+		t.Fatalf("present unknown credential err=%v", err)
+	}
+}
