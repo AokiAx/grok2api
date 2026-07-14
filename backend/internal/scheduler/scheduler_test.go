@@ -465,9 +465,11 @@ func TestRecordUsageUpdatesQuotaAndSuccessTime(t *testing.T) {
 	}
 }
 
-func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
+func TestApplyMaxActiveCapsPerAccount(t *testing.T) {
+	base := readyAccount("base")
+	base.MaxActive = 2
 	s := scheduler.New([]account.Account{
-		readyAccount("a"),
+		base,
 		readyAccount("b"),
 	})
 	s.ApplyMaxActive(2)
@@ -476,7 +478,7 @@ func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if first.Account().ID != "a" && first.Account().ID != "b" {
+	if first.Account().ID != "base" && first.Account().ID != "b" {
 		t.Fatalf("unexpected id %q", first.Account().ID)
 	}
 	// Pin sticky-less RR: hold first, acquire until we get same id or prove capacity.
@@ -491,7 +493,9 @@ func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
 	first.Release()
 	second.Release()
 
-	s = scheduler.New([]account.Account{readyAccount("solo")})
+	solo := readyAccount("solo")
+	solo.MaxActive = 2
+	s = scheduler.New([]account.Account{solo})
 	s.ApplyMaxActive(2)
 	l1, err := s.Acquire(context.Background())
 	if err != nil {
