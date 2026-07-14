@@ -3,6 +3,7 @@
 package adminauth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"strings"
 	"time"
@@ -84,31 +85,63 @@ func (u AdminUser) CanAuthenticate() bool {
 }
 
 type Session struct {
-	ID               string
-	AdminUserID      string
-	RefreshTokenHash string
-	SourceIP         string
-	UserAgent        string
-	CreatedAt        time.Time
-	ExpiresAt        time.Time
-	LastSeenAt       time.Time
-	RevokedAt        time.Time
+	ID                  string
+	FamilyID            string
+	AdminUserID         string
+	AccessTokenHash     [32]byte
+	RefreshSecretHash   [32]byte
+	SourceIP            string
+	UserAgent           string
+	CreatedAt           time.Time
+	AccessExpiresAt     time.Time
+	ExpiresAt           time.Time
+	LastSeenAt          time.Time
+	RevokedAt           time.Time
+	RotatedAt           time.Time
+	ReplacedBySessionID string
+	RevocationReason    RevocationReason
 }
 
-func NewSession(id, adminUserID, refreshTokenHash string, expiresAt, at time.Time) (Session, error) {
+type RevocationReason string
+
+const (
+	RevocationLogout        RevocationReason = "logout"
+	RevocationRotated       RevocationReason = "rotated"
+	RevocationRefreshReplay RevocationReason = "refresh_replayed"
+	RevocationAdminDisabled RevocationReason = "admin_disabled"
+)
+
+func NewSession(
+	id, familyID, adminUserID string,
+	accessTokenHash, refreshSecretHash [32]byte,
+	accessExpiresAt, expiresAt, at time.Time,
+) (Session, error) {
+	at = normalizeTime(at)
 	item := Session{
-		ID:               strings.TrimSpace(id),
-		AdminUserID:      strings.TrimSpace(adminUserID),
-		RefreshTokenHash: strings.TrimSpace(refreshTokenHash),
-		CreatedAt:        normalizeTime(at),
-		LastSeenAt:       normalizeTime(at),
-		ExpiresAt:        expiresAt.UTC(),
+		ID:                strings.TrimSpace(id),
+		FamilyID:          strings.TrimSpace(familyID),
+		AdminUserID:       strings.TrimSpace(adminUserID),
+		AccessTokenHash:   accessTokenHash,
+		RefreshSecretHash: refreshSecretHash,
+		CreatedAt:         at,
+		LastSeenAt:        at,
+		AccessExpiresAt:   accessExpiresAt.UTC(),
+		ExpiresAt:         expiresAt.UTC(),
 	}
-	if item.ID == "" || item.AdminUserID == "" || item.RefreshTokenHash == "" {
-		return Session{}, errors.New("session id, admin user id, and refresh token hash are required")
+	if item.ID == "" || item.FamilyID == "" || item.AdminUserID == "" {
+		return Session{}, errors.New("session id, family id, and admin user id are required")
+	}
+	if item.AccessTokenHash == ([32]byte{}) || item.RefreshSecretHash == ([32]byte{}) {
+		return Session{}, errors.New("access and refresh hashes are required")
+	}
+	if item.AccessExpiresAt.IsZero() || !item.AccessExpiresAt.After(item.CreatedAt) {
+		return Session{}, errors.New("access expiry must be after creation")
 	}
 	if item.ExpiresAt.IsZero() || !item.ExpiresAt.After(item.CreatedAt) {
 		return Session{}, errors.New("session expiry must be after creation")
+	}
+	if item.AccessExpiresAt.After(item.ExpiresAt) {
+		return Session{}, errors.New("access expiry cannot exceed refresh session expiry")
 	}
 	return item, nil
 }
@@ -118,11 +151,43 @@ func (s Session) Active(at time.Time) bool {
 	return s.RevokedAt.IsZero() && !s.ExpiresAt.IsZero() && at.Before(s.ExpiresAt)
 }
 
-func (s *Session) Revoke(at time.Time) {
+func (s Session) AccessActive(at time.Time) bool {
+	at = normalizeTime(at)
+	return s.Active(at) && !s.AccessExpiresAt.IsZero() && at.Before(s.AccessExpiresAt)
+}
+
+func (s Session) MatchesAccessTokenHash(candidate [32]byte) bool {
+	return subtle.ConstantTimeCompare(s.AccessTokenHash[:], candidate[:]) == 1
+}
+
+func (s Session) MatchesRefreshSecretHash(candidate [32]byte) bool {
+	return subtle.ConstantTimeCompare(s.RefreshSecretHash[:], candidate[:]) == 1
+}
+
+func (s *Session) Revoke(at time.Time, reason RevocationReason) {
 	if s == nil || !s.RevokedAt.IsZero() {
 		return
 	}
 	s.RevokedAt = normalizeTime(at)
+	s.RevocationReason = reason
+}
+
+func (s *Session) Rotate(at time.Time, replacementSessionID string) error {
+	if s == nil {
+		return errors.New("session is required")
+	}
+	replacementSessionID = strings.TrimSpace(replacementSessionID)
+	if replacementSessionID == "" || replacementSessionID == s.ID {
+		return errors.New("replacement session id is invalid")
+	}
+	if !s.RotatedAt.IsZero() || !s.RevokedAt.IsZero() {
+		return errors.New("session is no longer rotatable")
+	}
+	at = normalizeTime(at)
+	s.RotatedAt = at
+	s.ReplacedBySessionID = replacementSessionID
+	s.Revoke(at, RevocationRotated)
+	return nil
 }
 
 type LoginAttempt struct {

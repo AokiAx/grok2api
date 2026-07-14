@@ -16,13 +16,21 @@ type AdminUserStore interface {
 
 type AdminSessionStore interface {
 	CreateAdminSession(context.Context, adminauth.Session) error
-	GetAdminSessionByRefreshHash(context.Context, string) (adminauth.Session, bool, error)
-	RevokeAdminSession(context.Context, string, time.Time) error
+	GetAdminSession(context.Context, string) (adminauth.Session, bool, error)
+	FindAdminSessionByAccessHash(context.Context, [32]byte) (adminauth.Session, bool, error)
+	RotateAdminSession(context.Context, string, [32]byte, adminauth.Session, time.Time) (bool, error)
+	RevokeAdminSession(context.Context, string, time.Time, adminauth.RevocationReason) error
+	RevokeAdminSessionFamily(context.Context, string, time.Time, adminauth.RevocationReason) error
 }
 
 type AdminLoginAttemptStore interface {
 	RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error
-	CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error)
+	CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (AdminLoginFailureCounts, error)
+}
+
+type AdminLoginFailureCounts struct {
+	ByUsername int
+	BySourceIP int
 }
 
 type AdminAuthRepository interface {
