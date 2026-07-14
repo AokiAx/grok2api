@@ -25,17 +25,26 @@ func (adminAuthContractRepository) GetAdminUserByUsername(context.Context, strin
 func (adminAuthContractRepository) CreateAdminSession(context.Context, adminauth.Session) error {
 	return nil
 }
-func (adminAuthContractRepository) GetAdminSessionByRefreshHash(context.Context, string) (adminauth.Session, bool, error) {
+func (adminAuthContractRepository) GetAdminSession(context.Context, string) (adminauth.Session, bool, error) {
 	return adminauth.Session{}, false, nil
 }
-func (adminAuthContractRepository) RevokeAdminSession(context.Context, string, time.Time) error {
+func (adminAuthContractRepository) FindAdminSessionByAccessHash(context.Context, [32]byte) (adminauth.Session, bool, error) {
+	return adminauth.Session{}, false, nil
+}
+func (adminAuthContractRepository) RotateAdminSession(context.Context, string, [32]byte, adminauth.Session, time.Time) (bool, error) {
+	return false, nil
+}
+func (adminAuthContractRepository) RevokeAdminSession(context.Context, string, time.Time, adminauth.RevocationReason) error {
+	return nil
+}
+func (adminAuthContractRepository) RevokeAdminSessionFamily(context.Context, string, time.Time, adminauth.RevocationReason) error {
 	return nil
 }
 func (adminAuthContractRepository) RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error {
 	return nil
 }
-func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error) {
-	return 0, nil
+func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (repository.AdminLoginFailureCounts, error) {
+	return repository.AdminLoginFailureCounts{}, nil
 }
 
 type clientKeyContractRepository struct{}
@@ -72,5 +81,12 @@ func TestRateLimitDecisionCarriesStableResetBoundary(t *testing.T) {
 	decision := repository.RateLimitDecision{Allowed: true, Limit: 60, Remaining: 59, ResetAt: reset}
 	if !decision.Allowed || decision.Limit != 60 || decision.Remaining != 59 || !decision.ResetAt.Equal(reset) {
 		t.Fatalf("decision = %+v", decision)
+	}
+}
+
+func TestAdminLoginFailureCountsKeepUsernameAndSourceDimensionsSeparate(t *testing.T) {
+	counts := repository.AdminLoginFailureCounts{ByUsername: 4, BySourceIP: 5}
+	if counts.ByUsername != 4 || counts.BySourceIP != 5 {
+		t.Fatalf("counts = %+v", counts)
 	}
 }

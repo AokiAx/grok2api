@@ -1,6 +1,7 @@
 package adminauth
 
 import (
+	"crypto/sha256"
 	"testing"
 	"time"
 )
@@ -48,16 +49,43 @@ func TestNewAdminUserNormalizesAndValidatesCredential(t *testing.T) {
 
 func TestAdminSessionLifecycleAndLoginAttemptValidation(t *testing.T) {
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
-	session, err := NewSession(" session-1 ", " admin-1 ", " refresh-hash ", now.Add(time.Hour), now)
+	accessHash := sha256.Sum256([]byte("access-secret"))
+	refreshHash := sha256.Sum256([]byte("refresh-secret"))
+	session, err := NewSession(
+		" session-1 ",
+		" family-1 ",
+		" admin-1 ",
+		accessHash,
+		refreshHash,
+		now.Add(5*time.Minute),
+		now.Add(30*24*time.Hour),
+		now,
+	)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	if !session.Active(now) || session.Active(now.Add(time.Hour)) {
-		t.Fatalf("unexpected session activity at expiry boundary: %+v", session)
+	if session.ID != "session-1" || session.FamilyID != "family-1" || session.AdminUserID != "admin-1" {
+		t.Fatalf("normalized session identity = %+v", session)
 	}
-	session.Revoke(now.Add(time.Minute))
-	if session.Active(now.Add(2*time.Minute)) || session.RevokedAt.IsZero() {
+	if !session.Active(now) || session.Active(now.Add(30*24*time.Hour)) {
+		t.Fatalf("unexpected refresh activity at expiry boundary: %+v", session)
+	}
+	if !session.AccessActive(now) || session.AccessActive(now.Add(5*time.Minute)) {
+		t.Fatalf("unexpected access activity at expiry boundary: %+v", session)
+	}
+	if !session.MatchesAccessTokenHash(accessHash) || !session.MatchesRefreshSecretHash(refreshHash) {
+		t.Fatal("session hash comparison rejected matching hashes")
+	}
+	if session.MatchesRefreshSecretHash(sha256.Sum256([]byte("wrong"))) {
+		t.Fatal("session hash comparison accepted a different secret hash")
+	}
+
+	session.Revoke(now.Add(time.Minute), RevocationLogout)
+	if session.Active(now.Add(2*time.Minute)) || session.AccessActive(now.Add(2*time.Minute)) || session.RevokedAt.IsZero() {
 		t.Fatalf("revoked session remained active: %+v", session)
+	}
+	if session.RevocationReason != RevocationLogout {
+		t.Fatalf("revocation reason = %q; want logout", session.RevocationReason)
 	}
 
 	failed, err := NewLoginAttempt(" Admin ", " 127.0.0.1 ", false, "bad_password", now)
@@ -69,5 +97,30 @@ func TestAdminSessionLifecycleAndLoginAttemptValidation(t *testing.T) {
 	}
 	if _, err := NewLoginAttempt("admin", "127.0.0.1", true, "bad_password", now); err == nil {
 		t.Fatal("successful attempt with failure code should be rejected")
+	}
+}
+
+func TestAdminSessionRotationRecordsLineage(t *testing.T) {
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	hash := sha256.Sum256([]byte("secret"))
+	session, err := NewSession("session-1", "family-1", "admin-1", hash, hash, now.Add(5*time.Minute), now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if err := session.Rotate(now.Add(time.Minute), "session-2"); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if session.RotatedAt.IsZero() || session.RevokedAt.IsZero() || session.ReplacedBySessionID != "session-2" {
+		t.Fatalf("rotation lineage = %+v", session)
+	}
+	if session.RevocationReason != RevocationRotated || session.Active(now.Add(2*time.Minute)) {
+		t.Fatalf("rotated session lifecycle = %+v", session)
+	}
+	rotatedAt := session.RotatedAt
+	if err := session.Rotate(now.Add(2*time.Minute), "session-3"); err == nil {
+		t.Fatal("second rotation should be rejected")
+	}
+	if !session.RotatedAt.Equal(rotatedAt) || session.ReplacedBySessionID != "session-2" {
+		t.Fatalf("failed rotation mutated lineage: %+v", session)
 	}
 }
