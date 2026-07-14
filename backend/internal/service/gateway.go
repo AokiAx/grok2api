@@ -11,14 +11,11 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
 	"github.com/AokiAx/grok2api/backend/internal/upstream"
 )
-
-type AccountStore interface {
-	SaveAccount(context.Context, account.Account) error
-}
 
 type Upstream interface {
 	Request(context.Context, account.Account, string, string, []byte, bool) (*http.Response, error)
@@ -33,7 +30,7 @@ type ChatResult struct {
 
 type Gateway struct {
 	scheduler       *scheduler.Scheduler
-	store           AccountStore
+	store           repository.AccountSaver
 	upstream        Upstream
 	quotaRetry      time.Duration
 	rateRetry       time.Duration
@@ -92,7 +89,7 @@ func WithAcquireTimeout(duration time.Duration) Option {
 
 func NewGateway(
 	scheduler *scheduler.Scheduler,
-	store AccountStore,
+	store repository.AccountSaver,
 	upstream Upstream,
 	options ...Option,
 ) *Gateway {

@@ -1,4 +1,4 @@
-package repository_test
+package sqlite_test
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
-	"github.com/AokiAx/grok2api/backend/internal/repository"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -18,7 +18,7 @@ func TestPythonV1FixtureMigratesAllSupportedFieldsAndStates(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "python-v1.db")
 	applySQLFixture(t, database, filepath.Join("testdata", "python_v1.sql"))
 
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open migrated database: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPythonV1FixtureMigratesAllSupportedFieldsAndStates(t *testing.T) {
 
 func TestLegacyJSONFixtureImportsAllSupportedFieldsAndStates(t *testing.T) {
 	ctx := context.Background()
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "legacy.db"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "legacy.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLegacyJSONFixtureImportsAllSupportedFieldsAndStates(t *testing.T) {
 func TestOpenV3DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "v3.db")
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestOpenV3DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.
 	}
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		repo, err = repository.OpenSQLite(ctx, database)
+		repo, err = sqlite.OpenSQLite(ctx, database)
 		if err != nil {
 			t.Fatalf("reopen attempt %d: %v", attempt, err)
 		}
@@ -236,7 +236,7 @@ func TestOpenV3DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.
 func TestLegacyJSONImportRollsBackAllRowsWhenOneUpsertFails(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "rollback.db")
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestLegacyJSONImportRollsBackAllRowsWhenOneUpsertFails(t *testing.T) {
 func TestMalformedLegacyJSONDoesNotModifyExistingDatabase(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(dir, "malformed.db"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(dir, "malformed.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}

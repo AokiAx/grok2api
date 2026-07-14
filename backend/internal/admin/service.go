@@ -53,14 +53,6 @@ type AccountStats struct {
 	ErrorCodes          map[string]int `json:"error_codes"`
 }
 
-type Repository interface {
-	ListAccounts(context.Context) ([]account.Account, error)
-	ListAccountsPage(context.Context, repository.ListAccountsQuery) (repository.ListAccountsResult, error)
-	AccountStats(context.Context) (repository.AccountStats, error)
-	SaveAccount(context.Context, account.Account) error
-	DeleteAccount(context.Context, string) error
-}
-
 type Validator interface {
 	Validate(context.Context, account.Account) (account.UnavailableReason, string, error)
 }
@@ -71,7 +63,7 @@ type AccountSink interface {
 }
 
 type Service struct {
-	repository Repository
+	repository repository.AccountRepository
 	validator  Validator
 	sink       AccountSink
 	now        func() time.Time
@@ -87,7 +79,7 @@ func WithSink(sink AccountSink) Option {
 	}
 }
 
-func NewService(repository Repository, validator Validator, options ...Option) *Service {
+func NewService(repository repository.AccountRepository, validator Validator, options ...Option) *Service {
 	service := &Service{
 		repository: repository,
 		validator:  validator,

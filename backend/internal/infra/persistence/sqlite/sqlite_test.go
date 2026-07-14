@@ -1,4 +1,4 @@
-package repository_test
+package sqlite_test
 
 import (
 	"bytes"
@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	_ "modernc.org/sqlite"
@@ -21,7 +22,7 @@ import (
 func TestSQLiteMigrationCreatesTwoPoolSchema(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "grok2api.db")
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestLegacyDisabledAccountsMigrateByFailureReason(t *testing.T) {
 		t.Fatalf("write legacy: %v", err)
 	}
 
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestLegacyDisabledHeuristicSeparatesExpiredAuthAndQuota(t *testing.T) {
 	if err := os.WriteFile(legacy, data, 0o600); err != nil {
 		t.Fatalf("write legacy: %v", err)
 	}
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestLegacyDisabledHeuristicSeparatesExpiredAuthAndQuota(t *testing.T) {
 func TestSaveAccountPersistsPoolTransitionAndEvent(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "grok2api.db")
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestSaveAccountPersistsPoolTransitionAndEvent(t *testing.T) {
 
 func TestListAccountsPageAndStats(t *testing.T) {
 	ctx := context.Background()
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "page.db"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "page.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -260,7 +261,7 @@ func TestListAccountsPageAndStats(t *testing.T) {
 func TestAccountCount(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "grok2api.db")
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -286,7 +287,7 @@ func TestAccountCount(t *testing.T) {
 
 func TestDeleteAccountRemovesStoredCredential(t *testing.T) {
 	ctx := context.Background()
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "accounts.db"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "accounts.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -381,7 +382,7 @@ func TestOpenSQLiteMigratesPythonV1AccountTable(t *testing.T) {
 		t.Fatalf("close fixture sqlite: %v", err)
 	}
 
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open migrated sqlite: %v", err)
 	}
@@ -429,7 +430,7 @@ func TestLegacyEnabledExpiredCredentialMigratesToAuth(t *testing.T) {
 	if err := os.WriteFile(legacy, data, 0o600); err != nil {
 		t.Fatalf("write legacy: %v", err)
 	}
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -449,7 +450,7 @@ func TestLegacyEnabledExpiredCredentialMigratesToAuth(t *testing.T) {
 func TestSaveAccountPersistsQuotaAndLastSuccess(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "quota.db")
-	repo, err := repository.OpenSQLite(ctx, database)
+	repo, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -495,7 +496,7 @@ func TestSaveAccountPersistsQuotaAndLastSuccess(t *testing.T) {
 
 func TestSaveAccountPersistsTeamID(t *testing.T) {
 	ctx := context.Background()
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(t.TempDir(), "team.db"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "team.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -534,7 +535,7 @@ func TestImportLegacyJSONKeepsTeamID(t *testing.T) {
 	if err := os.WriteFile(legacy, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +563,7 @@ func TestCredentialEncryptionRoundTrip(t *testing.T) {
 		t.Fatalf("cipher: %v", err)
 	}
 	ctx := context.Background()
-	repo, err := repository.OpenSQLiteWithCipher(ctx, path, cipher)
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, path, cipher)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -601,7 +602,7 @@ func TestBase64RefreshTokenDoesNotRequireCredentialKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plain-base64.db")
 	ctx := context.Background()
-	repo, err := repository.OpenSQLite(ctx, path)
+	repo, err := sqlite.OpenSQLite(ctx, path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -618,7 +619,7 @@ func TestBase64RefreshTokenDoesNotRequireCredentialKey(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	repo, err = repository.OpenSQLite(ctx, path)
+	repo, err = sqlite.OpenSQLite(ctx, path)
 	if err != nil {
 		t.Fatalf("reopen without credential key: %v", err)
 	}
@@ -635,7 +636,7 @@ func TestBase64RefreshTokenDoesNotRequireCredentialKey(t *testing.T) {
 func TestOpeningPlaintextDatabaseWithCredentialKeyEncryptsExistingRows(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "plaintext-to-encrypted.db")
-	plainRepo, err := repository.OpenSQLite(ctx, path)
+	plainRepo, err := sqlite.OpenSQLite(ctx, path)
 	if err != nil {
 		t.Fatalf("open plaintext database: %v", err)
 	}
@@ -655,7 +656,7 @@ func TestOpeningPlaintextDatabaseWithCredentialKeyEncryptsExistingRows(t *testin
 	if err != nil {
 		t.Fatalf("cipher: %v", err)
 	}
-	encryptedRepo, err := repository.OpenSQLiteWithCipher(ctx, path, cipher)
+	encryptedRepo, err := sqlite.OpenSQLiteWithCipher(ctx, path, cipher)
 	if err != nil {
 		t.Fatalf("reopen with key: %v", err)
 	}
@@ -689,7 +690,7 @@ func TestEncryptedDatabaseWithWrongCredentialKeyFailsClosedOnRead(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo, err := repository.OpenSQLiteWithCipher(ctx, path, first)
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, path, first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +709,7 @@ func TestEncryptedDatabaseWithWrongCredentialKeyFailsClosedOnRead(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo, err = repository.OpenSQLiteWithCipher(ctx, path, second)
+	repo, err = sqlite.OpenSQLiteWithCipher(ctx, path, second)
 	if err != nil {
 		t.Fatalf("open with wrong key: %v", err)
 	}
@@ -721,7 +722,7 @@ func TestEncryptedDatabaseWithWrongCredentialKeyFailsClosedOnRead(t *testing.T) 
 func TestLegacyEnvelopeRequiresCredentialKey(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy-envelope.db")
-	repo, err := repository.OpenSQLite(ctx, path)
+	repo, err := sqlite.OpenSQLite(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}

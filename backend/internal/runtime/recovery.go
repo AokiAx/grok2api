@@ -11,17 +11,9 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
 )
-
-type AccountStore interface {
-	SaveAccount(context.Context, account.Account) error
-}
-
-type CredentialStore interface {
-	AccountStore
-	ListAccounts(context.Context) ([]account.Account, error)
-}
 
 type CredentialRefresher interface {
 	Refresh(context.Context, account.Account) (account.Account, error)
@@ -95,7 +87,7 @@ type IsolationResult struct {
 func IsolateExhaustedReady(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store CredentialStore,
+	store repository.AccountStore,
 	now time.Time,
 	quotaRetry time.Duration,
 ) (IsolationResult, error) {
@@ -135,7 +127,7 @@ func IsolateExhaustedReady(
 func IsolateUnrecoverableAuth(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store CredentialStore,
+	store repository.AccountStore,
 	now time.Time,
 ) (IsolationResult, error) {
 	if store == nil {
@@ -185,7 +177,7 @@ func isolateRevokedAccount(item *account.Account, now time.Time) {
 func RecoverCredentials(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store CredentialStore,
+	store repository.AccountStore,
 	refresher CredentialRefresher,
 	validator CredentialValidator,
 	now time.Time,
@@ -338,7 +330,7 @@ func RecoverCredentials(
 func RefreshExpiring(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store CredentialStore,
+	store repository.AccountStore,
 	refresher CredentialRefresher,
 	now time.Time,
 	lead time.Duration,
@@ -490,7 +482,7 @@ func credentialRetryAt(reason account.UnavailableReason, now time.Time) time.Tim
 func RecoverValidating(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store CredentialStore,
+	store repository.AccountStore,
 	validator CredentialValidator,
 	now time.Time,
 ) (CredentialRecoveryResult, error) {
@@ -609,7 +601,7 @@ func RecoverValidating(
 }
 
 type recoveryConfig struct {
-	credentialStore CredentialStore
+	credentialStore repository.AccountStore
 	refresher       CredentialRefresher
 	validator       CredentialValidator
 	quotaProber     QuotaProber
@@ -619,7 +611,7 @@ type recoveryConfig struct {
 type RecoveryOption func(*recoveryConfig)
 
 func WithCredentialRecovery(
-	store CredentialStore,
+	store repository.AccountStore,
 	refresher CredentialRefresher,
 	validator CredentialValidator,
 ) RecoveryOption {
@@ -654,7 +646,7 @@ func WithQuotaProber(prober QuotaProber) RecoveryOption {
 func RecoverQuota(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store CredentialStore,
+	store repository.AccountStore,
 	prober QuotaProber,
 	validator CredentialValidator,
 	now time.Time,
@@ -761,7 +753,7 @@ func probeQuota(
 
 func saveAccountBestEffort(
 	ctx context.Context,
-	store AccountStore,
+	store repository.AccountSaver,
 	pool *scheduler.Scheduler,
 	item account.Account,
 ) error {
@@ -787,7 +779,7 @@ func firstNonEmpty(values ...string) string {
 func RecoverDue(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store AccountStore,
+	store repository.AccountSaver,
 	now time.Time,
 ) error {
 	// Cooldown re-enters without an upstream probe. Quota uses RecoverQuota
@@ -805,7 +797,7 @@ func RecoverDue(
 func RunRecovery(
 	ctx context.Context,
 	pool *scheduler.Scheduler,
-	store AccountStore,
+	store repository.AccountSaver,
 	interval time.Duration,
 	options ...RecoveryOption,
 ) error {

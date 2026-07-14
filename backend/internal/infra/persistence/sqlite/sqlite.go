@@ -1,4 +1,4 @@
-package repository
+package sqlite
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	_ "modernc.org/sqlite"
 )
@@ -21,6 +22,8 @@ type SQLite struct {
 	db     *sql.DB
 	cipher *security.Cipher
 }
+
+var _ repository.AccountRepository = (*SQLite)(nil)
 
 func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	return OpenSQLiteWithCipher(ctx, path, nil)
@@ -676,60 +679,12 @@ func (r *SQLite) upsertAccount(ctx context.Context, tx *sql.Tx, item account.Acc
 	return nil
 }
 
-// ListAccountsQuery filters and pages the accounts table for admin views.
-// Page is 1-based. PageSize defaults to 50 and is capped at 200.
-type ListAccountsQuery struct {
-	Pool     string // "", "ready", or "unavailable"
-	Q        string // substring match on id/email/reason/error
-	Page     int
-	PageSize int
-}
-
-// ListAccountsResult is one page of accounts plus the filtered total.
-type ListAccountsResult struct {
-	Items    []account.Account
-	Total    int
-	Page     int
-	PageSize int
-}
-
-// AccountStats is a lightweight global aggregate (no token rows).
-type AccountStats struct {
-	TotalAccounts       int
-	ReadyAccounts       int
-	UnavailableAccounts int
-	TotalRequests       int64
-	MaxActive           int
-	RefreshableAccounts int
-	QuotaActual         int64
-	QuotaLimit          int64
-	QuotaRemaining      int64
-	ReadyQuotaRemaining int64
-	QuotaObserved       int
-	ReadyQuotaObserved  int
-	// AuthFailAccounts: accounts with authentication_fails > 0.
-	AuthFailAccounts int
-	// TotalAuthFails: sum of authentication_fails.
-	TotalAuthFails int64
-	// AccessExpired: non-empty expires_at earlier than now.
-	AccessExpired int
-	// AccessExpiringSoon: expires within the next hour (and not already expired).
-	AccessExpiringSoon int
-	// RetryDue: unavailable accounts whose retry_at is due.
-	RetryDue int
-	// NoRefreshToken: accounts without a refresh_token.
-	NoRefreshToken int
-	Reasons        map[string]int
-	// ErrorCodes aggregates last_error_code for accounts that still have one set.
-	ErrorCodes map[string]int
-}
-
 const (
 	defaultListPageSize = 50
 	maxListPageSize     = 200
 )
 
-func normalizeListQuery(query ListAccountsQuery) ListAccountsQuery {
+func normalizeListQuery(query repository.ListAccountsQuery) repository.ListAccountsQuery {
 	page := query.Page
 	if page < 1 {
 		page = 1
@@ -745,7 +700,7 @@ func normalizeListQuery(query ListAccountsQuery) ListAccountsQuery {
 	if pool != "ready" && pool != "unavailable" {
 		pool = ""
 	}
-	return ListAccountsQuery{
+	return repository.ListAccountsQuery{
 		Pool:     pool,
 		Q:        strings.TrimSpace(query.Q),
 		Page:     page,
@@ -753,7 +708,7 @@ func normalizeListQuery(query ListAccountsQuery) ListAccountsQuery {
 	}
 }
 
-func accountListWhere(query ListAccountsQuery) (string, []any) {
+func accountListWhere(query repository.ListAccountsQuery) (string, []any) {
 	var clauses []string
 	var args []any
 	if query.Pool != "" {
@@ -805,14 +760,17 @@ func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 	return result, nil
 }
 
-func (r *SQLite) ListAccountsPage(ctx context.Context, query ListAccountsQuery) (ListAccountsResult, error) {
+func (r *SQLite) ListAccountsPage(
+	ctx context.Context,
+	query repository.ListAccountsQuery,
+) (repository.ListAccountsResult, error) {
 	query = normalizeListQuery(query)
 	where, args := accountListWhere(query)
 
 	var total int
 	countSQL := `SELECT COUNT(*) FROM accounts ` + where
 	if err := r.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
-		return ListAccountsResult{}, fmt.Errorf("count filtered accounts: %w", err)
+		return repository.ListAccountsResult{}, fmt.Errorf("count filtered accounts: %w", err)
 	}
 
 	offset := (query.Page - 1) * query.PageSize
@@ -824,7 +782,7 @@ func (r *SQLite) ListAccountsPage(ctx context.Context, query ListAccountsQuery) 
 	listArgs := append(append([]any{}, args...), query.PageSize, offset)
 	rows, err := r.db.QueryContext(ctx, listSQL, listArgs...)
 	if err != nil {
-		return ListAccountsResult{}, fmt.Errorf("list accounts page: %w", err)
+		return repository.ListAccountsResult{}, fmt.Errorf("list accounts page: %w", err)
 	}
 	defer rows.Close()
 
@@ -832,14 +790,14 @@ func (r *SQLite) ListAccountsPage(ctx context.Context, query ListAccountsQuery) 
 	for rows.Next() {
 		item, err := r.scanAccount(rows)
 		if err != nil {
-			return ListAccountsResult{}, err
+			return repository.ListAccountsResult{}, err
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return ListAccountsResult{}, fmt.Errorf("iterate accounts page: %w", err)
+		return repository.ListAccountsResult{}, fmt.Errorf("iterate accounts page: %w", err)
 	}
-	return ListAccountsResult{
+	return repository.ListAccountsResult{
 		Items:    items,
 		Total:    total,
 		Page:     query.Page,
@@ -898,8 +856,8 @@ func (r *SQLite) scanAccount(rows accountScanner) (account.Account, error) {
 }
 
 // AccountStats returns global pool aggregates without loading token rows.
-func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
-	stats := AccountStats{
+func (r *SQLite) AccountStats(ctx context.Context) (repository.AccountStats, error) {
+	stats := repository.AccountStats{
 		Reasons:    make(map[string]int),
 		ErrorCodes: make(map[string]int),
 	}
@@ -974,7 +932,7 @@ func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
 		&stats.NoRefreshToken,
 	)
 	if err != nil {
-		return AccountStats{}, fmt.Errorf("account stats: %w", err)
+		return repository.AccountStats{}, fmt.Errorf("account stats: %w", err)
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
@@ -983,19 +941,19 @@ func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
 		WHERE pool = 'unavailable' AND unavailable_reason != ''
 		GROUP BY unavailable_reason`)
 	if err != nil {
-		return AccountStats{}, fmt.Errorf("account reason stats: %w", err)
+		return repository.AccountStats{}, fmt.Errorf("account reason stats: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var reason string
 		var count int
 		if err := rows.Scan(&reason, &count); err != nil {
-			return AccountStats{}, fmt.Errorf("scan reason stats: %w", err)
+			return repository.AccountStats{}, fmt.Errorf("scan reason stats: %w", err)
 		}
 		stats.Reasons[reason] = count
 	}
 	if err := rows.Err(); err != nil {
-		return AccountStats{}, fmt.Errorf("iterate reason stats: %w", err)
+		return repository.AccountStats{}, fmt.Errorf("iterate reason stats: %w", err)
 	}
 
 	codeRows, err := r.db.QueryContext(ctx, `
@@ -1006,19 +964,19 @@ func (r *SQLite) AccountStats(ctx context.Context) (AccountStats, error) {
 		ORDER BY COUNT(*) DESC
 		LIMIT 20`)
 	if err != nil {
-		return AccountStats{}, fmt.Errorf("account error code stats: %w", err)
+		return repository.AccountStats{}, fmt.Errorf("account error code stats: %w", err)
 	}
 	defer codeRows.Close()
 	for codeRows.Next() {
 		var code string
 		var count int
 		if err := codeRows.Scan(&code, &count); err != nil {
-			return AccountStats{}, fmt.Errorf("scan error code stats: %w", err)
+			return repository.AccountStats{}, fmt.Errorf("scan error code stats: %w", err)
 		}
 		stats.ErrorCodes[code] = count
 	}
 	if err := codeRows.Err(); err != nil {
-		return AccountStats{}, fmt.Errorf("iterate error code stats: %w", err)
+		return repository.AccountStats{}, fmt.Errorf("iterate error code stats: %w", err)
 	}
 	return stats, nil
 }

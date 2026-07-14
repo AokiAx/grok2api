@@ -21,6 +21,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/api"
 	"github.com/AokiAx/grok2api/backend/internal/config"
+	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	runtimeworker "github.com/AokiAx/grok2api/backend/internal/runtime"
@@ -70,7 +71,7 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	if credCipher != nil {
 		slog.Info("credential encryption enabled")
 	}
-	repo, err := repository.OpenSQLiteWithCipher(ctx, filepath.Join(settings.DataDir, "grok2api.db"), credCipher)
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, filepath.Join(settings.DataDir, "grok2api.db"), credCipher)
 	if err != nil {
 		return err
 	}
@@ -93,7 +94,7 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	}
 }
 
-func importLegacyWhenEmpty(ctx context.Context, repo *repository.SQLite, dataDir string) error {
+func importLegacyWhenEmpty(ctx context.Context, repo *sqlite.SQLite, dataDir string) error {
 	count, err := repo.AccountCount(ctx)
 	if err != nil {
 		return err
@@ -115,7 +116,7 @@ func importLegacyWhenEmpty(ctx context.Context, repo *repository.SQLite, dataDir
 	return nil
 }
 
-func printStatus(ctx context.Context, output io.Writer, repo *repository.SQLite) error {
+func printStatus(ctx context.Context, output io.Writer, repo repository.AccountLister) error {
 	accounts, err := repo.ListAccounts(ctx)
 	if err != nil {
 		return err
@@ -139,7 +140,7 @@ func printStatus(ctx context.Context, output io.Writer, repo *repository.SQLite)
 	})
 }
 
-func serve(ctx context.Context, settings config.Config, repo *repository.SQLite) error {
+func serve(ctx context.Context, settings config.Config, repo repository.AccountRepository) error {
 	frontendFS, err := frontendFileSystem(settings.Frontend.StaticPath)
 	if err != nil {
 		return err
@@ -347,7 +348,7 @@ func runExport(
 	ctx context.Context,
 	output io.Writer,
 	settings config.Config,
-	repo *repository.SQLite,
+	repo repository.AccountLister,
 	outPath string,
 	poolFilter string,
 ) error {
