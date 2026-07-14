@@ -96,7 +96,7 @@ func TestSQLiteAdminAuthPersistenceEnforcesForeignKeysRotationAndThrottleDimensi
 	defer repo.Close()
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
 	user, err := adminauth.NewAdminUser("admin-1", "Admin", adminauth.PasswordCredential{
-		Scheme: adminauth.PasswordSchemeBcryptSHA256V1, Hash: "$2a$12$fixture",
+		Scheme: adminauth.PasswordSchemeBcryptSHA256V1, Hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
 	}, now)
 	if err != nil {
 		t.Fatalf("new user: %v", err)
@@ -106,6 +106,15 @@ func TestSQLiteAdminAuthPersistenceEnforcesForeignKeysRotationAndThrottleDimensi
 	}
 	if _, found, err := repo.GetAdminUserByUsername(ctx, " ADMIN "); err != nil || !found {
 		t.Fatalf("lookup normalized username found=%v err=%v", found, err)
+	}
+	secondUser, err := adminauth.NewAdminUser("admin-2", "second", adminauth.PasswordCredential{
+		Scheme: adminauth.PasswordSchemeBcryptSHA256V1, Hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
+	}, now)
+	if err != nil {
+		t.Fatalf("new second user: %v", err)
+	}
+	if err := repo.CreateAdminUser(ctx, secondUser); err != nil {
+		t.Fatalf("create second user: %v", err)
 	}
 
 	accessHash := sha256.Sum256([]byte("access-1"))
@@ -128,6 +137,58 @@ func TestSQLiteAdminAuthPersistenceEnforcesForeignKeysRotationAndThrottleDimensi
 	if err := repo.CreateAdminSession(ctx, invalid); err == nil {
 		t.Fatal("foreign key violation should reject session for missing admin")
 	}
+	expiredAccess := sha256.Sum256([]byte("expired-access"))
+	expiredRefresh := sha256.Sum256([]byte("expired-refresh"))
+	expired, err := adminauth.NewSession("expired-session", "expired-family", user.ID, expiredAccess, expiredRefresh, now.Add(time.Minute), now.Add(2*time.Minute), now)
+	if err != nil {
+		t.Fatalf("new expired session: %v", err)
+	}
+	if err := repo.CreateAdminSession(ctx, expired); err != nil {
+		t.Fatalf("create expired session fixture: %v", err)
+	}
+	expiredReplacement, err := adminauth.NewSession(
+		"expired-replacement", expired.FamilyID, user.ID,
+		sha256.Sum256([]byte("expired-replacement-access")), sha256.Sum256([]byte("expired-replacement-refresh")),
+		now.Add(7*time.Minute), now.Add(time.Hour), now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("new expired replacement: %v", err)
+	}
+	if rotated, err := repo.RotateAdminSession(ctx, expired.ID, expiredRefresh, expiredReplacement, now.Add(2*time.Minute)); err != nil || rotated {
+		t.Fatalf("expired rotation rotated=%v err=%v", rotated, err)
+	}
+
+	lineageAccess := sha256.Sum256([]byte("lineage-access"))
+	lineageRefresh := sha256.Sum256([]byte("lineage-refresh"))
+	lineage, err := adminauth.NewSession("lineage-session", "lineage-family", user.ID, lineageAccess, lineageRefresh, now.Add(5*time.Minute), now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("new lineage session: %v", err)
+	}
+	if err := repo.CreateAdminSession(ctx, lineage); err != nil {
+		t.Fatalf("create lineage session: %v", err)
+	}
+	crossFamily, err := adminauth.NewSession(
+		"cross-family", "different-family", user.ID,
+		sha256.Sum256([]byte("cross-access")), sha256.Sum256([]byte("cross-refresh")),
+		now.Add(6*time.Minute), now.Add(time.Hour), now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("new cross-family replacement: %v", err)
+	}
+	if rotated, err := repo.RotateAdminSession(ctx, lineage.ID, lineageRefresh, crossFamily, now.Add(time.Minute)); err != nil || rotated {
+		t.Fatalf("cross-family rotation rotated=%v err=%v", rotated, err)
+	}
+	crossAdmin, err := adminauth.NewSession(
+		"cross-admin", lineage.FamilyID, secondUser.ID,
+		sha256.Sum256([]byte("cross-admin-access")), sha256.Sum256([]byte("cross-admin-refresh")),
+		now.Add(6*time.Minute), now.Add(time.Hour), now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("new cross-admin replacement: %v", err)
+	}
+	if rotated, err := repo.RotateAdminSession(ctx, lineage.ID, lineageRefresh, crossAdmin, now.Add(time.Minute)); err != nil || rotated {
+		t.Fatalf("cross-admin rotation rotated=%v err=%v", rotated, err)
+	}
 
 	replacementAccess := sha256.Sum256([]byte("access-2"))
 	replacementRefresh := sha256.Sum256([]byte("refresh-2"))
@@ -142,6 +203,9 @@ func TestSQLiteAdminAuthPersistenceEnforcesForeignKeysRotationAndThrottleDimensi
 	rotated, err = repo.RotateAdminSession(ctx, session.ID, refreshHash, replacement, now.Add(2*time.Minute))
 	if err != nil || rotated {
 		t.Fatalf("rotation CAS loser rotated=%v err=%v", rotated, err)
+	}
+	if err := repo.RevokeAdminSession(ctx, replacement.ID, time.Time{}, adminauth.RevocationLogout); err == nil {
+		t.Fatal("zero session revocation time should be rejected")
 	}
 	old, found, err := repo.GetAdminSession(ctx, session.ID)
 	if err != nil || !found || old.ReplacedBySessionID != replacement.ID || old.RevocationReason != adminauth.RevocationRotated {
@@ -166,9 +230,9 @@ func TestSQLiteAdminAuthPersistenceEnforcesForeignKeysRotationAndThrottleDimensi
 			t.Fatalf("record attempt: %v", err)
 		}
 	}
-	counts, err := repo.CountRecentAdminLoginFailures(ctx, "ADMIN", "10.0.0.1", now.Add(-15*time.Minute))
-	if err != nil || counts.ByUsername != 2 || counts.BySourceIP != 2 {
-		t.Fatalf("failure counts = %+v err=%v", counts, err)
+	count, err := repo.CountRecentAdminLoginFailures(ctx, "ADMIN", "10.0.0.1", now.Add(-15*time.Minute))
+	if err != nil || count != 1 {
+		t.Fatalf("tuple failure count = %d err=%v", count, err)
 	}
 }
 
@@ -189,31 +253,56 @@ func TestSQLiteClientKeyPersistenceScopesAndStickyAuthMarker(t *testing.T) {
 		ID: "key-1", Name: "Primary", Origin: clientkey.OriginManaged, KeyHash: hash,
 		KeyPrefix: "g2a_abcd", ModelPolicy: clientkey.ModelPolicyAll, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := repo.CreateClientKey(ctx, key, nil); err != nil {
+	credential, err := clientkey.NewCredential(key, nil)
+	if err != nil {
+		t.Fatalf("new credential: %v", err)
+	}
+	if err := repo.CreateClientKey(ctx, credential); err != nil {
 		t.Fatalf("create key: %v", err)
 	}
 	required, err = repo.ClientAuthRequired(ctx)
 	if err != nil || !required {
 		t.Fatalf("sticky auth required=%v err=%v", required, err)
 	}
-	stored, scopes, found, err := repo.FindClientKeyByHash(ctx, hash)
-	if err != nil || !found || stored.ID != key.ID || len(scopes) != 0 {
-		t.Fatalf("find key = %+v scopes=%#v found=%v err=%v", stored, scopes, found, err)
+	stored, found, err := repo.FindClientKeyByHash(ctx, hash)
+	if err != nil || !found || stored.Key.ID != key.ID || len(stored.Scopes()) != 0 {
+		t.Fatalf("find key = %+v found=%v err=%v", stored, found, err)
 	}
-	stored.ModelPolicy = clientkey.ModelPolicyAllowlist
-	stored.UpdatedAt = now.Add(time.Minute)
-	if err := repo.UpdateClientKey(ctx, stored, []string{"grok-4.5", "GROK-CODE-FAST-1"}); err != nil {
+	update := repository.ClientKeyPolicyUpdate{
+		Name: "Primary", ModelPolicy: clientkey.ModelPolicyAllowlist,
+		Scopes: []string{"grok-4.5", "GROK-CODE-FAST-1"}, UpdatedAt: now.Add(time.Minute),
+	}
+	if err := repo.UpdateClientKeyPolicy(ctx, key.ID, update); err != nil {
 		t.Fatalf("update scopes: %v", err)
 	}
 	listed, err := repo.ListClientKeysPage(ctx, repository.ListClientKeysQuery{Q: "primary", Page: 1, PageSize: 20})
-	if err != nil || listed.Total != 1 || len(listed.Items[0].Scopes) != 2 {
+	if err != nil || listed.Total != 1 || len(listed.Items[0].Scopes()) != 2 {
 		t.Fatalf("listed keys = %+v err=%v", listed, err)
+	}
+	if err := repo.RevokeClientKey(ctx, key.ID, time.Time{}); err == nil {
+		t.Fatal("zero client key revocation time should be rejected")
 	}
 	if err := repo.RevokeClientKey(ctx, key.ID, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("revoke key: %v", err)
 	}
+	update.Name = "Renamed after revoke"
+	update.UpdatedAt = now.Add(3 * time.Minute)
+	if err := repo.UpdateClientKeyPolicy(ctx, key.ID, update); err != nil {
+		t.Fatalf("policy update after revoke: %v", err)
+	}
+	revoked, found, err := repo.GetClientKey(ctx, key.ID)
+	if err != nil || !found || revoked.Key.RevokedAt.IsZero() {
+		t.Fatalf("revoked key was resurrected: %+v found=%v err=%v", revoked, found, err)
+	}
 	if err := repo.Close(); err != nil {
 		t.Fatalf("close repo: %v", err)
+	}
+	raw := openRawSQLite(t, database)
+	if _, err := raw.ExecContext(ctx, `PRAGMA foreign_keys=ON; DELETE FROM client_keys`); err != nil {
+		t.Fatalf("delete all client keys: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
 	}
 
 	repo, err = sqlite.OpenSQLite(ctx, database)
@@ -240,7 +329,11 @@ func TestSQLiteClientKeyRPMIsAtomicAndPersistsAcrossReopen(t *testing.T) {
 		ID: "rpm-key", Name: "RPM", Origin: clientkey.OriginManaged, KeyHash: hash,
 		KeyPrefix: "g2a_rpm", ModelPolicy: clientkey.ModelPolicyAll, RPMLimit: 5, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := repo.CreateClientKey(ctx, key, nil); err != nil {
+	credential, err := clientkey.NewCredential(key, nil)
+	if err != nil {
+		t.Fatalf("new credential: %v", err)
+	}
+	if err := repo.CreateClientKey(ctx, credential); err != nil {
 		t.Fatalf("create key: %v", err)
 	}
 
@@ -251,7 +344,7 @@ func TestSQLiteClientKeyRPMIsAtomicAndPersistsAcrossReopen(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			decision, err := repo.ConsumeClientKeyRPM(ctx, key.ID, key.RPMLimit, now)
+			decision, err := repo.ConsumeClientKeyRPM(ctx, key.ID, now)
 			if err != nil {
 				errs <- err
 				return
@@ -278,12 +371,12 @@ func TestSQLiteClientKeyRPMIsAtomicAndPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("reopen sqlite: %v", err)
 	}
 	defer repo.Close()
-	decision, err := repo.ConsumeClientKeyRPM(ctx, key.ID, key.RPMLimit, now)
+	decision, err := repo.ConsumeClientKeyRPM(ctx, key.ID, now)
 	if err != nil || decision.Allowed || decision.Remaining != 0 {
 		t.Fatalf("persisted window decision = %+v err=%v", decision, err)
 	}
 	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
-	decision, err = repo.ConsumeClientKeyRPM(ctx, key.ID, key.RPMLimit, nextMinute)
+	decision, err = repo.ConsumeClientKeyRPM(ctx, key.ID, nextMinute)
 	if err != nil || !decision.Allowed || decision.Remaining != 4 || !decision.ResetAt.Equal(nextMinute.Add(time.Minute)) {
 		t.Fatalf("reset window decision = %+v err=%v", decision, err)
 	}
