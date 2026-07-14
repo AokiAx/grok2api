@@ -34,6 +34,10 @@ tmp_*.json
 config.json
 data/
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
 # Editor / OS
 .idea/
 .vscode/
