@@ -513,6 +513,34 @@ func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
 	l2.Release()
 }
 
+func TestApplyMaxActivePreservesPersistedPerAccountLimit(t *testing.T) {
+	perAccount := readyAccount("persisted")
+	perAccount.MaxActive = 2
+	s := scheduler.New([]account.Account{perAccount})
+
+	// The process-wide setting is a cap/default for startup. It must not erase
+	// a persisted account-specific limit when the scheduler is initialized.
+	s.ApplyMaxActive(4)
+	first, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	second, err := s.Acquire(context.Background())
+	if err != nil {
+		first.Release()
+		t.Fatalf("second acquire: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.Acquire(ctx); err == nil {
+		second.Release()
+		first.Release()
+		t.Fatal("third lease should block at persisted max_active=2")
+	}
+	second.Release()
+	first.Release()
+}
+
 func TestActiveByIDReturnsLiveLeaseCounts(t *testing.T) {
 	s := scheduler.New([]account.Account{readyAccount("a"), readyAccount("b")})
 	lease, err := s.Acquire(context.Background())
