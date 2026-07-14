@@ -48,6 +48,7 @@ jobs:
             ./internal/bridge \
             ./internal/compat \
             ./internal/config \
+            ./internal/infra/persistence/sqlite \
             ./internal/repository \
             ./internal/runtime \
             ./internal/scheduler \
