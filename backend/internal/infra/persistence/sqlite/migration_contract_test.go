@@ -10,6 +10,7 @@ import (
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	_ "modernc.org/sqlite"
 )
 
@@ -263,6 +264,59 @@ func TestLegacyJSONImportRollsBackAllRowsWhenOneUpsertFails(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("account count after rollback = %d; want 0", count)
+	}
+}
+
+func TestV3SchemaUpgradesToV4WithoutLosingAccountsOrEvents(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "upgrade-v3.db")
+	db := openRawSQLite(t, database)
+	statements := []string{
+		`CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO app_meta(key, value) VALUES('schema_version', '3')`,
+		`CREATE TABLE accounts (
+			id TEXT PRIMARY KEY, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL DEFAULT '',
+			expires_at TEXT NOT NULL DEFAULT '', oidc_issuer TEXT NOT NULL DEFAULT 'https://auth.x.ai',
+			oidc_client_id TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', user_id TEXT NOT NULL DEFAULT '',
+			team_id TEXT NOT NULL DEFAULT '', pool TEXT NOT NULL, unavailable_reason TEXT NOT NULL DEFAULT '',
+			retry_at TEXT NOT NULL DEFAULT '', last_error_code TEXT NOT NULL DEFAULT '', last_success_at TEXT NOT NULL DEFAULT '',
+			quota_actual INTEGER NOT NULL DEFAULT 0, quota_limit INTEGER NOT NULL DEFAULT 0, request_count INTEGER NOT NULL DEFAULT 0,
+			authentication_fails INTEGER NOT NULL DEFAULT 0, max_active INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE account_state_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, from_pool TEXT NOT NULL,
+			to_pool TEXT NOT NULL, reason TEXT NOT NULL, error_code TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+		)`,
+		`INSERT INTO accounts(id, access_token, pool, max_active, created_at, updated_at)
+		 VALUES('legacy-v3', 'token', 'ready', 2, '2026-07-15T00:00:00Z', '2026-07-15T00:00:00Z')`,
+		`INSERT INTO account_state_events(account_id, from_pool, to_pool, reason, error_code, created_at)
+		 VALUES('legacy-v3', '', 'ready', '', '', '2026-07-15T00:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare v3 schema: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close v3 fixture: %v", err)
+	}
+
+	repo, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("upgrade v3: %v", err)
+	}
+	defer repo.Close()
+	if got := repo.SchemaVersion(ctx); got != 4 {
+		t.Fatalf("schema version=%d; want 4", got)
+	}
+	item, found, err := repo.GetAccount(ctx, "legacy-v3")
+	if err != nil || !found || item.Priority != 0 || item.MaxActive != 2 {
+		t.Fatalf("upgraded account=%+v found=%v err=%v", item, found, err)
+	}
+	events, err := repo.ListAccountEvents(ctx, repository.ListAccountEventsQuery{AccountID: "legacy-v3", Page: 1, PageSize: 20})
+	if err != nil || events.Total != 1 || events.Items[0].Type != repository.AccountEventStateTransition {
+		t.Fatalf("upgraded events=%+v err=%v", events, err)
 	}
 }
 
