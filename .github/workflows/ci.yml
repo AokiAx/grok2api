@@ -13,6 +13,9 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +23,7 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
+          cache-dependency-path: backend/go.sum
 
       - name: Verify formatting
         run: test -z "$(gofmt -l cmd internal)"

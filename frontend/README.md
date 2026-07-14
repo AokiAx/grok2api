@@ -6,7 +6,7 @@
 
 ```bash
 # 终端 1：后端开发服务（默认只提供 API）
-go run ./cmd/grok2api serve --config config.json
+go -C backend run ./cmd/grok2api serve --config ../config.json
 
 # 终端 2：前端热更新服务
 cd frontend

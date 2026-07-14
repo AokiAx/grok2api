@@ -14,12 +14,12 @@ RUN find dist -name "*.map" -delete
 FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-WORKDIR /src
-COPY go.mod go.sum ./
+WORKDIR /src/backend
+COPY backend/go.mod backend/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
-COPY cmd ./cmd
-COPY internal ./internal
+COPY backend/cmd ./cmd
+COPY backend/internal ./internal
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \

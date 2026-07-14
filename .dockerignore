@@ -11,8 +11,10 @@ __pycache__/
 config.json
 data/
 coverage*.out
+backend/coverage*.out
 grok2api
 grok2api.exe
+backend/grok2api
+backend/grok2api.exe
 frontend/node_modules/
 frontend/dist/
-internal/api/paneldist/

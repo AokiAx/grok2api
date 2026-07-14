@@ -21,7 +21,7 @@ The frontend is built in the authoritative root `Dockerfile`, copied to
 
 ## Protected release invariants
 
-`internal/buildtest/workflow_test.go` protects invariants that must survive the
+`backend/internal/buildtest/workflow_test.go` protects invariants that must survive the
 directory and packaging migration:
 
 - the Dockerfile selected by the image workflow builds a static Go binary and
@@ -37,7 +37,7 @@ directory and packaging migration:
 Run the repository contract tests with:
 
 ```bash
-go test ./internal/buildtest
+go -C backend test ./internal/buildtest
 ```
 
 ## Image smoke contract
@@ -82,10 +82,10 @@ The Docker packaging migration is complete only when all of these are true:
 - one authoritative Dockerfile builds frontend and backend stages;
 - the final image contains the frontend under `/app/frontend/dist`;
 - the container config points the server at `/app/frontend/dist`;
-- the Go server no longer depends on `internal/api/paneldist` or `go:embed`;
+- the Go server no longer depends on `backend/internal/api/paneldist` or `go:embed`;
 - generated frontend files are not committed to the Go package;
 - CI builds the image and runs `scripts/smoke-docker-image.sh` before publish;
 - the existing non-root, signing, scanning, multi-architecture, digest promotion,
   health verification, and rollback contracts remain green.
 
-These checks are locked by `internal/buildtest` and the image smoke script.
+These checks are locked by `backend/internal/buildtest` and the image smoke script.
