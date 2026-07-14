@@ -142,7 +142,7 @@ func TestDeployWorkflowIsManualAndPinsDigest(t *testing.T) {
 
 func TestLocalDeployVerifiesHealthAndFrontendAsset(t *testing.T) {
 	script := readFile(t, "deploy/deploy-stack.sh")
-	requireContains(t, script, "/health", "/assets/", "index.html", "frontend asset")
+	requireContains(t, script, "/health", "/assets/", "index_html", "frontend asset")
 }
 
 func TestDeliveryExamplesUseRuntimeFrontendDirectory(t *testing.T) {

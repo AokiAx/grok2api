@@ -6,6 +6,10 @@
   "app_key": "",
   "panel_password": "",
   "_help_keys": "管理密钥优先级：panel_password -> app_key -> api_key。",
+  "frontend": {
+    "static_path": ""
+  },
+  "_help_frontend": "裸 Go 默认留空，只提供 API。Docker 镜像通过 GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist 挂载管理 SPA。",
   "proxy_base_url": "https://cli-chat-proxy.grok.com/v1",
   "client_version": "0.2.93",
   "client_identifier": "grok-cli",

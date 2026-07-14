@@ -40,35 +40,32 @@ Ready 环形轮询 ── 账号租约 ── Grok CLI 上游
 
 ## 快速开始
 
-要求 Go 1.25+。SQLite 使用纯 Go 驱动，本地运行不需要额外安装 SQLite、CGO 或 Python。
+**Docker 镜像是唯一正式交付物**：镜像同时包含 Go 服务和管理前端，避免前后端版本错配。
 
 ```powershell
 git clone https://github.com/AokiAx/grok2api.git
 cd grok2api
 Copy-Item config.example.json config.json
-
-# 打开数据库时会自动幂等迁移；输出 Ready/Unavailable 数量
-go run ./cmd/grok2api migrate --config config.json
-
-# 启动服务
-go run ./cmd/grok2api serve --config config.json
+docker compose up -d
 ```
 
-`serve` 是默认命令，因此也可以直接运行 `go run ./cmd/grok2api --config config.json`。本地运行时即使 `config.json` 不存在也会使用内置默认值，但建议从示例复制一份以明确保存密钥和运行参数；Docker Compose 则必须存在 `config.json`。
-
-默认监听 `127.0.0.1:8787`，面板：
+默认对外提供 `8787`，管理面板：
 
 ```text
 http://127.0.0.1:8787/
 ```
 
-也可先构建：
+裸 Go 运行只用于后端开发和测试，默认不携带 UI。要本地联调，分别启动 Go API 和 Vite：
 
 ```powershell
-go build -trimpath -o grok2api.exe ./cmd/grok2api
-./grok2api.exe status --config config.json
-./grok2api.exe serve --config config.json
+go run ./cmd/grok2api serve --config config.json
+# 另一终端
+cd frontend
+npm ci
+npm run dev
 ```
+
+Go 1.25+ 仅是后端开发要求。SQLite 使用纯 Go 驱动，不需要 CGO 或本地 SQLite。
 
 ### CLI 命令
 
@@ -95,11 +92,11 @@ go run ./cmd/grok2api export --config config.json --pool ready --out data/ready_
 
 ## 管理面板
 
-路径：`/`。生产二进制直接在服务根路径挂载内嵌 SPA。
+路径：`/`。正式 Docker 镜像将 SPA 放在 `/app/frontend/dist`，并通过 `GROK2API_FRONTEND_STATIC_PATH` 让 Go 服务从运行时文件系统挂载。
 
-新管理 API 契约：[`/api/admin/v1/*`](docs/ADMIN_API_V1.md)（`{ok,data,error}`）；旧 `/admin/api/*` 仍供内嵌面板使用。
+新管理 API 契约：[`/api/admin/v1/*`](docs/ADMIN_API_V1.md)（`{ok,data,error}`）；旧 `/admin/api/*` 仍作为兼容路径。
 
-管理前端位于 [`frontend/`](frontend/)：`cd frontend && npm install && npm run dev`（默认 `http://127.0.0.1:5173`，代理到 API `:8787`）。
+管理前端位于 [`frontend/`](frontend/)：`cd frontend && npm ci && npm run dev`（默认 `http://127.0.0.1:5173`，代理到 API `:8787`）。
 
 ### 登录
 
@@ -376,6 +373,7 @@ curl http://127.0.0.1:8787/v1/chat/completions `
 | `debug_trace` | 请求链路 JSONL 调试 | `false` |
 | `debug_trace_dir` | 调试文件目录；空时使用 `{data_dir}/traces` | 空 |
 | `debug_trace_errors_only` | 只落失败请求 trace | `true` |
+| `frontend.static_path` | 管理 SPA 目录；空表示仅 API | 空 |
 
 `cli_pool_strategy` 支持 `round-robin` 和 `fill-first`。启用 sticky 后，服务会综合 `X-Grok2API-Sticky`、常见用户/请求标识、API key 以及请求 payload 特征生成粘性键；Anthropic 客户端的会话标识还会用于维持上游 conversation ID。
 
@@ -384,7 +382,7 @@ curl http://127.0.0.1:8787/v1/chat/completions `
 <!-- AUTO-GENERATED: source=internal/config/config.go -->
 | 类型 | 环境变量 |
 |------|----------|
-| 字符串 | `GROK2API_HOST`、`GROK2API_API_KEY`、`GROK2API_APP_KEY`、`GROK2API_PANEL_PASSWORD`、`GROK2API_PROXY_BASE_URL`、`GROK2API_CLIENT_VERSION`、`GROK2API_DEFAULT_MODEL`、`GROK2API_DATA_DIR`、`GROK2API_PROXY`、`PROXY_URL`、`GROK2API_DEBUG_TRACE_DIR` |
+| 字符串 | `GROK2API_HOST`、`GROK2API_API_KEY`、`GROK2API_APP_KEY`、`GROK2API_PANEL_PASSWORD`、`GROK2API_PROXY_BASE_URL`、`GROK2API_CLIENT_VERSION`、`GROK2API_DEFAULT_MODEL`、`GROK2API_DATA_DIR`、`GROK2API_PROXY`、`PROXY_URL`、`GROK2API_DEBUG_TRACE_DIR`、`GROK2API_FRONTEND_STATIC_PATH` |
 | 整数 | `GROK2API_PORT`、`GROK2API_CLI_POOL_MAX_CONCURRENT`、`GROK2API_CLI_POOL_ACQUIRE_TIMEOUT`、`GROK2API_CLI_POOL_STICKY_TTL_MINUTES`、`GROK2API_QUOTA_RETRY_MINUTES`、`GROK2API_RATE_RETRY_SECONDS`、`GROK2API_TIMEOUT_SECS` |
 | 布尔 | `GROK2API_DEBUG_TRACE`、`GROK2API_DEBUG_TRACE_ERRORS_ONLY`、`GROK2API_CLI_POOL_STICKY` |
 <!-- /AUTO-GENERATED -->
@@ -436,7 +434,8 @@ docker compose up -d
 本地构建：
 
 ```powershell
-docker build -f Dockerfile.golang -t grok2api:go .
+docker build -t grok2api:local .
+bash scripts/smoke-docker-image.sh grok2api:local
 ```
 
 ## GitHub 灰度部署
@@ -452,16 +451,16 @@ docker build -f Dockerfile.golang -t grok2api:go .
 
 推荐顺序：
 
-1. 推送后等 CI / `Build Go image` 成功
-2. 部署 `latest` 或 `sha-*` 到 8788
-3. 检查 `/health`、`/v1/models`、面板号池与额度
-4. 验证轮询、429、SSE、恢复
-5. 再 promote 到 8787
+1. PR 先通过 CI 的 backend / frontend / 单架构 image smoke
+2. 合并后等 `Publish image` 完成多架构发布、签名和扫描
+3. 部署 `latest` 或 `sha-*` 到 8788
+4. workflow 会自动检查 `/health`、首页、真实 hash asset 和 SPA 深层路由
+5. 再验证 `/v1/models`、轮询、429、SSE、恢复，然后 promote 到 8787
 
 ### 健康检查语义
 
 - `GET /health` 始终返回 HTTP 200；JSON 中 `ok: true` 才表示当前至少有一个 Ready 账号，`ok: false` 只表示服务存活但业务池未就绪。
-- Compose 的 app healthcheck 执行 `/grok2api status`，验证配置、数据目录和 SQLite 可打开，但不验证 HTTP 监听或 Ready 账号。
+- Compose 的 app healthcheck 执行 `/app/grok2api status`，验证配置、数据目录和 SQLite 可打开，但不验证 HTTP 监听或 Ready 账号。
 - 灰度/生产验收应同时检查 `/health` 的 JSON `ok`、`/v1/models`，并发起一次真实的流式或非流式模型请求。
 
 ## 验证
@@ -471,6 +470,9 @@ go test ./...
 go test -race ./...
 go vet ./...
 go build ./cmd/grok2api
+cd frontend && npm ci && npm run build
+docker build -t grok2api:local .
+bash scripts/smoke-docker-image.sh grok2api:local
 ```
 
 CI 对核心包有覆盖率门禁。运行时以 Go 服务为准。

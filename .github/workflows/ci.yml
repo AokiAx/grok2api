@@ -11,26 +11,10 @@ permissions:
   contents: read
 
 jobs:
-  go:
+  backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Build frontend (refresh embed paneldist)
-        working-directory: frontend
-        run: |
-          npm install
-          npm run build
-          rm -rf ../internal/api/paneldist
-          mkdir -p ../internal/api/paneldist
-          cp -r dist/. ../internal/api/paneldist/
-          find ../internal/api/paneldist -name "*.map" -delete
 
       - uses: actions/setup-go@v5
         with:
@@ -74,6 +58,38 @@ jobs:
           echo "coverage total=${total}%"
           awk -v total="$total" 'BEGIN { if (total < 75) exit 1 }'
 
-      - name: Build
+      - name: Build backend
         run: go build ./cmd/grok2api
 
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  image-smoke:
+    needs:
+      - backend
+      - frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build single-architecture delivery image
+        run: docker build --tag grok2api:ci .
+
+      - name: Verify Docker delivery contract
+        run: bash scripts/smoke-docker-image.sh grok2api:ci

@@ -1,32 +1,30 @@
 # grok2api 管理前端
 
-**我们自己的前端**，对接本仓库 `/api/admin/v1`。
+本目录是对接 `/api/admin/v1` 的 Vite + React 前端源码。正式交付由 Docker 多阶段构建完成，`dist/` 不提交，也不同步到 Go 包。
 
-采用低饱和、紧凑型运维后台设计，使用登录分栏、密集侧栏和 OKLCH 主题 tokens。
-
-## 开发
+## 本地开发
 
 ```bash
-# 终端 1
+# 终端 1：后端开发服务（默认只提供 API）
 go run ./cmd/grok2api serve --config config.json
 
-# 终端 2
+# 终端 2：前端热更新服务
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173/login`（代理到 `:8787`）。
+打开 `http://127.0.0.1:5173/login`。Vite 会将 API 请求代理到 `http://127.0.0.1:8787`。
 
-## 构建并 embed
+## 构建
 
 ```bash
-cd frontend && npm run build
-# 同步到 Go embed 目录
-bash scripts/sync-paneldist.sh
+cd frontend
+npm ci
+npm run build
 ```
 
-生产访问：`http://127.0.0.1:8787/`
+产物写入 `frontend/dist/`。正式镜像构建会将它复制到 `/app/frontend/dist`，并设置 `GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist`。无需手工复制生成文件。
 
 ## 页面
 

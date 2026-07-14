@@ -1,7 +1,7 @@
 # Admin API v1
 
-Frozen contract for the next management frontend.  
-Legacy `/admin/api/*` remains for `panel.html` and will be removed after SPA cutover.
+Frozen contract for the management frontend.
+Legacy `/admin/api/*` remains for compatibility and can be removed after clients migrate to v1.
 
 ## Envelope
 
@@ -55,7 +55,7 @@ Admin requests: `Authorization: Bearer <admin-key>` or `x-api-key: <admin-key>`.
 | `GET /healthz` | same as `/health` |
 | `GET /readyz` | 200 if ready>0 else 503 |
 
-## Legacy aliases (keep until SPA ships)
+## Legacy aliases
 
 | Legacy | v1 |
 |--------|-----|
@@ -65,7 +65,7 @@ Admin requests: `Authorization: Bearer <admin-key>` or `x-api-key: <admin-key>`.
 | `POST /admin/api/cli-accounts/{id}/recover` | `POST /api/admin/v1/accounts/{id}/recover` |
 | `POST /admin/api/accounts/import[/preview]` | `POST /api/admin/v1/accounts/import[/preview]` |
 
-Legacy responses stay **flat JSON** (no `ok/data` envelope) for `panel.html`.
+Legacy responses stay **flat JSON** (no `ok/data` envelope).
 
 ## Account public fields
 
@@ -82,4 +82,4 @@ active, max_active, has_refresh_token
 1. Dev proxy: Vite → `http://127.0.0.1:8787`
 2. Store admin token from login; send Bearer on all v1 calls
 3. Prefer `/api/admin/v1/*` only; do not depend on legacy paths
-4. Embed `frontend/dist` at the service root `/` (see ROADMAP Phase C)
+4. The Docker image serves `/app/frontend/dist` at `/`; bare Go development uses Vite unless `frontend.static_path` is configured

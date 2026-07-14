@@ -29,10 +29,24 @@ docker compose pull
 echo "[deploy] up stack"
 docker compose up -d --remove-orphans
 
-echo "[deploy] wait health"
+verify_service() {
+  local base_url="$1"
+  local index_html asset_path
+
+  curl -fsS "$base_url/health" >/dev/null || return 1
+  index_html="$(curl -fsS "$base_url/")" || return 1
+  grep -q '<div id="root"></div>' <<<"$index_html" || return 1
+  asset_path="$(grep -oE '(src|href)="/assets/[^"]+"' <<<"$index_html" | head -n 1 | cut -d '"' -f 2)"
+  [[ -n "$asset_path" ]] || return 1
+  curl -fsS "$base_url$asset_path" >/dev/null || return 1
+  curl -fsS "$base_url/accounts" | grep -q '<div id="root"></div>' || return 1
+}
+
+base_url="http://127.0.0.1:${GROK2API_PORT:-8787}"
+echo "[deploy] wait for health and frontend asset"
 for i in $(seq 1 40); do
-  if curl -fsS "http://127.0.0.1:${GROK2API_PORT:-8787}/health" >/dev/null; then
-    curl -sS "http://127.0.0.1:${GROK2API_PORT:-8787}/health"
+  if verify_service "$base_url"; then
+    curl -sS "$base_url/health"
     echo
     docker compose ps
     exit 0

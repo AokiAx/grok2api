@@ -18,7 +18,7 @@
 | Admin API v1 | `/api/admin/v1/*` envelope；旧 `/admin/api/*` 兼容；契约见 [ADMIN_API_V1.md](ADMIN_API_V1.md) |
 | 前端 SPA C1 | `frontend/` Vite+React：登录/总览/账号/系统；dev proxy → :8787 |
 | 前端 C2 | 导入 preview/commit + 账号详情侧栏 |
-| 前端 C3 embed | `//go:embed paneldist` → `/` |
+| 前端 C3 容器交付 | Docker 构建 `frontend/dist` → `/app/frontend/dist` → `/` |
 
 ---
 
@@ -58,12 +58,12 @@ C1 已脚手架：`frontend/`（Vite + React）。开发见 [frontend/README.md]
 
 #### 后续（next）
 
-现状：`internal/api/panel.html` 单文件 ~1.5k 行，内嵌部署简单但难维护。
+现状：`frontend/` 已作为唯一前端源码，Docker 是唯一正式交付物。
 
 #### 目标形态
 
 ```text
-frontend/                 # 独立包，构建产物 embed 或反向代理
+frontend/                 # 独立源码包，dist 仅在 Docker/本地构建中生成
   src/
     pages/  dashboard | accounts | import | settings
     api/    typed client → /api/admin/v1
@@ -77,7 +77,7 @@ frontend/                 # 独立包，构建产物 embed 或反向代理
 | 框架 | Vite + React 或 Vue（二选一） | 生态与表格/表单成熟 |
 | UI | 自研 tokens + 少量 headless（勿默认 shadcn 套皮） | 产品向运营台，不是 SaaS 模板 |
 | 状态 | 服务端状态用 fetch/SWR；本地 UI 状态轻量 | 避免再造全局 store |
-| 部署 | `//go:embed dist/*` 挂 `/` | 单二进制体验保留 |
+| 部署 | Docker 复制 `dist` 到 `/app/frontend/dist` | 源码、生成物和运行边界清晰 |
 | 开发 | Vite dev proxy → `:8787` | 热更前端 |
 
 #### 页面信息架构
@@ -95,7 +95,7 @@ frontend/                 # 独立包，构建产物 embed 或反向代理
 | M0 | 冻结 admin JSON 契约 + OpenAPI 草图 |
 | M1 | 新前端壳 + 登录 + 总览读现有 summary |
 | M2 | 账号 CRUD 流完整 |
-| M3 | 导入 + 系统页；embed；下线旧 panel 依赖 |
+| M3 | 导入 + 系统页；Docker 静态目录交付；下线旧 panel 依赖 |
 | M4 | 删除 `panel.html` 或降为 redirect |
 
 ### Phase D — 凭据加密（可选加固） ✅
@@ -137,8 +137,7 @@ A2 response_format normalize   ✅
 C0 admin API 契约 + 旧路径 alias   ✅  → docs/ADMIN_API_V1.md
 C1 前端脚手架     ✅ frontend/
 C2 导入页 + 打磨   ✅
-C3 embed dist 进 Go   ✅
+C3 Docker 交付 dist   ✅
 D  加密 ✅
 兼容警告头 ✅
 ```
-

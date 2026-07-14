@@ -68,8 +68,21 @@ jobs:
             -v "$root/config.json:/app/config.json:ro" \
             -v "$root/go-canary/data:/app/data" \
             "$digest"
+
+          verify_service() {
+            base_url="$1"
+            curl -fsS "$base_url/health" >/dev/null || return 1
+            index_html=$(curl -fsS "$base_url/") || return 1
+            printf '%s' "$index_html" | grep -q '<div id="root"></div>' || return 1
+            asset_path=$(printf '%s' "$index_html" | grep -oE '(src|href)="/assets/[^"]+"' | head -n 1 | cut -d '"' -f 2)
+            [ -n "$asset_path" ] || return 1
+            curl -fsS "$base_url$asset_path" >/dev/null || return 1
+            curl -fsS "$base_url/accounts" | grep -q '<div id="root"></div>' || return 1
+          }
+
+          # Verify canary health and frontend asset before allowing promotion.
           for attempt in $(seq 1 30); do
-            if curl -fsS "http://127.0.0.1:${CANARY_PORT}/health" >/dev/null; then
+            if verify_service "http://127.0.0.1:${CANARY_PORT}"; then
               exit 0
             fi
             sleep 2
@@ -105,12 +118,23 @@ jobs:
               "$1"
           }
 
+          verify_service() {
+            base_url="$1"
+            curl -fsS "$base_url/health" >/dev/null || return 1
+            index_html=$(curl -fsS "$base_url/") || return 1
+            printf '%s' "$index_html" | grep -q '<div id="root"></div>' || return 1
+            asset_path=$(printf '%s' "$index_html" | grep -oE '(src|href)="/assets/[^"]+"' | head -n 1 | cut -d '"' -f 2)
+            [ -n "$asset_path" ] || return 1
+            curl -fsS "$base_url$asset_path" >/dev/null || return 1
+            curl -fsS "$base_url/accounts" | grep -q '<div id="root"></div>' || return 1
+          }
+
           run_go "$digest"
 
           # Verify promoted service before accepting the production switch.
           promoted=false
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+            if verify_service http://127.0.0.1:8787; then
               promoted=true
               break
             fi

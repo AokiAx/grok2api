@@ -1,11 +1,9 @@
-name: Build Go image
+name: Publish image
 
 on:
-  pull_request:
   push:
     branches:
       - main
-      - codex/**
     tags:
       - "v*"
   workflow_dispatch:
@@ -20,19 +18,7 @@ env:
   IMAGE_NAME: ghcr.io/aokiax/grok2api
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-          cache: true
-      - run: go vet ./...
-      - run: go test -race ./...
-
   image:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +28,6 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -55,7 +40,6 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,prefix=sha-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -66,19 +50,16 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.golang
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # GitHub attestations API is unavailable for private user-owned repos and
-      # surfaces a red "X Error" annotation even with continue-on-error.
-      # Skip entirely unless the repo is public.
+      # GitHub attestations API is unavailable for private user-owned repos.
       - name: Attest build provenance
-        if: github.event_name != 'pull_request' && github.event.repository.visibility == 'public'
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
@@ -86,16 +67,13 @@ jobs:
           push-to-registry: true
 
       - uses: sigstore/cosign-installer@v3
-        if: github.event_name != 'pull_request'
 
       - name: Sign image digest
-        if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE_NAME}@${DIGEST}"
 
       - name: Scan published image
-        if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}

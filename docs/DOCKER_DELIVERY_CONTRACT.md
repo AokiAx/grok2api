@@ -14,8 +14,10 @@ The image must deliver these runtime capabilities together:
 - a read-only `/app/config.json` mount;
 - a declared non-root runtime user.
 
-The exact frontend packaging mechanism may change from embedded assets to a
-runtime directory. The observable HTTP and container contracts above must not.
+The frontend is built in the authoritative root `Dockerfile`, copied to
+`/app/frontend/dist`, and selected with
+`GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist`. A bare Go process leaves
+`frontend.static_path` empty by default and therefore serves API routes only.
 
 ## Protected release invariants
 
@@ -27,7 +29,8 @@ directory and packaging migration:
 - runtime secrets and data are not copied into the image;
 - GHCR publishing remains multi-architecture, signed, provenance-aware, and
   vulnerability-scanned;
-- CI continues to run race tests, vet, coverage, and a Go build;
+- CI independently validates backend, frontend, and a single-architecture image
+  smoke build;
 - production deployment remains manual, resolves the requested tag to a digest,
   verifies the canary/promoted service, and retains rollback behavior.
 
@@ -54,31 +57,24 @@ An optional second argument selects the host port. The script verifies:
 5. a real `/assets/...` URL referenced by `index.html` is downloadable;
 6. a deep SPA route falls back to the same shell.
 
-The script is intentionally not wired into CI in phase 0. Phase 1 should invoke
-it against the locally built migration image before publishing.
+CI invokes it against a locally built single-architecture image. The publish
+workflow is reserved for `main`, version tags, and manual runs, where it builds
+the signed multi-architecture image once.
 
-## Docker build-context risk
+## Docker build context
 
 The root `.dockerignore` excludes Git metadata, runtime secrets, data, coverage,
-and local binaries, but it does **not** currently exclude either of these paths:
+local binaries, and local frontend output:
 
 ```text
 frontend/node_modules/
 frontend/dist/
 ```
 
-`frontend/.gitignore` does not affect the Docker build context. If a developer
-has installed frontend dependencies locally, the complete host
-`frontend/node_modules` tree is sent to the Docker daemon by `docker build .`.
-That increases transfer time and can introduce host-platform artifacts into the
-frontend build stage before `npm install` runs.
+`frontend/.gitignore` does not affect the Docker build context, so these root
+rules are part of the delivery contract.
 
-Phase 1 must add explicit root `.dockerignore` entries for both paths. This is a
-documented deferred RED item rather than a phase-0 test assertion, because such
-an assertion would knowingly break the current main CI before the packaging
-change is implemented.
-
-## Phase 1 acceptance / deferred RED list
+## Delivery acceptance
 
 The Docker packaging migration is complete only when all of these are true:
 
@@ -92,5 +88,4 @@ The Docker packaging migration is complete only when all of these are true:
 - the existing non-root, signing, scanning, multi-architecture, digest promotion,
   health verification, and rollback contracts remain green.
 
-These checks should be enabled one by one in phase 1 as their implementation
-lands; they are not skipped assertions hidden in the phase-0 test suite.
+These checks are locked by `internal/buildtest` and the image smoke script.
