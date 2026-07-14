@@ -79,6 +79,14 @@ func WithSink(sink AccountSink) Option {
 	}
 }
 
+func WithClock(now func() time.Time) Option {
+	return func(service *Service) {
+		if now != nil {
+			service.now = now
+		}
+	}
+}
+
 func NewService(repository repository.AccountRepository, validator Validator, options ...Option) *Service {
 	service := &Service{
 		repository: repository,
@@ -93,7 +101,37 @@ func NewService(repository repository.AccountRepository, validator Validator, op
 	return service
 }
 
-var ErrAccountNotFound = errors.New("account not found")
+var (
+	ErrAccountNotFound     = errors.New("account not found")
+	ErrInvalidAccountState = errors.New("invalid account state")
+	ErrInvalidBatchAction  = errors.New("invalid batch action")
+)
+
+type UpdateAccountRequest struct {
+	Enabled   *bool `json:"enabled,omitempty"`
+	Priority  *int  `json:"priority,omitempty"`
+	MaxActive *int  `json:"max_active,omitempty"`
+}
+
+type BatchAction string
+
+const (
+	BatchActionEnable  BatchAction = "enable"
+	BatchActionDisable BatchAction = "disable"
+	BatchActionRecover BatchAction = "recover"
+	BatchActionDelete  BatchAction = "delete"
+)
+
+type BatchAccountRequest struct {
+	IDs    []string    `json:"ids"`
+	Action BatchAction `json:"action"`
+}
+
+type BatchAccountResult struct {
+	Updated int      `json:"updated"`
+	Deleted int      `json:"deleted"`
+	IDs     []string `json:"ids"`
+}
 
 type ImportAccount struct {
 	ID           string `json:"id"`
@@ -132,6 +170,142 @@ type ImportResult struct {
 
 func (s *Service) List(ctx context.Context) ([]account.Account, error) {
 	return s.repository.ListAccounts(ctx)
+}
+
+func (s *Service) Get(ctx context.Context, id string) (account.Account, error) {
+	item, found, err := s.repository.GetAccount(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return account.Account{}, fmt.Errorf("get account: %w", err)
+	}
+	if !found {
+		return account.Account{}, ErrAccountNotFound
+	}
+	return item, nil
+}
+
+func (s *Service) Events(ctx context.Context, id string, page, pageSize int) (repository.ListAccountEventsResult, error) {
+	if _, err := s.Get(ctx, id); err != nil {
+		return repository.ListAccountEventsResult{}, err
+	}
+	return s.repository.ListAccountEvents(ctx, repository.ListAccountEventsQuery{AccountID: strings.TrimSpace(id), Page: page, PageSize: pageSize})
+}
+
+func (s *Service) Update(ctx context.Context, id string, request UpdateAccountRequest) (account.Account, error) {
+	item, err := s.Get(ctx, id)
+	if err != nil {
+		return account.Account{}, err
+	}
+	now := s.now().UTC()
+	if request.Enabled != nil {
+		if *request.Enabled {
+			if item.Pool != account.PoolReady && !item.EnableByAdmin(now) {
+				return account.Account{}, fmt.Errorf("enable account %s: %w", item.ID, ErrInvalidAccountState)
+			}
+		} else {
+			item.DisableByAdmin(now)
+		}
+	}
+	priority := item.Priority
+	if request.Priority != nil {
+		priority = *request.Priority
+	}
+	maxActive := item.MaxActive
+	if maxActive < 1 {
+		maxActive = 1
+	}
+	if request.MaxActive != nil {
+		maxActive = *request.MaxActive
+	}
+	if err := item.ConfigureRuntime(priority, maxActive, now); err != nil {
+		return account.Account{}, fmt.Errorf("configure account %s: %w", item.ID, err)
+	}
+	if err := s.repository.SaveAccounts(ctx, []account.Account{item}); err != nil {
+		return account.Account{}, fmt.Errorf("save account %s: %w", item.ID, err)
+	}
+	if s.sink != nil {
+		s.sink.Upsert(item)
+	}
+	return item, nil
+}
+
+func (s *Service) Batch(ctx context.Context, request BatchAccountRequest) (BatchAccountResult, error) {
+	ids := uniqueAccountIDs(request.IDs)
+	if len(ids) == 0 {
+		return BatchAccountResult{}, ErrAccountNotFound
+	}
+	items := make([]account.Account, 0, len(ids))
+	for _, id := range ids {
+		item, err := s.Get(ctx, id)
+		if err != nil {
+			return BatchAccountResult{}, err
+		}
+		items = append(items, item)
+	}
+	result := BatchAccountResult{IDs: ids}
+	if request.Action == BatchActionDelete {
+		if err := s.repository.DeleteAccounts(ctx, ids); err != nil {
+			return BatchAccountResult{}, fmt.Errorf("delete accounts: %w", err)
+		}
+		for _, id := range ids {
+			if s.sink != nil {
+				s.sink.Delete(id)
+			}
+		}
+		result.Deleted = len(ids)
+		return result, nil
+	}
+
+	now := s.now().UTC()
+	for index := range items {
+		item := &items[index]
+		switch request.Action {
+		case BatchActionDisable:
+			item.DisableByAdmin(now)
+		case BatchActionEnable:
+			if item.Pool != account.PoolReady && !item.EnableByAdmin(now) {
+				return BatchAccountResult{}, fmt.Errorf("enable account %s: %w", item.ID, ErrInvalidAccountState)
+			}
+		case BatchActionRecover:
+			reason, errorCode, err := s.validator.Validate(ctx, *item)
+			if err != nil {
+				return BatchAccountResult{}, fmt.Errorf("validate account %s: %w", item.ID, err)
+			}
+			if reason == "" {
+				item.RecoverValidated(now)
+			} else {
+				item.MarkUnavailable(reason, s.retryAt(reason, item.RetryAt, now), errorCode, now)
+			}
+		default:
+			return BatchAccountResult{}, ErrInvalidBatchAction
+		}
+	}
+	if err := s.repository.SaveAccounts(ctx, items); err != nil {
+		return BatchAccountResult{}, fmt.Errorf("save account batch: %w", err)
+	}
+	for _, item := range items {
+		if s.sink != nil {
+			s.sink.Upsert(item)
+		}
+	}
+	result.Updated = len(items)
+	return result, nil
+}
+
+func uniqueAccountIDs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // ListPage returns one filtered page of accounts without loading the whole table.
