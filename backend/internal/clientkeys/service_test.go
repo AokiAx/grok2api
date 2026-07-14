@@ -13,9 +13,9 @@ import (
 )
 
 type memoryStore struct {
-	items        map[string]clientkey.Credential
-	created      clientkey.Credential
-	updates      []repository.ClientKeyPolicyUpdate
+	items       map[string]clientkey.Credential
+	created     clientkey.Credential
+	updates     []repository.ClientKeyPolicyUpdate
 	revocations []time.Time
 }
 
