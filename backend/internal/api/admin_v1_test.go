@@ -204,7 +204,7 @@ func TestAdminV1AccountAdministrationEndpoints(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"priority":5`) {
 		t.Fatalf("detail status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "access_token") || strings.Contains(rec.Body.String(), "refresh_token") {
+	if strings.Contains(rec.Body.String(), `"access_token":`) || strings.Contains(rec.Body.String(), `"refresh_token":`) {
 		t.Fatalf("detail leaked credentials: %s", rec.Body.String())
 	}
 

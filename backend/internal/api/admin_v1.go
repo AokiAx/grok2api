@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/admin"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
@@ -48,6 +50,10 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/v1/system", s.adminV1System)
 	mux.HandleFunc("GET /api/admin/v1/accounts", s.adminV1List)
 	mux.HandleFunc("GET /api/admin/v1/accounts/summary", s.adminV1AccountsSummary)
+	mux.HandleFunc("POST /api/admin/v1/accounts/batch", s.adminV1BatchAccounts)
+	mux.HandleFunc("GET /api/admin/v1/accounts/{id}", s.adminV1GetAccount)
+	mux.HandleFunc("PATCH /api/admin/v1/accounts/{id}", s.adminV1UpdateAccount)
+	mux.HandleFunc("GET /api/admin/v1/accounts/{id}/events", s.adminV1AccountEvents)
 	mux.HandleFunc("DELETE /api/admin/v1/accounts/{id}", s.adminV1Delete)
 	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/recover", s.adminV1Recover)
 	mux.HandleFunc("POST /api/admin/v1/accounts/import/preview", s.adminV1ImportPreview)
@@ -334,6 +340,108 @@ func (s *Server) adminV1AccountsSummary(writer http.ResponseWriter, request *htt
 			"reauthRequired": reasons["auth"],
 		},
 	})
+}
+
+func (s *Server) adminV1GetAccount(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	item, err := s.admin.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminServiceError(writer, err, "get_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1UpdateAccount(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	var body admin.UpdateAccountRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid account update payload")
+		return
+	}
+	if body.Enabled == nil && body.Priority == nil && body.MaxActive == nil {
+		writeAdminError(writer, http.StatusUnprocessableEntity, "empty_update", "At least one account field is required")
+		return
+	}
+	item, err := s.admin.Update(request.Context(), request.PathValue("id"), body)
+	if err != nil {
+		writeAdminServiceError(writer, err, "update_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1BatchAccounts(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	var body admin.BatchAccountRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 2<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid account batch payload")
+		return
+	}
+	if len(body.IDs) == 0 || len(body.IDs) > 1000 {
+		writeAdminError(writer, http.StatusUnprocessableEntity, "invalid_ids", "ids must contain between 1 and 1000 accounts")
+		return
+	}
+	result, err := s.admin.Batch(request.Context(), body)
+	if err != nil {
+		writeAdminServiceError(writer, err, "batch_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, result)
+}
+
+func (s *Server) adminV1AccountEvents(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	page, _ := strconv.Atoi(strings.TrimSpace(request.URL.Query().Get("page")))
+	pageSize, _ := strconv.Atoi(strings.TrimSpace(request.URL.Query().Get("page_size")))
+	result, err := s.admin.Events(request.Context(), request.PathValue("id"), page, pageSize)
+	if err != nil {
+		writeAdminServiceError(writer, err, "events_failed")
+		return
+	}
+	items := make([]map[string]any, 0, len(result.Items))
+	for _, item := range result.Items {
+		items = append(items, publicAccountEvent(item))
+	}
+	writeAdminOK(writer, http.StatusOK, map[string]any{
+		"items": items, "total": result.Total, "page": result.Page, "page_size": result.PageSize,
+	})
+}
+
+func publicAccountEvent(item repository.AccountEvent) map[string]any {
+	return map[string]any{
+		"id": item.ID, "account_id": item.AccountID, "event_type": item.Type,
+		"from_pool": item.FromPool, "to_pool": item.ToPool, "reason": item.Reason,
+		"error_code": item.ErrorCode, "details": item.Details, "created_at": item.CreatedAt,
+	}
+}
+
+func writeAdminServiceError(writer http.ResponseWriter, err error, fallbackCode string) {
+	status := http.StatusInternalServerError
+	code := fallbackCode
+	switch {
+	case errors.Is(err, admin.ErrAccountNotFound):
+		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, admin.ErrInvalidAccountState):
+		status, code = http.StatusConflict, "invalid_account_state"
+	case errors.Is(err, admin.ErrInvalidBatchAction):
+		status, code = http.StatusUnprocessableEntity, "invalid_batch_action"
+	case strings.Contains(err.Error(), "priority"), strings.Contains(err.Error(), "max_active"):
+		status, code = http.StatusUnprocessableEntity, "validation_error"
+	}
+	writeAdminError(writer, status, code, err.Error())
 }
 
 func (s *Server) adminV1Delete(writer http.ResponseWriter, request *http.Request) {

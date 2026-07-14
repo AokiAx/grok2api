@@ -17,6 +17,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/compat"
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 	"github.com/AokiAx/grok2api/backend/internal/upstream"
@@ -93,6 +94,10 @@ type AdminService interface {
 	Import(context.Context, admin.ImportRequest) (admin.ImportResult, error)
 	Delete(context.Context, string) error
 	Recover(context.Context, string) (account.Account, error)
+	Get(context.Context, string) (account.Account, error)
+	Update(context.Context, string, admin.UpdateAccountRequest) (account.Account, error)
+	Batch(context.Context, admin.BatchAccountRequest) (admin.BatchAccountResult, error)
+	Events(context.Context, string, int, int) (repository.ListAccountEventsResult, error)
 }
 
 func WithAdmin(service AdminService, key string) Option {
@@ -200,6 +205,7 @@ func publicAccount(item account.Account) map[string]any {
 		"request_count":      item.RequestCount,
 		"active":             item.Active,
 		"max_active":         item.MaxActive,
+		"priority":           item.Priority,
 		"has_refresh_token":  item.RefreshToken != "",
 	}
 }
