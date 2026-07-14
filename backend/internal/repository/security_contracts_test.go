@@ -58,6 +58,9 @@ func (clientKeyContractRepository) GetClientKey(context.Context, string) (client
 func (clientKeyContractRepository) FindClientKeyByHash(context.Context, [32]byte) (clientkey.ClientKey, []string, bool, error) {
 	return clientkey.ClientKey{}, nil, false, nil
 }
+func (clientKeyContractRepository) ListClientKeysPage(context.Context, repository.ListClientKeysQuery) (repository.ListClientKeysResult, error) {
+	return repository.ListClientKeysResult{}, nil
+}
 func (clientKeyContractRepository) UpdateClientKey(context.Context, clientkey.ClientKey, []string) error {
 	return nil
 }
@@ -88,5 +91,15 @@ func TestAdminLoginFailureCountsKeepUsernameAndSourceDimensionsSeparate(t *testi
 	counts := repository.AdminLoginFailureCounts{ByUsername: 4, BySourceIP: 5}
 	if counts.ByUsername != 4 || counts.BySourceIP != 5 {
 		t.Fatalf("counts = %+v", counts)
+	}
+}
+
+func TestClientKeyListDTOCarriesScopesWithoutSecrets(t *testing.T) {
+	result := repository.ListClientKeysResult{
+		Items: []repository.ClientKeyRecord{{Key: clientkey.ClientKey{ID: "key-1"}, Scopes: []string{"grok-4.5"}}},
+		Total: 1, Page: 1, PageSize: 50,
+	}
+	if result.Items[0].Key.ID != "key-1" || len(result.Items[0].Scopes) != 1 {
+		t.Fatalf("result = %+v", result)
 	}
 }
