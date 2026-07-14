@@ -205,14 +205,14 @@ type validator struct {
 }
 
 type maintenanceClient struct {
-	refreshed account.Account
+	refreshed  account.Account
 	refreshErr error
-	reason account.UnavailableReason
-	code string
-	actual int64
-	limit int64
-	observed bool
-	probeErr error
+	reason     account.UnavailableReason
+	code       string
+	actual     int64
+	limit      int64
+	observed   bool
+	probeErr   error
 }
 
 func (m maintenanceClient) Refresh(context.Context, account.Account) (account.Account, error) {
@@ -225,7 +225,7 @@ func (m maintenanceClient) ProbeFreeQuotaUsage(context.Context, account.Account)
 
 type permanentRefreshError struct{}
 
-func (permanentRefreshError) Error() string { return "refresh token revoked" }
+func (permanentRefreshError) Error() string   { return "refresh token revoked" }
 func (permanentRefreshError) Permanent() bool { return true }
 
 func (v validator) Validate(context.Context, account.Account) (account.UnavailableReason, string, error) {

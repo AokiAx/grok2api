@@ -17,13 +17,13 @@ import (
 )
 
 type fakeAdmin struct {
-	accounts  []account.Account
-	request   admin.ImportRequest
-	deleted   string
-	recovered string
-	lastQuery admin.ListAccountsQuery
+	accounts            []account.Account
+	request             admin.ImportRequest
+	deleted             string
+	recovered           string
+	lastQuery           admin.ListAccountsQuery
 	refreshedCredential string
-	refreshedQuota string
+	refreshedQuota      string
 }
 
 func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (admin.ListAccountsPage, error) {
