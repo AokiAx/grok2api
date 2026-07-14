@@ -176,6 +176,18 @@ export type AccountsPage = {
   summary: AccountStats;
 };
 
+export type AccountEvent = {
+  id: number;
+  account_id: string;
+  event_type: "state_transition" | "configuration" | "deletion";
+  from_pool: string;
+  to_pool: string;
+  reason: string;
+  error_code: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
 
 function normalizeAccountItem(item: any): PublicAccount {
   // Normalize alternate AccountDTO fields into PublicAccount.
@@ -265,6 +277,15 @@ export const adminApi = {
       method: "POST",
       body: JSON.stringify({ ids, action }),
     }),
+  updateAccount: (id: string, update: { enabled?: boolean; priority?: number; max_active?: number }) =>
+    request<PublicAccount>(`/api/admin/v1/accounts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    }),
+  accountEvents: (id: string, page = 1, pageSize = 20) =>
+    request<{ items: AccountEvent[]; total: number; page: number; page_size: number }>(
+      `/api/admin/v1/accounts/${encodeURIComponent(id)}/events?page=${page}&page_size=${pageSize}`,
+    ),
   importPreview: (accounts: ImportAccount[]) =>
     request<ImportResult>("/api/admin/v1/accounts/import/preview", {
       method: "POST",

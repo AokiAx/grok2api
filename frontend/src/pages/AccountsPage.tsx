@@ -13,6 +13,7 @@ import {
   adminApi,
   AdminApiError,
   type AccountsPage as PageData,
+  type AccountEvent,
   type PublicAccount,
 } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +45,10 @@ export function AccountsPage() {
   const [selected, setSelected] = useState<PublicAccount | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [batchBusy, setBatchBusy] = useState(false);
+  const [priorityDraft, setPriorityDraft] = useState(0);
+  const [maxActiveDraft, setMaxActiveDraft] = useState(1);
+  const [events, setEvents] = useState<AccountEvent[]>([]);
+  const [settingsBusy, setSettingsBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -67,6 +72,24 @@ export function AccountsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!selected) {
+      setEvents([]);
+      return;
+    }
+    setPriorityDraft(selected.priority || 0);
+    setMaxActiveDraft(selected.max_active || 1);
+    let active = true;
+    void adminApi.accountEvents(selected.id).then((result) => {
+      if (active) setEvents(result.items);
+    }).catch(() => {
+      if (active) setEvents([]);
+    });
+    return () => {
+      active = false;
+    };
+  }, [selected]);
 
   async function recover(id: string) {
     setBusyId(id);
@@ -111,6 +134,24 @@ export function AccountsPage() {
       setError(err instanceof AdminApiError ? err.message : `批量${labels[action]}失败`);
     } finally {
       setBatchBusy(false);
+    }
+  }
+
+  async function saveSettings() {
+    if (!selected) return;
+    setSettingsBusy(true);
+    setError(null);
+    try {
+      const updated = await adminApi.updateAccount(selected.id, {
+        priority: priorityDraft,
+        max_active: maxActiveDraft,
+      });
+      setSelected(updated);
+      await load();
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "保存账号设置失败");
+    } finally {
+      setSettingsBusy(false);
     }
   }
 
@@ -411,6 +452,47 @@ export function AccountsPage() {
                     </div>
                   ))}
                 </dl>
+                <div className="mt-4 grid grid-cols-2 gap-2 border-t border-border/70 pt-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-priority">优先级</Label>
+                    <Input
+                      id="account-priority"
+                      type="number"
+                      min={0}
+                      value={priorityDraft}
+                      onChange={(event) => setPriorityDraft(Number(event.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-max-active">最大并发</Label>
+                    <Input
+                      id="account-max-active"
+                      type="number"
+                      min={1}
+                      value={maxActiveDraft}
+                      onChange={(event) => setMaxActiveDraft(Number(event.target.value))}
+                    />
+                  </div>
+                  <Button className="col-span-2" size="sm" disabled={settingsBusy} onClick={() => void saveSettings()}>
+                    {settingsBusy ? "保存中…" : "保存账号设置"}
+                  </Button>
+                </div>
+                <div className="mt-4 border-t border-border/70 pt-4">
+                  <h3 className="text-xs font-medium">状态时间线</h3>
+                  {events.length ? (
+                    <ul className="mt-2 space-y-2">
+                      {events.slice(0, 5).map((event) => (
+                        <li key={event.id} className="rounded-md bg-background px-2.5 py-2 text-[11px]">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium">{event.event_type}</span>
+                            <time className="text-muted-foreground">{formatDate(event.created_at)}</time>
+                          </div>
+                          <p className="mt-1 text-muted-foreground">{event.reason || `${event.from_pool || "new"} → ${event.to_pool}`}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <p className="mt-2 text-[11px] text-muted-foreground">暂无状态事件</p>}
+                </div>
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <Button
                     size="sm"
