@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/subtle"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,9 +20,6 @@ import (
 	"github.com/AokiAx/grok2api/internal/service"
 	"github.com/AokiAx/grok2api/internal/upstream"
 )
-
-//go:embed panel.html
-var panelHTML []byte
 
 type Gateway interface {
 	Chat(context.Context, []byte, bool) (service.ChatResult, error)
@@ -130,16 +126,8 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	mux.HandleFunc("POST /chat/completions", server.chat)
 	mux.HandleFunc("POST /v1/responses", server.responses)
 	mux.HandleFunc("POST /v1/messages", server.messages)
-	mux.HandleFunc("GET /panel", server.panel)
-	mux.HandleFunc("GET /manager", server.panel)
-	mux.HandleFunc("GET /admin/api/panel-meta", server.panelMeta)
-	if server.admin != nil {
-		mux.HandleFunc("GET /admin/api/cli-accounts", server.adminList)
-		mux.HandleFunc("DELETE /admin/api/cli-accounts/{id}", server.adminDelete)
-		mux.HandleFunc("POST /admin/api/cli-accounts/{id}/recover", server.adminRecover)
-		mux.HandleFunc("POST /admin/api/accounts/import/preview", server.adminImportPreview)
-		mux.HandleFunc("POST /admin/api/accounts/import", server.adminImport)
-	}
+	server.registerSPARoutes(mux)
+	server.registerAdminRoutes(mux)
 	var handler http.Handler = mux
 	if server.tracer != nil && server.tracer.Enabled() {
 		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.
@@ -147,12 +135,6 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	}
 	server.handler = handler
 	return server
-}
-
-func (s *Server) panel(writer http.ResponseWriter, _ *http.Request) {
-	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(panelHTML)
 }
 
 func (s *Server) panelMeta(writer http.ResponseWriter, _ *http.Request) {
@@ -167,48 +149,12 @@ func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
 		return
 	}
-	query := parseAdminListQuery(request)
-	page, err := s.admin.ListPage(request.Context(), query)
+	payload, err := s.buildAdminListPayload(request)
 	if err != nil {
 		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
-	summary, err := s.admin.Stats(request.Context())
-	if err != nil {
-		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
-		return
-	}
-	// Merge live scheduler lease counts. Active is memory-only and not in SQLite.
-	if live, ok := s.status.(LiveLeaseProvider); ok {
-		activeByID := live.ActiveByID()
-		for index := range page.Accounts {
-			page.Accounts[index].Active = activeByID[page.Accounts[index].ID]
-		}
-		activeTotal := 0
-		for _, count := range activeByID {
-			activeTotal += count
-		}
-		summary.ActiveLeases = activeTotal
-	}
-	public := make([]map[string]any, 0, len(page.Accounts))
-	for _, item := range page.Accounts {
-		public = append(public, publicAccount(item))
-	}
-	totalPages := 0
-	if page.PageSize > 0 {
-		totalPages = (page.Total + page.PageSize - 1) / page.PageSize
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"count":       page.Total,
-		"total":       page.Total,
-		"page":        page.Page,
-		"page_size":   page.PageSize,
-		"total_pages": totalPages,
-		"pool":        query.Pool,
-		"q":           query.Q,
-		"accounts":    public,
-		"summary":     summary,
-	})
+	writeJSON(writer, http.StatusOK, payload)
 }
 
 func parseAdminListQuery(request *http.Request) admin.ListAccountsQuery {
@@ -510,7 +456,14 @@ func (s *Server) writeGatewayError(writer http.ResponseWriter, err error) {
 			"Retry-After",
 			strconv.FormatInt(max(1, int64(poolError.RetryAfter/time.Second)), 10),
 		)
-		writeOpenAIError(writer, poolError.Status, "No ready accounts; retry later")
+		if reason := string(poolError.Reason); reason != "" {
+			writer.Header().Set("X-Grok2API-Pool-Reason", reason)
+		}
+		message := poolError.Error()
+		if message == "" {
+			message = "No ready accounts; retry later"
+		}
+		writeOpenAIErrorCode(writer, poolError.Status, string(poolError.Reason), message)
 		return
 	}
 	writeOpenAIError(writer, http.StatusBadGateway, err.Error())
@@ -569,11 +522,18 @@ func authorizedWithKey(request *http.Request, key string) bool {
 }
 
 func writeOpenAIError(writer http.ResponseWriter, status int, message string) {
+	writeOpenAIErrorCode(writer, status, strconv.Itoa(status), message)
+}
+
+func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message string) {
+	if code == "" {
+		code = strconv.Itoa(status)
+	}
 	writeJSON(writer, status, map[string]any{
 		"error": map[string]any{
 			"message": message,
 			"type":    "api_error",
-			"code":    strconv.Itoa(status),
+			"code":    code,
 			"param":   nil,
 		},
 	})

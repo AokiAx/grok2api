@@ -350,31 +350,65 @@ func TestAdminImportPreviewAndApply(t *testing.T) {
 	}
 }
 
-func TestPanelRouteIsEmbedded(t *testing.T) {
+func TestPanelRouteServesSPA(t *testing.T) {
 	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panel", nil))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d", recorder.Code)
+
+	var body string
+	for _, route := range []string{"/", "/login", "/accounts", "/import", "/system"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		server.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", route, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "root") {
+			t.Fatalf("%s did not return SPA index", route)
+		}
+		if route == "/" {
+			body = rec.Body.String()
+		}
 	}
-	if !strings.Contains(recorder.Body.String(), "Ready Pool") {
-		t.Fatal("Go panel content missing")
+
+	if !strings.Contains(body, `id="root"`) && !strings.Contains(body, "root") {
+		t.Fatalf("SPA index missing root: %s", body[:min(200, len(body))])
 	}
-	body := recorder.Body.String()
-	if !strings.Contains(body, "恢复验证") || !strings.Contains(body, "importFile") || !strings.Contains(body, "importOutput") || strings.Contains(body, "accounts.innerHTML") {
-		t.Fatal("account actions or safe table rendering missing")
+	if strings.Contains(body, "/panel/") || strings.Contains(body, "/manager/") {
+		t.Fatalf("SPA index still contains a legacy base path: %s", body)
 	}
-	for _, marker := range []string{
-		`id="totalAccounts"`, `id="totalRequests"`, `id="activeLeases"`,
-		`id="refreshableAccounts"`, `id="quotaUsage"`, `id="reasonBars"`,
-		`id="errorCodeBars"`, `id="accessExpiry"`, `id="retryDue"`,
-		`id="authFailAccounts"`, `id="noRefreshToken"`, `id="rememberLogin"`,
-		`id="lastUpdated"`, "renderSummary", "setInterval(refresh,15000)",
-		`id="pagePrev"`, `id="pageNext"`, `id="pageSize"`, "accountsQuery",
-		"localStorage", "persistPassword",
+
+	assetStart := strings.Index(body, `/assets/`)
+	if assetStart < 0 {
+		t.Fatalf("SPA index missing root-mounted asset: %s", body)
+	}
+	assetEnd := assetStart
+	for assetEnd < len(body) && body[assetEnd] != '"' && body[assetEnd] != '\'' {
+		assetEnd++
+	}
+	assetPath := body[assetStart:assetEnd]
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, assetPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("asset %s status=%d", assetPath, rec.Code)
+	}
+	if cache := rec.Header().Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+		t.Fatalf("asset cache-control=%q", cache)
+	}
+
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `id="root"`) {
+		t.Fatalf("/health was swallowed by SPA: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, route := range []string{
+		"/panel", "/panel/", "/panel/accounts",
+		"/manager", "/manager/", "/manager/accounts",
+		"/assets/missing.js", "/api/missing", "/admin/missing", "/v1/missing", "/chat/missing",
 	} {
-		if !strings.Contains(recorder.Body.String(), marker) {
-			t.Fatalf("panel statistics marker missing: %s", marker)
+		rec = httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, route, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d want 404; body=%s", route, rec.Code, rec.Body.String())
 		}
 	}
 }
