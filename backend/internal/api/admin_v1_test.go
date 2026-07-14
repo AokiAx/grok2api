@@ -183,3 +183,43 @@ func TestAdminV1UnauthorizedEnvelope(t *testing.T) {
 		t.Fatalf("body=%#v", body)
 	}
 }
+
+func TestAdminV1AccountAdministrationEndpoints(t *testing.T) {
+	adminService := &fakeAdmin{accounts: []account.Account{{
+		ID: "a1", Email: "a1@example.test", Pool: account.PoolReady, Priority: 5, MaxActive: 2,
+	}}}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(adminService, "secret"))
+	authorized := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := authorized(http.MethodGet, "/api/admin/v1/accounts/a1", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"priority":5`) {
+		t.Fatalf("detail status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "access_token") || strings.Contains(rec.Body.String(), "refresh_token") {
+		t.Fatalf("detail leaked credentials: %s", rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPatch, "/api/admin/v1/accounts/a1", `{"enabled":false,"priority":30,"max_active":4}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"priority":30`) || !strings.Contains(rec.Body.String(), `"max_active":4`) {
+		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPost, "/api/admin/v1/accounts/batch", `{"ids":["a1"],"action":"disable"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"updated":1`) {
+		t.Fatalf("batch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = authorized(http.MethodGet, "/api/admin/v1/accounts/a1/events?page=1&page_size=20", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"event_type":"state_transition"`) {
+		t.Fatalf("events status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

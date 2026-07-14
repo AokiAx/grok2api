@@ -13,6 +13,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/api"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
 type fakeAdmin struct {
@@ -150,6 +151,54 @@ func (a *fakeAdmin) Delete(_ context.Context, id string) error {
 func (a *fakeAdmin) Recover(_ context.Context, id string) (account.Account, error) {
 	a.recovered = id
 	return account.Account{ID: id, Pool: account.PoolReady}, nil
+}
+
+func (a *fakeAdmin) Get(_ context.Context, id string) (account.Account, error) {
+	for _, item := range a.accounts {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return account.Account{}, admin.ErrAccountNotFound
+}
+
+func (a *fakeAdmin) Update(_ context.Context, id string, request admin.UpdateAccountRequest) (account.Account, error) {
+	for index := range a.accounts {
+		if a.accounts[index].ID != id {
+			continue
+		}
+		if request.Enabled != nil && !*request.Enabled {
+			a.accounts[index].DisableByAdmin(time.Now().UTC())
+		}
+		if request.Priority != nil {
+			a.accounts[index].Priority = *request.Priority
+		}
+		if request.MaxActive != nil {
+			a.accounts[index].MaxActive = *request.MaxActive
+		}
+		return a.accounts[index], nil
+	}
+	return account.Account{}, admin.ErrAccountNotFound
+}
+
+func (a *fakeAdmin) Batch(_ context.Context, request admin.BatchAccountRequest) (admin.BatchAccountResult, error) {
+	result := admin.BatchAccountResult{IDs: request.IDs}
+	if request.Action == admin.BatchActionDelete {
+		result.Deleted = len(request.IDs)
+	} else {
+		result.Updated = len(request.IDs)
+	}
+	return result, nil
+}
+
+func (a *fakeAdmin) Events(_ context.Context, id string, page, pageSize int) (repository.ListAccountEventsResult, error) {
+	if _, err := a.Get(context.Background(), id); err != nil {
+		return repository.ListAccountEventsResult{}, err
+	}
+	return repository.ListAccountEventsResult{
+		Items: []repository.AccountEvent{{ID: 1, AccountID: id, Type: repository.AccountEventStateTransition, ToPool: account.PoolReady, CreatedAt: time.Now().UTC()}},
+		Total: 1, Page: page, PageSize: pageSize,
+	}, nil
 }
 
 func TestAdminListNeverReturnsTokens(t *testing.T) {
