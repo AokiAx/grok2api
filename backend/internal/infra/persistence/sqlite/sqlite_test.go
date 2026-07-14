@@ -744,3 +744,74 @@ func TestLegacyEnvelopeRequiresCredentialKey(t *testing.T) {
 	}
 	_ = repo.Close()
 }
+
+func TestAccountAdministrationPersistence(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "admin-accounts.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer repo.Close()
+
+	now := time.Date(2026, 7, 15, 6, 30, 0, 0, time.UTC)
+	items := []account.Account{
+		{ID: "a", AccessToken: "token-a", Pool: account.PoolReady, Priority: 10, MaxActive: 2, CreatedAt: now, UpdatedAt: now},
+		{ID: "b", AccessToken: "token-b", Pool: account.PoolReady, Priority: 20, MaxActive: 3, CreatedAt: now, UpdatedAt: now},
+	}
+	if err := repo.SaveAccounts(ctx, items); err != nil {
+		t.Fatalf("save batch: %v", err)
+	}
+	got, found, err := repo.GetAccount(ctx, "b")
+	if err != nil || !found {
+		t.Fatalf("get b: found=%v err=%v", found, err)
+	}
+	if got.Priority != 20 || got.MaxActive != 3 {
+		t.Fatalf("runtime controls = %+v", got)
+	}
+
+	if err := got.ConfigureRuntime(75, 5, now.Add(time.Minute)); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if err := repo.SaveAccounts(ctx, []account.Account{got}); err != nil {
+		t.Fatalf("save configuration: %v", err)
+	}
+	events, err := repo.ListAccountEvents(ctx, repository.ListAccountEventsQuery{AccountID: "b", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if events.Total != 2 || len(events.Items) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	latest := events.Items[0]
+	if latest.Type != repository.AccountEventConfiguration || latest.Details["priority"] != float64(75) || latest.Details["max_active"] != float64(5) {
+		t.Fatalf("latest configuration event = %#v", latest)
+	}
+
+	if err := repo.DeleteAccounts(ctx, []string{"a", "b"}); err != nil {
+		t.Fatalf("delete batch: %v", err)
+	}
+	if _, found, err := repo.GetAccount(ctx, "a"); err != nil || found {
+		t.Fatalf("deleted a: found=%v err=%v", found, err)
+	}
+}
+
+func TestSaveAccountsRollsBackEntireBatch(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "admin-rollback.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer repo.Close()
+
+	now := time.Now().UTC()
+	err = repo.SaveAccounts(ctx, []account.Account{
+		{ID: "valid", AccessToken: "token", Pool: account.PoolReady, MaxActive: 1, CreatedAt: now, UpdatedAt: now},
+		{ID: "invalid", AccessToken: "token", Pool: account.Pool("broken"), MaxActive: 1, CreatedAt: now, UpdatedAt: now},
+	})
+	if err == nil {
+		t.Fatal("expected invalid batch to fail")
+	}
+	if _, found, getErr := repo.GetAccount(ctx, "valid"); getErr != nil || found {
+		t.Fatalf("valid row escaped rollback: found=%v err=%v", found, getErr)
+	}
+}
