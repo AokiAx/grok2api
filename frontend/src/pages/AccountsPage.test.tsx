@@ -9,6 +9,9 @@ const apiMocks = vi.hoisted(() => ({
   batchAccounts: vi.fn(),
   updateAccount: vi.fn(),
   accountEvents: vi.fn(),
+  refreshCredential: vi.fn(),
+  refreshQuota: vi.fn(),
+  exportCredential: vi.fn(),
 }));
 
 vi.mock("@/api/client", async (importOriginal) => {
@@ -88,6 +91,9 @@ describe("AccountsPage batch administration", () => {
       has_refresh_token: true,
     }));
     apiMocks.accountEvents.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+    apiMocks.refreshCredential.mockResolvedValue({ id: "a1", pool: "ready" });
+    apiMocks.refreshQuota.mockResolvedValue({ account_id: "a1", actual: 1, limit: 100, observed: true });
+    apiMocks.exportCredential.mockResolvedValue(undefined);
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -116,5 +122,19 @@ describe("AccountsPage batch administration", () => {
     await user.click(screen.getByRole("button", { name: "保存账号设置" }));
 
     expect(apiMocks.updateAccount).toHaveBeenCalledWith("a1", { priority: 25, max_active: 3 });
+  });
+
+  it("runs explicit credential and quota maintenance actions", async () => {
+    const user = userEvent.setup();
+    render(<AccountsPage />);
+
+    await user.click(await screen.findByText("a1@example.test"));
+    await user.click(screen.getByRole("button", { name: "刷新 Token" }));
+    await user.click(screen.getByRole("button", { name: "刷新额度" }));
+    await user.click(screen.getByRole("button", { name: "导出凭据" }));
+
+    expect(apiMocks.refreshCredential).toHaveBeenCalledWith("a1");
+    expect(apiMocks.refreshQuota).toHaveBeenCalledWith("a1");
+    expect(apiMocks.exportCredential).toHaveBeenCalledWith("a1");
   });
 });
