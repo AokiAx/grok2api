@@ -7,21 +7,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import {
-  adminApi,
-  clearStoredToken,
-  getStoredToken,
-  setStoredToken,
-  type SystemMeta,
-} from "@/api/client";
+import { adminApi, type SystemMeta } from "@/api/client";
 
 type AuthState = {
   ready: boolean;
-  token: string;
+  authenticated: boolean;
   meta: SystemMeta | null;
   error: string | null;
   login: (password: string, remember: boolean) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshMeta: () => Promise<void>;
 };
 
@@ -29,7 +23,7 @@ const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
-  const [token, setToken] = useState("");
+  const [authenticated, setAuthenticated] = useState(false);
   const [meta, setMeta] = useState<SystemMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,21 +38,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const nextMeta = await adminApi.meta();
         if (cancelled) return;
         setMeta(nextMeta);
-        const stored = getStoredToken();
         if (!nextMeta.auth_required) {
-          setToken("");
-          setReady(true);
-          return;
-        }
-        if (!stored) {
+          setAuthenticated(true);
           setReady(true);
           return;
         }
         try {
           await adminApi.me();
-          if (!cancelled) setToken(stored);
+          if (!cancelled) setAuthenticated(true);
         } catch {
-          clearStoredToken();
+          if (!cancelled) setAuthenticated(false);
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load meta");
@@ -73,20 +62,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (password: string, remember: boolean) => {
     setError(null);
-    const result = await adminApi.login(password);
-    const next = result.token || password;
-    setStoredToken(next, remember);
-    setToken(next);
+    await adminApi.login(password, remember);
+    setAuthenticated(true);
   }, []);
 
-  const logout = useCallback(() => {
-    clearStoredToken();
-    setToken("");
+  const logout = useCallback(async () => {
+    try {
+      await adminApi.logout();
+    } finally {
+      setAuthenticated(false);
+    }
   }, []);
 
   const value = useMemo(
-    () => ({ ready, token, meta, error, login, logout, refreshMeta }),
-    [ready, token, meta, error, login, logout, refreshMeta],
+    () => ({ ready, authenticated, meta, error, login, logout, refreshMeta }),
+    [ready, authenticated, meta, error, login, logout, refreshMeta],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -99,8 +89,8 @@ export function useAuth(): AuthState {
 }
 
 export function useIsAuthenticated(): boolean {
-  const { ready, token, meta } = useAuth();
+  const { ready, authenticated, meta } = useAuth();
   if (!ready) return false;
   if (meta && !meta.auth_required) return true;
-  return token.length > 0;
+  return authenticated;
 }

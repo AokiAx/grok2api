@@ -58,18 +58,23 @@ export function LoginPage() {
             <div className="mb-6">
               <h1 className="text-xl font-medium">登录</h1>
               <p className="mt-2 text-xs leading-5 text-muted-foreground text-pretty lg:hidden">
-                使用管理密钥进入面板
+                使用管理员密码进入面板
               </p>
             </div>
 
             {!ready ? (
               <p className="text-sm text-muted-foreground" role="status">加载中…</p>
             ) : meta && !meta.auth_required ? (
-              <p className="text-sm text-muted-foreground" role="status">未配置管理密钥，将直接进入。</p>
+              <p className="text-sm text-muted-foreground" role="status">当前实例未启用管理员认证，将直接进入。</p>
             ) : (
               <form className="space-y-4" onSubmit={onSubmit}>
+                {meta?.setup_required ? (
+                  <p className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300" role="status">
+                    管理员账号尚未初始化，请先完成服务端初始化配置。
+                  </p>
+                ) : null}
                 <div className="space-y-2">
-                  <Label htmlFor="password">管理密钥</Label>
+                  <Label htmlFor="password">管理员密码</Label>
                   <Input
                     id="password"
                     className="bg-secondary/55"
@@ -78,7 +83,7 @@ export function LoginPage() {
                     autoFocus
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="panel_password / app_key / api_key"
+                    placeholder="输入管理员密码"
                     required
                   />
                 </div>

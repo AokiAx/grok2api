@@ -96,7 +96,7 @@ export function AppShell() {
           <button
             type="button"
             className="flex size-10 items-center justify-center rounded-md text-muted-foreground transition-[background-color,color,transform] duration-150 hover:bg-secondary/55 hover:text-foreground active:scale-95"
-            onClick={logout}
+            onClick={() => void logout()}
             aria-label="退出登录"
             title="退出登录"
           >

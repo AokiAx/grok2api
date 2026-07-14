@@ -18,57 +18,54 @@ export class AdminApiError extends Error {
   }
 }
 
-const TOKEN_KEY = "grok2api.admin.token";
-const REMEMBER_KEY = "grok2api.admin.remember";
+const LEGACY_TOKEN_KEY = "grok2api.admin.token";
+const LEGACY_REMEMBER_KEY = "grok2api.admin.remember";
+let accessToken = "";
+let refreshPromise: Promise<boolean> | null = null;
 
-export function getStoredToken(): string {
+function clearLegacyAuthStorage(): void {
   try {
-    const remember = localStorage.getItem(REMEMBER_KEY) !== "0";
-    if (remember) {
-      return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
-    }
-    return sessionStorage.getItem(TOKEN_KEY) || "";
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_REMEMBER_KEY);
+    sessionStorage.removeItem(LEGACY_TOKEN_KEY);
+    sessionStorage.removeItem(LEGACY_REMEMBER_KEY);
   } catch {
-    return "";
+    /* Storage may be disabled; the in-memory session still works. */
   }
 }
 
-export function setStoredToken(token: string, remember: boolean): void {
-  try {
-    localStorage.setItem(REMEMBER_KEY, remember ? "1" : "0");
-    sessionStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(TOKEN_KEY);
-    if (!token) return;
-    if (remember) localStorage.setItem(TOKEN_KEY, token);
-    else sessionStorage.setItem(TOKEN_KEY, token);
-  } catch {
-    /* ignore */
-  }
+function setAccessToken(token: string): void {
+  accessToken = token.trim();
 }
 
-export function clearStoredToken(): void {
-  setStoredToken("", true);
-  try {
-    sessionStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    /* ignore */
-  }
+function clearAccessToken(): void {
+  accessToken = "";
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-  token?: string,
-): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type") && init.body) {
-    headers.set("Content-Type", "application/json");
-  }
-  const auth = token ?? getStoredToken();
-  if (auth) headers.set("Authorization", `Bearer ${auth}`);
+clearLegacyAuthStorage();
 
-  const response = await fetch(path, { ...init, headers });
+type TokenPayload = {
+  accessToken?: string;
+  access_token?: string;
+  token?: string;
+  tokens?: {
+    accessToken?: string;
+    access_token?: string;
+  };
+};
+
+function extractAccessToken(data: TokenPayload): string {
+  return (
+    data.tokens?.accessToken ||
+    data.tokens?.access_token ||
+    data.accessToken ||
+    data.access_token ||
+    data.token ||
+    ""
+  ).trim();
+}
+
+async function parseEnvelope<T>(response: Response): Promise<T> {
   const text = await response.text();
   let body: AdminEnvelope<T> | null = null;
   try {
@@ -79,7 +76,7 @@ async function request<T>(
   if (!body) {
     throw new AdminApiError(response.status, "empty", "Empty response");
   }
-  if (!body.ok || body.error) {
+  if (!response.ok || !body.ok || body.error) {
     throw new AdminApiError(
       response.status,
       body.error?.code || "error",
@@ -89,12 +86,77 @@ async function request<T>(
   return body.data as T;
 }
 
-async function downloadAttachment(path: string, fallbackName: string): Promise<void> {
-  const headers = new Headers();
-  const auth = getStoredToken();
-  if (auth) headers.set("Authorization", `Bearer ${auth}`);
+async function refreshAccessToken(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/admin/v1/auth/refresh", {
+      method: "POST",
+      credentials: "include",
+    });
+    const data = await parseEnvelope<TokenPayload>(response);
+    const nextToken = extractAccessToken(data);
+    if (!nextToken) {
+      throw new AdminApiError(response.status, "invalid_session", "Refresh response omitted access token");
+    }
+    setAccessToken(nextToken);
+    return true;
+  } catch {
+    clearAccessToken();
+    return false;
+  }
+}
 
-  const response = await fetch(path, { headers });
+function refreshSingleFlight(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = refreshAccessToken().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+type TransportOptions = {
+  authenticated?: boolean;
+  retryUnauthorized?: boolean;
+};
+
+async function transport(
+  path: string,
+  init: RequestInit = {},
+  options: TransportOptions = {},
+): Promise<Response> {
+  const authenticated = options.authenticated ?? true;
+  const headers = new Headers(init.headers);
+  if (!headers.has("Content-Type") && init.body) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (authenticated && accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+  } else if (!authenticated) {
+    headers.delete("Authorization");
+  }
+
+  const response = await fetch(path, { ...init, headers, credentials: "include" });
+  if (
+    response.status === 401 &&
+    authenticated &&
+    (options.retryUnauthorized ?? true) &&
+    await refreshSingleFlight()
+  ) {
+    return transport(path, init, { authenticated: true, retryUnauthorized: false });
+  }
+  return response;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  options: TransportOptions = {},
+): Promise<T> {
+  return parseEnvelope<T>(await transport(path, init, options));
+}
+
+async function downloadAttachment(path: string, fallbackName: string): Promise<void> {
+  const response = await transport(path);
   if (!response.ok) {
     const text = await response.text();
     try {
@@ -113,7 +175,15 @@ async function downloadAttachment(path: string, fallbackName: string): Promise<v
   const disposition = response.headers.get("Content-Disposition") || "";
   const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
   const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1];
-  const filename = encodedName ? decodeURIComponent(encodedName) : quotedName || fallbackName;
+  const plainName = disposition.match(/filename=([^;]+)/i)?.[1]?.trim();
+  let filename = quotedName || plainName || fallbackName;
+  if (encodedName) {
+    try {
+      filename = decodeURIComponent(encodedName);
+    } catch {
+      filename = encodedName;
+    }
+  }
   const objectURL = URL.createObjectURL(await response.blob());
   const anchor = document.createElement("a");
   anchor.href = objectURL;
@@ -130,19 +200,24 @@ async function downloadAttachment(path: string, fallbackName: string): Promise<v
 
 export type SystemMeta = {
   auth_required: boolean;
+  setup_required?: boolean;
   version: string;
   api_version: string;
   panel_paths?: string[];
 };
 
-export type LoginResult = {
+export type AdminIdentity = {
+  id: string;
+  username: string;
+};
+
+export type LoginResult = TokenPayload & {
   auth_required?: boolean;
-  token?: string;
   token_type?: string;
-  // Extended login response shape.
-  admin?: { id: string; username: string };
+  admin?: AdminIdentity;
   tokens?: {
-    accessToken: string;
+    accessToken?: string;
+    access_token?: string;
     accessTokenExpiresAt?: string;
     refreshTokenExpiresAt?: string;
   };
@@ -260,17 +335,39 @@ function normalizeAccountItem(item: any): PublicAccount {
 }
 
 export const adminApi = {
-  meta: () => request<SystemMeta>("/api/admin/v1/system/meta", {}, ""),
-  login: async (password: string) => {
+  meta: () => request<SystemMeta>("/api/admin/v1/system/meta", {}, { authenticated: false }),
+  login: async (password: string, remember: boolean) => {
     const data = await request<LoginResult>(
       "/api/admin/v1/auth/login",
-      { method: "POST", body: JSON.stringify({ password, username: "admin" }) },
-      "",
+      {
+        method: "POST",
+        body: JSON.stringify({ username: "admin", password, remember }),
+      },
+      { authenticated: false, retryUnauthorized: false },
     );
-    const token = data.tokens?.accessToken || data.token || password;
-    return { ...data, token, auth_required: data.auth_required ?? true };
+    const token = extractAccessToken(data);
+    if (!token) {
+      throw new AdminApiError(200, "invalid_session", "Login response omitted access token");
+    }
+    setAccessToken(token);
+    return data;
   },
-  me: () => request<Record<string, unknown>>("/api/admin/v1/auth/me"),
+  refresh: async () => {
+    if (!await refreshSingleFlight()) {
+      throw new AdminApiError(401, "unauthorized", "Session refresh failed");
+    }
+  },
+  logout: async () => {
+    try {
+      return await request<{ loggedOut?: boolean; logged_out?: boolean }>(
+        "/api/admin/v1/auth/logout",
+        { method: "POST" },
+      );
+    } finally {
+      clearAccessToken();
+    }
+  },
+  me: () => request<AdminIdentity>("/api/admin/v1/auth/me"),
   dashboard: () => request<Dashboard>("/api/admin/v1/dashboard"),
   pool: () =>
     request<{
