@@ -2,6 +2,7 @@ package adminauth
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -98,6 +99,12 @@ func TestAdminSessionLifecycleAndLoginAttemptValidation(t *testing.T) {
 	if _, err := NewLoginAttempt("admin", "127.0.0.1", true, "bad_password", now); err == nil {
 		t.Fatal("successful attempt with failure code should be rejected")
 	}
+	if _, err := NewLoginAttempt("admin", "", false, "bad_password", now); err == nil {
+		t.Fatal("empty source IP should be rejected")
+	}
+	if _, err := NewLoginAttempt("admin", "not-an-ip", false, "bad_password", now); err == nil {
+		t.Fatal("invalid source IP should be rejected")
+	}
 }
 
 func TestAdminSessionRotationRecordsLineage(t *testing.T) {
@@ -123,4 +130,52 @@ func TestAdminSessionRotationRecordsLineage(t *testing.T) {
 	if !session.RotatedAt.Equal(rotatedAt) || session.ReplacedBySessionID != "session-2" {
 		t.Fatalf("failed rotation mutated lineage: %+v", session)
 	}
+
+	expired, err := NewSession("expired", "family-2", "admin-1", hash, sha256.Sum256([]byte("refresh")), now.Add(time.Minute), now.Add(2*time.Minute), now)
+	if err != nil {
+		t.Fatalf("new expired fixture: %v", err)
+	}
+	if err := expired.Rotate(now.Add(2*time.Minute), "replacement"); err == nil {
+		t.Fatal("expired refresh session should not rotate")
+	}
+}
+
+func TestAdminAuthJSONNeverSerializesCredentialHashes(t *testing.T) {
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	hash := sha256.Sum256([]byte("secret"))
+	user, err := NewAdminUser("admin-1", "admin", PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: "sensitive-password-hash"}, now)
+	if err != nil {
+		t.Fatalf("new user: %v", err)
+	}
+	session, err := NewSession("session-1", "family-1", user.ID, hash, hash, now.Add(time.Minute), now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	assertJSONFieldAbsent(t, user, "Password", "Hash")
+	assertJSONFieldAbsent(t, session, "AccessTokenHash")
+	assertJSONFieldAbsent(t, session, "RefreshSecretHash")
+}
+
+func assertJSONFieldAbsent(t *testing.T, value any, path ...string) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var current any
+	if err := json.Unmarshal(data, &current); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for index, field := range path {
+		object, ok := current.(map[string]any)
+		if !ok {
+			t.Fatalf("path %v is not an object in %s", path[:index], data)
+		}
+		next, found := object[field]
+		if !found {
+			return
+		}
+		current = next
+	}
+	t.Fatalf("sensitive JSON field %v was serialized: %s", path, data)
 }

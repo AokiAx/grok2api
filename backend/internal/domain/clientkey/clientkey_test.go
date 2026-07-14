@@ -2,6 +2,7 @@ package clientkey
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -106,5 +107,20 @@ func TestClientKeyModelAuthorization(t *testing.T) {
 	}
 	if allowlist.AllowsModel("grok-3", []string{"grok-4.5"}) || allowlist.AllowsModel("", []string{"grok-4.5"}) {
 		t.Fatal("allowlist authorized an unscoped model")
+	}
+}
+
+func TestClientKeyJSONNeverSerializesKeyHash(t *testing.T) {
+	item := ClientKey{ID: "key-1", KeyHash: sha256.Sum256([]byte("sensitive"))}
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, found := payload["KeyHash"]; found {
+		t.Fatalf("key hash was serialized: %s", data)
 	}
 }

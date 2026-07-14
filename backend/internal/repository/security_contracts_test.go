@@ -61,7 +61,7 @@ func (clientKeyContractRepository) FindClientKeyByHash(context.Context, [32]byte
 func (clientKeyContractRepository) ListClientKeysPage(context.Context, repository.ListClientKeysQuery) (repository.ListClientKeysResult, error) {
 	return repository.ListClientKeysResult{}, nil
 }
-func (clientKeyContractRepository) UpdateClientKey(context.Context, clientkey.ClientKey, []string) error {
+func (clientKeyContractRepository) UpdateClientKeyPolicy(context.Context, string, repository.ClientKeyPolicyUpdate) error {
 	return nil
 }
 func (clientKeyContractRepository) RevokeClientKey(context.Context, string, time.Time) error {
@@ -101,5 +101,15 @@ func TestClientKeyListDTOCarriesScopesWithoutSecrets(t *testing.T) {
 	}
 	if result.Items[0].Key.ID != "key-1" || len(result.Items[0].Scopes) != 1 {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestClientKeyPolicyUpdateCannotCarryHashOriginOrRevocation(t *testing.T) {
+	update := repository.ClientKeyPolicyUpdate{
+		Name: "Restricted", ModelPolicy: clientkey.ModelPolicyAllowlist, Scopes: []string{"grok-4.5"},
+		RPMLimit: 30, MaxConcurrent: 2, UpdatedAt: time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC),
+	}
+	if update.Name != "Restricted" || update.ModelPolicy != clientkey.ModelPolicyAllowlist || len(update.Scopes) != 1 {
+		t.Fatalf("update = %+v", update)
 	}
 }
