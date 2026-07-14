@@ -3,6 +3,9 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  Download,
+  Gauge,
+  KeyRound,
   RefreshCw,
   Search,
   Trash2,
@@ -49,6 +52,7 @@ export function AccountsPage() {
   const [maxActiveDraft, setMaxActiveDraft] = useState(1);
   const [events, setEvents] = useState<AccountEvent[]>([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [maintenanceBusy, setMaintenanceBusy] = useState<Set<string>>(() => new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -152,6 +156,35 @@ export function AccountsPage() {
       setError(err instanceof AdminApiError ? err.message : "保存账号设置失败");
     } finally {
       setSettingsBusy(false);
+    }
+  }
+
+  async function runMaintenance(action: "token" | "quota" | "export") {
+    if (!selected) return;
+    const id = selected.id;
+    const key = `${id}:${action}`;
+    const labels = { token: "刷新 Token", quota: "刷新额度", export: "导出凭据" } as const;
+    setMaintenanceBusy((current) => new Set(current).add(key));
+    setError(null);
+    try {
+      if (action === "token") {
+        const updated = await adminApi.refreshCredential(id);
+        setSelected((current) => current?.id === id ? updated : current);
+        await load();
+      } else if (action === "quota") {
+        await adminApi.refreshQuota(id);
+        await load();
+      } else {
+        await adminApi.exportCredential(id);
+      }
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : `${labels[action]}失败`);
+    } finally {
+      setMaintenanceBusy((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     }
   }
 
@@ -476,6 +509,40 @@ export function AccountsPage() {
                   <Button className="col-span-2" size="sm" disabled={settingsBusy} onClick={() => void saveSettings()}>
                     {settingsBusy ? "保存中…" : "保存账号设置"}
                   </Button>
+                </div>
+                <div className="mt-4 border-t border-border/70 pt-4">
+                  <h3 className="text-xs font-medium">维护操作</h3>
+                  <p className="mt-1 text-[11px] text-muted-foreground">手动同步凭据与额度；敏感凭据仅通过下载导出。</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={maintenanceBusy.has(`${selected.id}:token`)}
+                      onClick={() => void runMaintenance("token")}
+                    >
+                      <KeyRound className="h-3.5 w-3.5" />
+                      {maintenanceBusy.has(`${selected.id}:token`) ? "刷新中…" : "刷新 Token"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={maintenanceBusy.has(`${selected.id}:quota`)}
+                      onClick={() => void runMaintenance("quota")}
+                    >
+                      <Gauge className="h-3.5 w-3.5" />
+                      {maintenanceBusy.has(`${selected.id}:quota`) ? "刷新中…" : "刷新额度"}
+                    </Button>
+                    <Button
+                      className="col-span-2"
+                      size="sm"
+                      variant="outline"
+                      disabled={maintenanceBusy.has(`${selected.id}:export`)}
+                      onClick={() => void runMaintenance("export")}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      {maintenanceBusy.has(`${selected.id}:export`) ? "导出中…" : "导出凭据"}
+                    </Button>
+                  </div>
                 </div>
                 <div className="mt-4 border-t border-border/70 pt-4">
                   <h3 className="text-xs font-medium">状态时间线</h3>

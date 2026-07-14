@@ -89,6 +89,45 @@ async function request<T>(
   return body.data as T;
 }
 
+async function downloadAttachment(path: string, fallbackName: string): Promise<void> {
+  const headers = new Headers();
+  const auth = getStoredToken();
+  if (auth) headers.set("Authorization", `Bearer ${auth}`);
+
+  const response = await fetch(path, { headers });
+  if (!response.ok) {
+    const text = await response.text();
+    try {
+      const body = JSON.parse(text) as AdminEnvelope<unknown>;
+      throw new AdminApiError(
+        response.status,
+        body.error?.code || "download_failed",
+        body.error?.message || "Download failed",
+      );
+    } catch (error) {
+      if (error instanceof AdminApiError) throw error;
+      throw new AdminApiError(response.status, "download_failed", text || response.statusText);
+    }
+  }
+
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1];
+  const filename = encodedName ? decodeURIComponent(encodedName) : quotedName || fallbackName;
+  const objectURL = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = objectURL;
+  anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    URL.revokeObjectURL(objectURL);
+  }
+}
+
 export type SystemMeta = {
   auth_required: boolean;
   version: string;
@@ -188,6 +227,15 @@ export type AccountEvent = {
   created_at: string;
 };
 
+export type QuotaRefreshResult = {
+  account_id: string;
+  reason: string;
+  error_code: string;
+  actual: number;
+  limit: number;
+  observed: boolean;
+};
+
 
 function normalizeAccountItem(item: any): PublicAccount {
   // Normalize alternate AccountDTO fields into PublicAccount.
@@ -285,6 +333,19 @@ export const adminApi = {
   accountEvents: (id: string, page = 1, pageSize = 20) =>
     request<{ items: AccountEvent[]; total: number; page: number; page_size: number }>(
       `/api/admin/v1/accounts/${encodeURIComponent(id)}/events?page=${page}&page_size=${pageSize}`,
+    ),
+  refreshCredential: (id: string) =>
+    request<PublicAccount>(`/api/admin/v1/accounts/${encodeURIComponent(id)}/refresh-token`, {
+      method: "POST",
+    }),
+  refreshQuota: (id: string) =>
+    request<QuotaRefreshResult>(`/api/admin/v1/accounts/${encodeURIComponent(id)}/refresh-quota`, {
+      method: "POST",
+    }),
+  exportCredential: (id: string) =>
+    downloadAttachment(
+      `/api/admin/v1/accounts/${encodeURIComponent(id)}/credentials/export`,
+      `grok2api-account-${id}.json`,
     ),
   importPreview: (accounts: ImportAccount[]) =>
     request<ImportResult>("/api/admin/v1/accounts/import/preview", {
