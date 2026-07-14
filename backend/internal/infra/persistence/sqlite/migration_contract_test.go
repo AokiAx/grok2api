@@ -24,8 +24,8 @@ func TestPythonV1FixtureMigratesAllSupportedFieldsAndStates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	if got := repo.SchemaVersion(ctx); got != 3 {
-		t.Fatalf("schema version = %d; want 3", got)
+	if got := repo.SchemaVersion(ctx); got != 4 {
+		t.Fatalf("schema version = %d; want 4", got)
 	}
 	accounts, err := repo.ListAccounts(ctx)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestLegacyJSONFixtureImportsAllSupportedFieldsAndStates(t *testing.T) {
 	}
 }
 
-func TestOpenV3DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.T) {
+func TestOpenV4DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "v3.db")
 	repo, err := sqlite.OpenSQLite(ctx, database)
@@ -183,8 +183,8 @@ func TestOpenV3DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.
 		if err != nil {
 			t.Fatalf("reopen attempt %d: %v", attempt, err)
 		}
-		if got := repo.SchemaVersion(ctx); got != 3 {
-			t.Fatalf("attempt %d schema version = %d; want 3", attempt, got)
+		if got := repo.SchemaVersion(ctx); got != 4 {
+			t.Fatalf("attempt %d schema version = %d; want 4", attempt, got)
 		}
 		accounts, err := repo.ListAccounts(ctx)
 		if err != nil {

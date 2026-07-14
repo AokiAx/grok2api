@@ -171,6 +171,33 @@ func (r *memoryRepository) DeleteAccount(_ context.Context, id string) error {
 	return nil
 }
 
+func (r *memoryRepository) GetAccount(_ context.Context, id string) (account.Account, bool, error) {
+	item, ok := r.accounts[id]
+	return item, ok, nil
+}
+
+func (r *memoryRepository) SaveAccounts(ctx context.Context, items []account.Account) error {
+	for _, item := range items {
+		if err := r.SaveAccount(ctx, item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *memoryRepository) DeleteAccounts(ctx context.Context, ids []string) error {
+	for _, id := range ids {
+		if err := r.DeleteAccount(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *memoryRepository) ListAccountEvents(_ context.Context, query repository.ListAccountEventsQuery) (repository.ListAccountEventsResult, error) {
+	return repository.ListAccountEventsResult{Page: query.Page, PageSize: query.PageSize}, nil
+}
+
 type validator struct {
 	reason account.UnavailableReason
 	code   string

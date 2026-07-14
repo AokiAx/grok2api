@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type SQLite struct {
 	db     *sql.DB
@@ -160,6 +160,7 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			request_count INTEGER NOT NULL DEFAULT 0,
 			authentication_fails INTEGER NOT NULL DEFAULT 0,
 			max_active INTEGER NOT NULL DEFAULT 1,
+			priority INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -169,8 +170,10 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			account_id TEXT NOT NULL,
 			from_pool TEXT NOT NULL,
 			to_pool TEXT NOT NULL,
+			event_type TEXT NOT NULL DEFAULT 'state_transition',
 			reason TEXT NOT NULL,
 			error_code TEXT NOT NULL DEFAULT '',
+			details_json TEXT NOT NULL DEFAULT '{}',
 			created_at TEXT NOT NULL
 		)`,
 	}
@@ -180,6 +183,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 		}
 	}
 	if err := r.ensureAccountColumns(ctx); err != nil {
+		return err
+	}
+	if err := r.ensureAccountEventColumns(ctx); err != nil {
 		return err
 	}
 	if err := r.migratePythonV1(ctx); err != nil {
@@ -535,57 +541,80 @@ func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, boo
 }
 
 func (r *SQLite) SaveAccount(ctx context.Context, item account.Account) error {
+	return r.SaveAccounts(ctx, []account.Account{item})
+}
+
+func (r *SQLite) SaveAccounts(ctx context.Context, items []account.Account) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin save account: %w", err)
+		return fmt.Errorf("begin save accounts: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	for _, item := range items {
+		if err := r.saveAccountTx(ctx, tx, item); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit account saves: %w", err)
+	}
+	return nil
+}
 
-	fromPool := ""
-	fromReason := ""
-	err = tx.QueryRowContext(
-		ctx,
-		`SELECT pool, unavailable_reason FROM accounts WHERE id=?`,
-		item.ID,
-	).Scan(&fromPool, &fromReason)
+func (r *SQLite) DeleteAccount(ctx context.Context, id string) error {
+	return r.DeleteAccounts(ctx, []string{id})
+}
+
+func (r *SQLite) DeleteAccounts(ctx context.Context, ids []string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete accounts: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range ids {
+		if err := r.deleteAccountTx(ctx, tx, strings.TrimSpace(id)); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit account deletes: %w", err)
+	}
+	return nil
+}
+
+func (r *SQLite) saveAccountTx(ctx context.Context, tx *sql.Tx, item account.Account) error {
+	var fromPool, fromReason string
+	var fromPriority, fromMaxActive int
+	err := tx.QueryRowContext(ctx, `SELECT pool, unavailable_reason, priority, max_active FROM accounts WHERE id=?`, item.ID).
+		Scan(&fromPool, &fromReason, &fromPriority, &fromMaxActive)
+	exists := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("load existing account state: %w", err)
 	}
 	if err := r.upsertAccount(ctx, tx, item); err != nil {
 		return err
 	}
-	if fromPool != string(item.Pool) || fromReason != string(item.UnavailableReason) {
-		_, err = tx.ExecContext(
-			ctx,
-			`INSERT INTO account_state_events (
-				account_id, from_pool, to_pool, reason, error_code, created_at
-			) VALUES (?, ?, ?, ?, ?, ?)`,
-			item.ID,
-			fromPool,
-			item.Pool,
-			item.UnavailableReason,
-			item.LastErrorCode,
-			time.Now().UTC().Format(time.RFC3339Nano),
-		)
-		if err != nil {
-			return fmt.Errorf("record account state event: %w", err)
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if !exists || fromPool != string(item.Pool) || fromReason != string(item.UnavailableReason) {
+		if err := insertAccountEvent(ctx, tx, item.ID, fromPool, string(item.Pool), repository.AccountEventStateTransition, string(item.UnavailableReason), item.LastErrorCode, nil, createdAt); err != nil {
+			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit account save: %w", err)
+	if exists && (fromPriority != item.Priority || fromMaxActive != item.MaxActive) {
+		details := map[string]any{"priority": item.Priority, "max_active": item.MaxActive}
+		if err := insertAccountEvent(ctx, tx, item.ID, fromPool, string(item.Pool), repository.AccountEventConfiguration, "admin-update", "", details, createdAt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (r *SQLite) DeleteAccount(ctx context.Context, id string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin delete account: %w", err)
+func (r *SQLite) deleteAccountTx(ctx context.Context, tx *sql.Tx, id string) error {
+	if id == "" {
+		return nil
 	}
-	defer func() { _ = tx.Rollback() }()
-
 	var fromPool string
-	err = tx.QueryRowContext(ctx, `SELECT pool FROM accounts WHERE id=?`, id).Scan(&fromPool)
+	err := tx.QueryRowContext(ctx, `SELECT pool FROM accounts WHERE id=?`, id).Scan(&fromPool)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -595,19 +624,22 @@ func (r *SQLite) DeleteAccount(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, id); err != nil {
 		return fmt.Errorf("delete account %s: %w", id, err)
 	}
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO account_state_events (
-			account_id, from_pool, to_pool, reason, error_code, created_at
-		) VALUES (?, ?, 'deleted', 'disabled', 'admin-delete', ?)`,
-		id,
-		fromPool,
-		time.Now().UTC().Format(time.RFC3339Nano),
-	); err != nil {
-		return fmt.Errorf("record account deletion: %w", err)
+	return insertAccountEvent(ctx, tx, id, fromPool, "deleted", repository.AccountEventDeletion, "disabled", "admin-delete", nil, time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+func insertAccountEvent(ctx context.Context, tx *sql.Tx, accountID, fromPool, toPool string, eventType repository.AccountEventType, reason, errorCode string, details map[string]any, createdAt string) error {
+	if details == nil {
+		details = map[string]any{}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit account delete: %w", err)
+	rawDetails, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("encode account event details: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO account_state_events (
+		account_id, from_pool, to_pool, event_type, reason, error_code, details_json, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, accountID, fromPool, toPool, eventType, reason, errorCode, string(rawDetails), createdAt)
+	if err != nil {
+		return fmt.Errorf("record account event: %w", err)
 	}
 	return nil
 }
@@ -629,8 +661,8 @@ func (r *SQLite) upsertAccount(ctx context.Context, tx *sql.Tx, item account.Acc
 			id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
 			email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
 			last_success_at, quota_actual, quota_limit, request_count,
-			authentication_fails, max_active, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			authentication_fails, max_active, priority, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			access_token=excluded.access_token,
 			refresh_token=excluded.refresh_token,
@@ -650,6 +682,7 @@ func (r *SQLite) upsertAccount(ctx context.Context, tx *sql.Tx, item account.Acc
 			request_count=excluded.request_count,
 			authentication_fails=excluded.authentication_fails,
 			max_active=excluded.max_active,
+			priority=excluded.priority,
 			updated_at=excluded.updated_at`,
 		item.ID,
 		item.AccessToken,
@@ -670,6 +703,7 @@ func (r *SQLite) upsertAccount(ctx context.Context, tx *sql.Tx, item account.Acc
 		item.RequestCount,
 		item.AuthenticationFails,
 		item.MaxActive,
+		item.Priority,
 		formatTime(item.CreatedAt),
 		formatTime(item.UpdatedAt),
 	)
@@ -738,7 +772,7 @@ func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 		`SELECT id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
 			email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
 			last_success_at, quota_actual, quota_limit, request_count,
-			authentication_fails, max_active, created_at, updated_at
+			authentication_fails, max_active, priority, created_at, updated_at
 		 FROM accounts ORDER BY created_at, id`,
 	)
 	if err != nil {
@@ -777,7 +811,7 @@ func (r *SQLite) ListAccountsPage(
 	listSQL := `SELECT id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
 			email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
 			last_success_at, quota_actual, quota_limit, request_count,
-			authentication_fails, max_active, created_at, updated_at
+			authentication_fails, max_active, priority, created_at, updated_at
 		 FROM accounts ` + where + ` ORDER BY created_at, id LIMIT ? OFFSET ?`
 	listArgs := append(append([]any{}, args...), query.PageSize, offset)
 	rows, err := r.db.QueryContext(ctx, listSQL, listArgs...)
@@ -832,6 +866,7 @@ func (r *SQLite) scanAccount(rows accountScanner) (account.Account, error) {
 		&item.RequestCount,
 		&item.AuthenticationFails,
 		&item.MaxActive,
+		&item.Priority,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -853,6 +888,68 @@ func (r *SQLite) scanAccount(rows accountScanner) (account.Account, error) {
 	item.AccessToken = access
 	item.RefreshToken = refresh
 	return item, nil
+}
+
+func (r *SQLite) GetAccount(ctx context.Context, id string) (account.Account, bool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
+		email, user_id, team_id, pool, unavailable_reason, retry_at, last_error_code,
+		last_success_at, quota_actual, quota_limit, request_count,
+		authentication_fails, max_active, priority, created_at, updated_at
+		FROM accounts WHERE id=?`, strings.TrimSpace(id))
+	item, err := r.scanAccount(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return account.Account{}, false, nil
+	}
+	if err != nil {
+		return account.Account{}, false, err
+	}
+	return item, true, nil
+}
+
+func (r *SQLite) ListAccountEvents(ctx context.Context, query repository.ListAccountEventsQuery) (repository.ListAccountEventsResult, error) {
+	query.AccountID = strings.TrimSpace(query.AccountID)
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.PageSize < 1 {
+		query.PageSize = 20
+	}
+	if query.PageSize > 200 {
+		query.PageSize = 200
+	}
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_state_events WHERE account_id=?`, query.AccountID).Scan(&total); err != nil {
+		return repository.ListAccountEventsResult{}, fmt.Errorf("count account events: %w", err)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id, account_id, event_type, from_pool, to_pool, reason, error_code, details_json, created_at
+		FROM account_state_events WHERE account_id=? ORDER BY id DESC LIMIT ? OFFSET ?`, query.AccountID, query.PageSize, (query.Page-1)*query.PageSize)
+	if err != nil {
+		return repository.ListAccountEventsResult{}, fmt.Errorf("list account events: %w", err)
+	}
+	defer rows.Close()
+	items := make([]repository.AccountEvent, 0, query.PageSize)
+	for rows.Next() {
+		var item repository.AccountEvent
+		var eventType, fromPool, toPool, detailsJSON, createdAt string
+		if err := rows.Scan(&item.ID, &item.AccountID, &eventType, &fromPool, &toPool, &item.Reason, &item.ErrorCode, &detailsJSON, &createdAt); err != nil {
+			return repository.ListAccountEventsResult{}, fmt.Errorf("scan account event: %w", err)
+		}
+		item.Type = repository.AccountEventType(eventType)
+		item.FromPool = account.Pool(fromPool)
+		item.ToPool = account.Pool(toPool)
+		item.CreatedAt = parseTime(createdAt)
+		item.Details = map[string]any{}
+		if detailsJSON != "" {
+			if err := json.Unmarshal([]byte(detailsJSON), &item.Details); err != nil {
+				return repository.ListAccountEventsResult{}, fmt.Errorf("decode account event details: %w", err)
+			}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return repository.ListAccountEventsResult{}, fmt.Errorf("iterate account events: %w", err)
+	}
+	return repository.ListAccountEventsResult{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
 }
 
 // AccountStats returns global pool aggregates without loading token rows.
@@ -997,7 +1094,6 @@ func (r *SQLite) ensureAccountColumns(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("inspect accounts columns: %w", err)
 	}
-	defer rows.Close()
 	columns := map[string]bool{}
 	for rows.Next() {
 		var cid int
@@ -1009,9 +1105,50 @@ func (r *SQLite) ensureAccountColumns(ctx context.Context) error {
 		}
 		columns[name] = true
 	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close accounts columns: %w", err)
+	}
 	if !columns["team_id"] {
 		if _, err := r.db.ExecContext(ctx, `ALTER TABLE accounts ADD COLUMN team_id TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("add team_id column: %w", err)
+		}
+	}
+	if !columns["priority"] {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE accounts ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add priority column: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *SQLite) ensureAccountEventColumns(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(account_state_events)`)
+	if err != nil {
+		return fmt.Errorf("inspect account event columns: %w", err)
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan account event column: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close account event columns: %w", err)
+	}
+	if !columns["event_type"] {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE account_state_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'state_transition'`); err != nil {
+			return fmt.Errorf("add account event type column: %w", err)
+		}
+	}
+	if !columns["details_json"] {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE account_state_events ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+			return fmt.Errorf("add account event details column: %w", err)
 		}
 	}
 	return nil
