@@ -35,6 +35,15 @@ func requireContains(t *testing.T, content string, values ...string) {
 	}
 }
 
+func requireNotContains(t *testing.T, content string, values ...string) {
+	t.Helper()
+	for _, value := range values {
+		if strings.Contains(content, value) {
+			t.Errorf("content unexpectedly contains %q", value)
+		}
+	}
+}
+
 func publishedDockerfile(t *testing.T) string {
 	t.Helper()
 	workflow := readFile(t, ".github/workflows/image.yml")
@@ -82,16 +91,30 @@ func TestImageWorkflowPublishesSignedMultiArchitectureGHCRImage(t *testing.T) {
 	)
 }
 
-func TestCIRequiresRaceVetAndCoverage(t *testing.T) {
+func TestCISeparatesBackendFrontendAndImageSmoke(t *testing.T) {
 	workflow := readFile(t, ".github/workflows/ci.yml")
 	requireContains(
 		t,
 		workflow,
+		"backend:",
+		"frontend:",
+		"image-smoke:",
 		"go test -race",
 		"go vet ./...",
 		"coverprofile",
 		"go build ./cmd/grok2api",
+		"npm ci",
+		"npm run build",
+		"docker build --tag grok2api:ci .",
+		"bash scripts/smoke-docker-image.sh grok2api:ci",
 	)
+	requireNotContains(t, workflow, "paneldist", "refresh embed")
+}
+
+func TestImageWorkflowPublishesOnlyFromTheAuthoritativeDockerfile(t *testing.T) {
+	workflow := readFile(t, ".github/workflows/image.yml")
+	requireContains(t, workflow, "linux/amd64,linux/arm64", "context: .")
+	requireNotContains(t, workflow, "pull_request:", "Dockerfile.golang", "file: Dockerfile.golang")
 }
 
 func TestDockerignoreExcludesRuntimeSecrets(t *testing.T) {
@@ -109,10 +132,38 @@ func TestDeployWorkflowIsManualAndPinsDigest(t *testing.T) {
 		"docker inspect",
 		"RepoDigests",
 		"8788",
+		"Verify canary health and frontend asset",
 		"Verify promoted service",
+		"/assets/",
 		"Rollback to previous Go image",
 		"docker start grok2api-cli",
 	)
+}
+
+func TestLocalDeployVerifiesHealthAndFrontendAsset(t *testing.T) {
+	script := readFile(t, "deploy/deploy-stack.sh")
+	requireContains(t, script, "/health", "/assets/", "index.html", "frontend asset")
+}
+
+func TestDeliveryExamplesUseRuntimeFrontendDirectory(t *testing.T) {
+	envExample := readFile(t, ".env.example")
+	configExample := readFile(t, "config.example.json")
+	readme := readFile(t, "README.md")
+	frontendReadme := readFile(t, "frontend/README.md")
+
+	requireContains(t, envExample, "GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist")
+	requireContains(t, configExample, `"frontend"`, `"static_path"`)
+	requireContains(
+		t,
+		readme,
+		"Docker 镜像是唯一正式交付物",
+		"GROK2API_FRONTEND_STATIC_PATH",
+		"/app/frontend/dist",
+		"裸 Go",
+	)
+	requireContains(t, frontendReadme, "npm ci", "npm run build", "Docker")
+	requireNotContains(t, readme, "Dockerfile.golang", "sync-paneldist", "go build -trimpath -o grok2api.exe")
+	requireNotContains(t, frontendReadme, "embed", "sync-paneldist")
 }
 
 func TestDockerImageSmokeScriptCoversRuntimeDeliveryContract(t *testing.T) {
