@@ -24,6 +24,7 @@ import (
 	"github.com/AokiAx/grok2api/internal/repository"
 	runtimeworker "github.com/AokiAx/grok2api/internal/runtime"
 	"github.com/AokiAx/grok2api/internal/scheduler"
+	"github.com/AokiAx/grok2api/internal/security"
 	"github.com/AokiAx/grok2api/internal/service"
 	"github.com/AokiAx/grok2api/internal/upstream"
 )
@@ -61,7 +62,14 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	if err := os.MkdirAll(settings.DataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
-	repo, err := repository.OpenSQLite(ctx, filepath.Join(settings.DataDir, "grok2api.db"))
+	credCipher, err := security.NewCipher(settings.CredentialKey)
+	if err != nil {
+		return fmt.Errorf("credential cipher: %w", err)
+	}
+	if credCipher != nil {
+		slog.Info("credential encryption enabled")
+	}
+	repo, err := repository.OpenSQLiteWithCipher(ctx, filepath.Join(settings.DataDir, "grok2api.db"), credCipher)
 	if err != nil {
 		return err
 	}
@@ -167,10 +175,15 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		"active_size", activeSize,
 	)
 	httpClient := &http.Client{Timeout: settings.RequestTimeout()}
-	upstreamClient := upstream.NewClient(
+	upstreamClient := upstream.NewClientWithOptions(
 		settings.ProxyBaseURL,
 		settings.ClientVersion,
 		httpClient,
+		upstream.ClientOptions{
+			TokenAuth:        settings.TokenAuth,
+			ClientIdentifier: settings.ClientIdentifier,
+			UserAgent:        settings.ClientUserAgent,
+		},
 	)
 	gateway := service.NewGateway(
 		pool,
@@ -179,6 +192,7 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		service.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 		service.WithMaxAttempts(maxAttempts),
+		service.WithAcquireTimeout(time.Duration(settings.AcquireTimeoutSec)*time.Second),
 	)
 	// Optional temporary interceptor: logs client + upstream stages for protocol debugging.
 	var apiGateway api.Gateway = gateway

@@ -1,8 +1,10 @@
 package repository_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/AokiAx/grok2api/internal/account"
 	"github.com/AokiAx/grok2api/internal/repository"
+	"github.com/AokiAx/grok2api/internal/security"
+	_ "modernc.org/sqlite"
 )
 
 func TestSQLiteMigrationCreatesTwoPoolSchema(t *testing.T) {
@@ -542,5 +546,88 @@ func TestImportLegacyJSONKeepsTeamID(t *testing.T) {
 	accounts, err := repo.ListAccounts(ctx)
 	if err != nil || accounts[0].TeamID != "team-42" {
 		t.Fatalf("accounts=%#v err=%v", accounts, err)
+	}
+}
+
+func TestCredentialEncryptionRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "enc.db")
+	// Base64-encoded 32-byte key.
+	rawKey := make([]byte, 32)
+	for i := range rawKey {
+		rawKey[i] = byte(i + 1)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(rawKey))
+	if err != nil || cipher == nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	ctx := context.Background()
+	repo, err := repository.OpenSQLiteWithCipher(ctx, path, cipher)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	item := account.Account{
+		ID: "enc-1", AccessToken: "access-secret", RefreshToken: "refresh-secret",
+		Pool: account.PoolReady, MaxActive: 1,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := repo.SaveAccount(ctx, item); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Raw DB should store ciphertext prefix (open without cipher for inspection).
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer db.Close()
+	var rawAccess string
+	if err := db.QueryRowContext(ctx, `SELECT access_token FROM accounts WHERE id=?`, "enc-1").Scan(&rawAccess); err != nil {
+		t.Fatalf("raw: %v", err)
+	}
+	if !security.IsEncrypted(rawAccess) {
+		t.Fatalf("want encrypted storage, got %q", rawAccess)
+	}
+	list, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || list[0].AccessToken != "access-secret" || list[0].RefreshToken != "refresh-secret" {
+		t.Fatalf("decrypted list = %#v", list)
+	}
+	_ = repo.Close()
+}
+
+func TestBase64RefreshTokenDoesNotRequireCredentialKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plain-base64.db")
+	ctx := context.Background()
+	repo, err := repository.OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	refresh := base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 64))
+	item := account.Account{
+		ID: "plain-base64", AccessToken: "access-token", RefreshToken: refresh,
+		Pool: account.PoolReady, MaxActive: 1,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := repo.SaveAccount(ctx, item); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	repo, err = repository.OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen without credential key: %v", err)
+	}
+	defer repo.Close()
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].RefreshToken != refresh {
+		t.Fatalf("refresh token changed: %#v", accounts)
 	}
 }

@@ -13,13 +13,18 @@ import (
 // Config holds API server and pool settings only.
 // Account registration lives in the external grok-register project.
 type Config struct {
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	APIKey            string `json:"api_key"`
-	AppKey            string `json:"app_key"`
-	PanelPassword     string `json:"panel_password"`
-	ProxyBaseURL      string `json:"proxy_base_url"`
-	ClientVersion     string `json:"client_version"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	APIKey        string `json:"api_key"`
+	AppKey        string `json:"app_key"`
+	PanelPassword string `json:"panel_password"`
+	ProxyBaseURL  string `json:"proxy_base_url"`
+	ClientVersion string `json:"client_version"`
+	// CLI fingerprint for the Grok CLI request surface.
+	ClientIdentifier  string `json:"client_identifier"`
+	ClientUserAgent   string `json:"client_user_agent"`
+	TokenAuth         string `json:"token_auth"`
+	CredentialKey     string `json:"credential_key"`
 	DefaultModel      string `json:"default_model"`
 	DataDir           string `json:"data_dir"`
 	MaxConcurrent     int    `json:"cli_pool_max_concurrent"`
@@ -54,6 +59,8 @@ func Defaults() Config {
 		Port:              8787,
 		ProxyBaseURL:      "https://cli-chat-proxy.grok.com/v1",
 		ClientVersion:     "0.2.93",
+		ClientIdentifier:  "grok-cli",
+		TokenAuth:         "xai-grok-cli",
 		DefaultModel:      "grok-4.5",
 		DataDir:           "data",
 		MaxConcurrent:     4,
@@ -106,6 +113,12 @@ func normalize(config *Config) {
 		config.ProxyBaseURL = Defaults().ProxyBaseURL
 	}
 	config.ProxyBaseURL = strings.TrimRight(strings.TrimSpace(config.ProxyBaseURL), "/")
+	if strings.TrimSpace(config.ClientIdentifier) == "" {
+		config.ClientIdentifier = Defaults().ClientIdentifier
+	}
+	if strings.TrimSpace(config.TokenAuth) == "" {
+		config.TokenAuth = Defaults().TokenAuth
+	}
 	if strings.TrimSpace(config.DefaultModel) == "" {
 		config.DefaultModel = Defaults().DefaultModel
 	}
@@ -134,17 +147,21 @@ func normalize(config *Config) {
 
 func applyEnvironment(config *Config) error {
 	stringValues := map[string]*string{
-		"GROK2API_HOST":            &config.Host,
-		"GROK2API_API_KEY":         &config.APIKey,
-		"GROK2API_APP_KEY":         &config.AppKey,
-		"GROK2API_PANEL_PASSWORD":  &config.PanelPassword,
-		"GROK2API_PROXY_BASE_URL":  &config.ProxyBaseURL,
-		"GROK2API_CLIENT_VERSION":  &config.ClientVersion,
-		"GROK2API_DEFAULT_MODEL":   &config.DefaultModel,
-		"GROK2API_DATA_DIR":        &config.DataDir,
-		"GROK2API_PROXY":           &config.Proxy,
-		"PROXY_URL":                &config.Proxy,
-		"GROK2API_DEBUG_TRACE_DIR": &config.DebugTraceDir,
+		"GROK2API_HOST":              &config.Host,
+		"GROK2API_API_KEY":           &config.APIKey,
+		"GROK2API_APP_KEY":           &config.AppKey,
+		"GROK2API_PANEL_PASSWORD":    &config.PanelPassword,
+		"GROK2API_PROXY_BASE_URL":    &config.ProxyBaseURL,
+		"GROK2API_CLIENT_VERSION":    &config.ClientVersion,
+		"GROK2API_CLIENT_IDENTIFIER": &config.ClientIdentifier,
+		"GROK2API_CLIENT_USER_AGENT": &config.ClientUserAgent,
+		"GROK2API_TOKEN_AUTH":        &config.TokenAuth,
+		"GROK2API_CREDENTIAL_KEY":    &config.CredentialKey,
+		"GROK2API_DEFAULT_MODEL":     &config.DefaultModel,
+		"GROK2API_DATA_DIR":          &config.DataDir,
+		"GROK2API_PROXY":             &config.Proxy,
+		"PROXY_URL":                  &config.Proxy,
+		"GROK2API_DEBUG_TRACE_DIR":   &config.DebugTraceDir,
 	}
 	for name, target := range stringValues {
 		if value, ok := os.LookupEnv(name); ok {

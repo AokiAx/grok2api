@@ -11,31 +11,122 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/internal/account"
+	"github.com/AokiAx/grok2api/internal/security"
 	_ "modernc.org/sqlite"
 )
 
 const schemaVersion = 3
 
 type SQLite struct {
-	db *sql.DB
+	db     *sql.DB
+	cipher *security.Cipher
 }
 
 func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
+	return OpenSQLiteWithCipher(ctx, path, nil)
+}
+
+// OpenSQLiteWithCipher opens the DB and optionally encrypts credentials at rest.
+// When cipher is non-nil, tokens are written as enc:v1:... and plaintext rows are
+// migrated on open (schema_version still 3; encryption is opaque to schema).
+func OpenSQLiteWithCipher(ctx context.Context, path string, cipher *security.Cipher) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	repo := &SQLite{db: db}
+	repo := &SQLite{db: db, cipher: cipher}
 	if err := repo.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if cipher != nil {
+		if err := repo.encryptExistingCredentials(ctx); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return repo, nil
 }
 
 func (r *SQLite) Close() error {
 	return r.db.Close()
+}
+
+func (r *SQLite) sealToken(value string) (string, error) {
+	if r == nil || r.cipher == nil {
+		return value, nil
+	}
+	return r.cipher.Encrypt(value)
+}
+
+func (r *SQLite) openToken(value string) (string, error) {
+	if r == nil {
+		return value, nil
+	}
+	if r.cipher == nil {
+		// Raw Base64 is ambiguous: OAuth refresh tokens can have the same shape as
+		// raw AES-GCM ciphertext. Without a configured key there is no safe
+		// way to distinguish them, so only reject our explicit legacy envelope.
+		if strings.HasPrefix(value, "enc:v1:") {
+			return "", fmt.Errorf("encrypted credential requires credential_key")
+		}
+		return value, nil
+	}
+	// NormalizeStored handles raw Base64 and legacy enc:v1: rows.
+	return r.cipher.NormalizeStored(value)
+}
+
+func (r *SQLite) encryptExistingCredentials(ctx context.Context) error {
+	if r == nil || r.cipher == nil {
+		return nil
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id, access_token, refresh_token FROM accounts`)
+	if err != nil {
+		return fmt.Errorf("list credentials for encryption: %w", err)
+	}
+	defer rows.Close()
+	type row struct {
+		id, access, refresh string
+	}
+	var pending []row
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.id, &item.access, &item.refresh); err != nil {
+			return fmt.Errorf("scan credential row: %w", err)
+		}
+		if security.IsEncrypted(item.access) && (item.refresh == "" || security.IsEncrypted(item.refresh)) {
+			continue
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		access, err := r.cipher.Encrypt(item.access)
+		if err != nil {
+			return fmt.Errorf("encrypt access %s: %w", item.id, err)
+		}
+		refresh, err := r.cipher.Encrypt(item.refresh)
+		if err != nil {
+			return fmt.Errorf("encrypt refresh %s: %w", item.id, err)
+		}
+		if access == item.access && refresh == item.refresh {
+			continue
+		}
+		if _, err := r.db.ExecContext(
+			ctx,
+			`UPDATE accounts SET access_token=?, refresh_token=?, updated_at=? WHERE id=?`,
+			access,
+			refresh,
+			time.Now().UTC().Format(time.RFC3339Nano),
+			item.id,
+		); err != nil {
+			return fmt.Errorf("write encrypted credentials %s: %w", item.id, err)
+		}
+	}
+	return nil
 }
 
 func (r *SQLite) migrate(ctx context.Context) error {
@@ -191,7 +282,7 @@ func (r *SQLite) migratePythonV1(ctx context.Context) error {
 	now := time.Now().UTC()
 	for index, legacyItem := range legacy {
 		item := legacyItem.toV2(now, index)
-		if err := upsertAccount(ctx, tx, item); err != nil {
+		if err := r.upsertAccount(ctx, tx, item); err != nil {
 			return fmt.Errorf("migrate Python v1 account %s: %w", item.ID, err)
 		}
 	}
@@ -366,7 +457,7 @@ func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string) (int, error)
 		if !ok {
 			continue
 		}
-		if err := upsertAccount(ctx, tx, item); err != nil {
+		if err := r.upsertAccount(ctx, tx, item); err != nil {
 			return 0, err
 		}
 		count++
@@ -457,7 +548,7 @@ func (r *SQLite) SaveAccount(ctx context.Context, item account.Account) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("load existing account state: %w", err)
 	}
-	if err := upsertAccount(ctx, tx, item); err != nil {
+	if err := r.upsertAccount(ctx, tx, item); err != nil {
 		return err
 	}
 	if fromPool != string(item.Pool) || fromReason != string(item.UnavailableReason) {
@@ -518,8 +609,18 @@ func (r *SQLite) DeleteAccount(ctx context.Context, id string) error {
 	return nil
 }
 
-func upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error {
-	_, err := tx.ExecContext(
+func (r *SQLite) upsertAccount(ctx context.Context, tx *sql.Tx, item account.Account) error {
+	access, err := r.sealToken(item.AccessToken)
+	if err != nil {
+		return fmt.Errorf("encrypt access_token: %w", err)
+	}
+	refresh, err := r.sealToken(item.RefreshToken)
+	if err != nil {
+		return fmt.Errorf("encrypt refresh_token: %w", err)
+	}
+	item.AccessToken = access
+	item.RefreshToken = refresh
+	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO accounts (
 			id, access_token, refresh_token, expires_at, oidc_issuer, oidc_client_id,
@@ -692,7 +793,7 @@ func (r *SQLite) ListAccounts(ctx context.Context) ([]account.Account, error) {
 
 	var result []account.Account
 	for rows.Next() {
-		item, err := scanAccount(rows)
+		item, err := r.scanAccount(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -729,7 +830,7 @@ func (r *SQLite) ListAccountsPage(ctx context.Context, query ListAccountsQuery) 
 
 	items := make([]account.Account, 0, query.PageSize)
 	for rows.Next() {
-		item, err := scanAccount(rows)
+		item, err := r.scanAccount(rows)
 		if err != nil {
 			return ListAccountsResult{}, err
 		}
@@ -750,7 +851,7 @@ type accountScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanAccount(rows accountScanner) (account.Account, error) {
+func (r *SQLite) scanAccount(rows accountScanner) (account.Account, error) {
 	var item account.Account
 	var expiresAt, retryAt, lastSuccessAt, createdAt, updatedAt string
 	if err := rows.Scan(
@@ -783,6 +884,16 @@ func scanAccount(rows accountScanner) (account.Account, error) {
 	item.LastSuccessAt = parseTime(lastSuccessAt)
 	item.CreatedAt = parseTime(createdAt)
 	item.UpdatedAt = parseTime(updatedAt)
+	access, err := r.openToken(item.AccessToken)
+	if err != nil {
+		return account.Account{}, fmt.Errorf("decrypt access_token %s: %w", item.ID, err)
+	}
+	refresh, err := r.openToken(item.RefreshToken)
+	if err != nil {
+		return account.Account{}, fmt.Errorf("decrypt refresh_token %s: %w", item.ID, err)
+	}
+	item.AccessToken = access
+	item.RefreshToken = refresh
 	return item, nil
 }
 
