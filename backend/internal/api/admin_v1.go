@@ -56,6 +56,10 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/v1/accounts/{id}/events", s.adminV1AccountEvents)
 	mux.HandleFunc("DELETE /api/admin/v1/accounts/{id}", s.adminV1Delete)
 	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/recover", s.adminV1Recover)
+	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/refresh-token", s.adminV1RefreshCredential)
+	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/refresh-quota", s.adminV1RefreshQuota)
+	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/refresh-billing", s.adminV1RefreshBilling)
+	mux.HandleFunc("GET /api/admin/v1/accounts/{id}/credentials/export", s.adminV1ExportCredential)
 	mux.HandleFunc("POST /api/admin/v1/accounts/import/preview", s.adminV1ImportPreview)
 	mux.HandleFunc("POST /api/admin/v1/accounts/import", s.adminV1Import)
 }
@@ -478,6 +482,87 @@ func (s *Server) adminV1Recover(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1RefreshCredential(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	item, err := s.admin.RefreshCredential(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminMaintenanceError(writer, err, "refresh_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1RefreshQuota(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	result, err := s.admin.RefreshQuota(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminMaintenanceError(writer, err, "quota_refresh_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, result)
+}
+
+func (s *Server) adminV1RefreshBilling(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	if _, err := s.admin.Get(request.Context(), request.PathValue("id")); err != nil {
+		writeAdminServiceError(writer, err, "get_failed")
+		return
+	}
+	writeAdminError(writer, http.StatusNotImplemented, "billing_unsupported", "Free-tier accounts do not expose a reliable billing query; use refresh-quota for observed capacity")
+}
+
+func (s *Server) adminV1ExportCredential(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	exported, err := s.admin.ExportCredential(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminServiceError(writer, err, "credential_export_failed")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.Header().Set("Content-Disposition", `attachment; filename="grok2api-account-`+safeDownloadName(exported.ID)+`.json"`)
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Pragma", "no-cache")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(writer).Encode(exported)
+}
+
+func writeAdminMaintenanceError(writer http.ResponseWriter, err error, fallbackCode string) {
+	if errors.Is(err, admin.ErrAccountNotFound) {
+		writeAdminError(writer, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	if errors.Is(err, admin.ErrMaintenanceUnavailable) {
+		writeAdminError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", err.Error())
+		return
+	}
+	writeAdminError(writer, http.StatusBadGateway, fallbackCode, err.Error())
+}
+
+func safeDownloadName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "account"
+	}
+	var result strings.Builder
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.' {
+			result.WriteRune(char)
+		} else {
+			result.WriteByte('_')
+		}
+	}
+	return result.String()
 }
 
 func (s *Server) adminV1ImportPreview(writer http.ResponseWriter, request *http.Request) {

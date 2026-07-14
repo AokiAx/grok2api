@@ -98,6 +98,9 @@ type AdminService interface {
 	Update(context.Context, string, admin.UpdateAccountRequest) (account.Account, error)
 	Batch(context.Context, admin.BatchAccountRequest) (admin.BatchAccountResult, error)
 	Events(context.Context, string, int, int) (repository.ListAccountEventsResult, error)
+	RefreshCredential(context.Context, string) (account.Account, error)
+	RefreshQuota(context.Context, string) (admin.QuotaRefreshResult, error)
+	ExportCredential(context.Context, string) (admin.CredentialExport, error)
 }
 
 func WithAdmin(service AdminService, key string) Option {

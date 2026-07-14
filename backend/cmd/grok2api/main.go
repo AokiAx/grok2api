@@ -220,7 +220,7 @@ func serve(ctx context.Context, settings config.Config, repo repository.AccountR
 			slog.Warn("debug_trace enabled; writing JSONL traces", "dir", traceDir)
 		}
 	}
-	adminService := admin.NewService(repo, upstreamClient, admin.WithSink(pool))
+	adminService := admin.NewService(repo, upstreamClient, admin.WithMaintenance(upstreamClient), admin.WithSink(pool))
 	// Registration is an external project (grok-register). This service only
 	// imports credentials via the admin import API / panel.
 	serverOptions := []api.Option{
