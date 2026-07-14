@@ -94,12 +94,19 @@ func (k ClientKey) Active(at time.Time) bool {
 	return k.RevokedAt.IsZero() && (k.ExpiresAt.IsZero() || at.Before(k.ExpiresAt))
 }
 
-func (k *ClientKey) Revoke(at time.Time) {
-	if k == nil || !k.RevokedAt.IsZero() {
-		return
+func (k *ClientKey) Revoke(at time.Time) error {
+	if k == nil {
+		return errors.New("client key is required")
+	}
+	if at.IsZero() {
+		return errors.New("client key revocation time is required")
+	}
+	if !k.RevokedAt.IsZero() {
+		return nil
 	}
 	k.RevokedAt = normalizeTime(at)
 	k.UpdatedAt = k.RevokedAt
+	return nil
 }
 
 func (k ClientKey) UnlimitedRPM() bool {

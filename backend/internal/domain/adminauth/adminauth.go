@@ -176,12 +176,22 @@ func (s Session) MatchesRefreshSecretHash(candidate [32]byte) bool {
 	return subtle.ConstantTimeCompare(s.RefreshSecretHash[:], candidate[:]) == 1
 }
 
-func (s *Session) Revoke(at time.Time, reason RevocationReason) {
-	if s == nil || !s.RevokedAt.IsZero() {
-		return
+func (s *Session) Revoke(at time.Time, reason RevocationReason) error {
+	if s == nil {
+		return errors.New("session is required")
+	}
+	if at.IsZero() {
+		return errors.New("session revocation time is required")
+	}
+	if reason == "" {
+		return errors.New("session revocation reason is required")
+	}
+	if !s.RevokedAt.IsZero() {
+		return nil
 	}
 	s.RevokedAt = normalizeTime(at)
 	s.RevocationReason = reason
+	return nil
 }
 
 func (s *Session) Rotate(at time.Time, replacement Session) error {
@@ -204,8 +214,7 @@ func (s *Session) Rotate(at time.Time, replacement Session) error {
 	}
 	s.RotatedAt = at
 	s.ReplacedBySessionID = replacement.ID
-	s.Revoke(at, RevocationRotated)
-	return nil
+	return s.Revoke(at, RevocationRotated)
 }
 
 type LoginAttempt struct {
