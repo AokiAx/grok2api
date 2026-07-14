@@ -8,10 +8,11 @@ import (
 )
 
 type ClientKeyStore interface {
-	CreateClientKey(context.Context, clientkey.ClientKey, []string) error
-	GetClientKey(context.Context, string) (clientkey.ClientKey, []string, bool, error)
-	FindClientKeyByHash(context.Context, [32]byte) (clientkey.ClientKey, []string, bool, error)
-	UpdateClientKey(context.Context, clientkey.ClientKey, []string) error
+	CreateClientKey(context.Context, clientkey.Credential) error
+	GetClientKey(context.Context, string) (clientkey.Credential, bool, error)
+	FindClientKeyByHash(context.Context, [32]byte) (clientkey.Credential, bool, error)
+	ListClientKeysPage(context.Context, ListClientKeysQuery) (ListClientKeysResult, error)
+	UpdateClientKeyPolicy(context.Context, string, ClientKeyPolicyUpdate) error
 	RevokeClientKey(context.Context, string, time.Time) error
 }
 
@@ -20,7 +21,7 @@ type ClientAuthPolicyReader interface {
 }
 
 type ClientKeyRateLimiter interface {
-	ConsumeClientKeyRPM(context.Context, string, int, time.Time) (RateLimitDecision, error)
+	ConsumeClientKeyRPM(context.Context, string, time.Time) (RateLimitDecision, error)
 }
 
 type ClientKeyRepository interface {
@@ -34,4 +35,31 @@ type RateLimitDecision struct {
 	Limit     int
 	Remaining int
 	ResetAt   time.Time
+}
+
+type ListClientKeysQuery struct {
+	Q        string
+	Origin   clientkey.Origin
+	Page     int
+	PageSize int
+}
+
+type ListClientKeysResult struct {
+	Items    []clientkey.Credential
+	Total    int
+	Page     int
+	PageSize int
+}
+
+// ClientKeyPolicyUpdate deliberately excludes immutable identity, origin,
+// hash, and revocation fields so policy changes cannot resurrect revoked keys
+// or silently rotate credentials.
+type ClientKeyPolicyUpdate struct {
+	Name          string
+	ModelPolicy   clientkey.ModelPolicy
+	Scopes        []string
+	RPMLimit      int
+	MaxConcurrent int
+	ExpiresAt     time.Time
+	UpdatedAt     time.Time
 }

@@ -27,7 +27,7 @@ type ClientKey struct {
 	ID            string
 	Name          string
 	Origin        Origin
-	KeyHash       [32]byte
+	KeyHash       [32]byte `json:"-"`
 	KeyPrefix     string
 	ModelPolicy   ModelPolicy
 	RPMLimit      int
@@ -60,6 +60,14 @@ func (k *ClientKey) NormalizeAndValidate(scopes []string) ([]string, error) {
 	}
 	if k.MaxConcurrent < 0 {
 		return nil, errors.New("max concurrent must be non-negative")
+	}
+	if k.CreatedAt.IsZero() || k.UpdatedAt.IsZero() {
+		return nil, errors.New("client key creation and update times are required")
+	}
+	k.CreatedAt = k.CreatedAt.UTC()
+	k.UpdatedAt = k.UpdatedAt.UTC()
+	if k.UpdatedAt.Before(k.CreatedAt) {
+		return nil, errors.New("client key update time cannot precede creation")
 	}
 
 	normalizedScopes, err := normalizeScopes(scopes)
@@ -102,18 +110,35 @@ func (k ClientKey) UnlimitedConcurrency() bool {
 	return k.MaxConcurrent == 0
 }
 
-func (k ClientKey) AllowsModel(model string, scopes []string) bool {
+type Credential struct {
+	Key    ClientKey
+	scopes []string
+}
+
+func NewCredential(key ClientKey, scopes []string) (Credential, error) {
+	normalized, err := key.NormalizeAndValidate(scopes)
+	if err != nil {
+		return Credential{}, err
+	}
+	return Credential{Key: key, scopes: normalized}, nil
+}
+
+func (c Credential) Scopes() []string {
+	return append([]string(nil), c.scopes...)
+}
+
+func (c Credential) AllowsModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
 		return false
 	}
-	if k.ModelPolicy == ModelPolicyAll {
+	if c.Key.ModelPolicy == ModelPolicyAll {
 		return true
 	}
-	if k.ModelPolicy != ModelPolicyAllowlist {
+	if c.Key.ModelPolicy != ModelPolicyAllowlist {
 		return false
 	}
-	for _, scope := range scopes {
+	for _, scope := range c.scopes {
 		if strings.ToLower(strings.TrimSpace(scope)) == model {
 			return true
 		}
@@ -140,8 +165,5 @@ func normalizeScopes(scopes []string) ([]string, error) {
 }
 
 func normalizeTime(value time.Time) time.Time {
-	if value.IsZero() {
-		return time.Now().UTC()
-	}
 	return value.UTC()
 }

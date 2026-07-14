@@ -5,8 +5,11 @@ package adminauth
 import (
 	"crypto/subtle"
 	"errors"
+	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type PasswordScheme string
@@ -19,7 +22,7 @@ const RoleAdministrator Role = "administrator"
 
 type PasswordCredential struct {
 	Scheme PasswordScheme
-	Hash   string
+	Hash   string `json:"-"`
 }
 
 func (c PasswordCredential) Validate() error {
@@ -28,6 +31,9 @@ func (c PasswordCredential) Validate() error {
 	}
 	if strings.TrimSpace(c.Hash) == "" {
 		return errors.New("password hash is required")
+	}
+	if _, err := bcrypt.Cost([]byte(c.Hash)); err != nil {
+		return errors.New("password hash is not a valid bcrypt encoding")
 	}
 	return nil
 }
@@ -44,6 +50,9 @@ type AdminUser struct {
 }
 
 func NewAdminUser(id, username string, credential PasswordCredential, at time.Time) (AdminUser, error) {
+	if at.IsZero() {
+		return AdminUser{}, errors.New("admin user creation time is required")
+	}
 	item := AdminUser{
 		ID:        strings.TrimSpace(id),
 		Username:  normalizeUsername(username),
@@ -88,8 +97,8 @@ type Session struct {
 	ID                  string
 	FamilyID            string
 	AdminUserID         string
-	AccessTokenHash     [32]byte
-	RefreshSecretHash   [32]byte
+	AccessTokenHash     [32]byte `json:"-"`
+	RefreshSecretHash   [32]byte `json:"-"`
 	SourceIP            string
 	UserAgent           string
 	CreatedAt           time.Time
@@ -116,6 +125,9 @@ func NewSession(
 	accessTokenHash, refreshSecretHash [32]byte,
 	accessExpiresAt, expiresAt, at time.Time,
 ) (Session, error) {
+	if at.IsZero() {
+		return Session{}, errors.New("session creation time is required")
+	}
 	at = normalizeTime(at)
 	item := Session{
 		ID:                strings.TrimSpace(id),
@@ -172,20 +184,26 @@ func (s *Session) Revoke(at time.Time, reason RevocationReason) {
 	s.RevocationReason = reason
 }
 
-func (s *Session) Rotate(at time.Time, replacementSessionID string) error {
+func (s *Session) Rotate(at time.Time, replacement Session) error {
 	if s == nil {
 		return errors.New("session is required")
 	}
-	replacementSessionID = strings.TrimSpace(replacementSessionID)
-	if replacementSessionID == "" || replacementSessionID == s.ID {
+	replacement.ID = strings.TrimSpace(replacement.ID)
+	if replacement.ID == "" || replacement.ID == s.ID {
 		return errors.New("replacement session id is invalid")
+	}
+	if replacement.FamilyID != s.FamilyID || replacement.AdminUserID != s.AdminUserID {
+		return errors.New("replacement session must retain admin user and family")
 	}
 	if !s.RotatedAt.IsZero() || !s.RevokedAt.IsZero() {
 		return errors.New("session is no longer rotatable")
 	}
 	at = normalizeTime(at)
+	if !s.Active(at) {
+		return errors.New("session is expired or revoked")
+	}
 	s.RotatedAt = at
-	s.ReplacedBySessionID = replacementSessionID
+	s.ReplacedBySessionID = replacement.ID
 	s.Revoke(at, RevocationRotated)
 	return nil
 }
@@ -200,6 +218,9 @@ type LoginAttempt struct {
 }
 
 func NewLoginAttempt(username, sourceIP string, succeeded bool, failureCode string, at time.Time) (LoginAttempt, error) {
+	if at.IsZero() {
+		return LoginAttempt{}, errors.New("login attempt time is required")
+	}
 	item := LoginAttempt{
 		Username:    normalizeUsername(username),
 		SourceIP:    strings.TrimSpace(sourceIP),
@@ -209,6 +230,9 @@ func NewLoginAttempt(username, sourceIP string, succeeded bool, failureCode stri
 	}
 	if item.Username == "" {
 		return LoginAttempt{}, errors.New("login username is required")
+	}
+	if net.ParseIP(item.SourceIP) == nil {
+		return LoginAttempt{}, errors.New("login source IP is required and must be valid")
 	}
 	if succeeded && item.FailureCode != "" {
 		return LoginAttempt{}, errors.New("successful login attempt cannot have a failure code")
@@ -224,8 +248,5 @@ func normalizeUsername(value string) string {
 }
 
 func normalizeTime(value time.Time) time.Time {
-	if value.IsZero() {
-		return time.Now().UTC()
-	}
 	return value.UTC()
 }

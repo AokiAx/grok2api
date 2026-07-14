@@ -25,12 +25,7 @@ type AdminSessionStore interface {
 
 type AdminLoginAttemptStore interface {
 	RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error
-	CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (AdminLoginFailureCounts, error)
-}
-
-type AdminLoginFailureCounts struct {
-	ByUsername int
-	BySourceIP int
+	CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error)
 }
 
 type AdminAuthRepository interface {
