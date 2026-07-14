@@ -494,3 +494,75 @@ func TestImportDerivesUserIDFromAuthMapKeyWhenMissing(t *testing.T) {
 		t.Fatalf("account=%#v", item)
 	}
 }
+
+func TestUpdateAccountControlsAndBatchActions(t *testing.T) {
+	now := time.Date(2026, 7, 15, 7, 0, 0, 0, time.UTC)
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {ID: "a", AccessToken: "token-a", Pool: account.PoolReady, MaxActive: 1},
+		"b": {ID: "b", AccessToken: "token-b", Pool: account.PoolReady, MaxActive: 1},
+	}}
+	sink := &memorySink{}
+	service := admin.NewService(repository, validator{}, admin.WithSink(sink), admin.WithClock(func() time.Time { return now }))
+
+	disabled := false
+	priority := 30
+	maxActive := 4
+	updated, err := service.Update(context.Background(), "a", admin.UpdateAccountRequest{
+		Enabled: &disabled, Priority: &priority, MaxActive: &maxActive,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.UnavailableReason != account.ReasonDisabled || updated.Priority != 30 || updated.MaxActive != 4 {
+		t.Fatalf("updated account = %+v", updated)
+	}
+
+	result, err := service.Batch(context.Background(), admin.BatchAccountRequest{IDs: []string{"a", "b"}, Action: admin.BatchActionEnable})
+	if err != nil {
+		t.Fatalf("batch enable: %v", err)
+	}
+	if result.Updated != 2 || repository.accounts["a"].Pool != account.PoolReady || repository.accounts["b"].Pool != account.PoolReady {
+		t.Fatalf("batch result=%+v accounts=%+v", result, repository.accounts)
+	}
+
+	result, err = service.Batch(context.Background(), admin.BatchAccountRequest{IDs: []string{"a", "b"}, Action: admin.BatchActionDelete})
+	if err != nil {
+		t.Fatalf("batch delete: %v", err)
+	}
+	if result.Deleted != 2 || len(repository.accounts) != 0 || len(sink.deleted) != 2 {
+		t.Fatalf("delete result=%+v accounts=%+v sink=%+v", result, repository.accounts, sink.deleted)
+	}
+}
+
+func TestBatchAccountActionsRejectMissingOrInvalidStateAtomically(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"auth": {ID: "auth", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonAuth, MaxActive: 1},
+	}}
+	service := admin.NewService(repository, validator{})
+
+	if _, err := service.Batch(context.Background(), admin.BatchAccountRequest{IDs: []string{"auth", "missing"}, Action: admin.BatchActionDisable}); !errors.Is(err, admin.ErrAccountNotFound) {
+		t.Fatalf("missing error = %v", err)
+	}
+	if repository.saves != 0 {
+		t.Fatalf("partial batch save count = %d", repository.saves)
+	}
+	if _, err := service.Batch(context.Background(), admin.BatchAccountRequest{IDs: []string{"auth"}, Action: admin.BatchActionEnable}); !errors.Is(err, admin.ErrInvalidAccountState) {
+		t.Fatalf("invalid state error = %v", err)
+	}
+}
+
+func TestGetAccountAndEvents(t *testing.T) {
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {ID: "a", Pool: account.PoolReady, Priority: 9, MaxActive: 2},
+	}}
+	service := admin.NewService(repository, validator{})
+
+	item, err := service.Get(context.Background(), "a")
+	if err != nil || item.Priority != 9 {
+		t.Fatalf("get item=%+v err=%v", item, err)
+	}
+	events, err := service.Events(context.Background(), "a", 1, 20)
+	if err != nil || events.Page != 1 || events.PageSize != 20 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}
