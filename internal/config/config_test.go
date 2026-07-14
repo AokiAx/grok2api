@@ -16,7 +16,8 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 		"port":8787,
 		"default_model":"grok-file",
 		"proxy_base_url":"https://example.test/v1",
-		"app_key":"file-admin"
+		"app_key":"file-admin",
+		"frontend":{"static_path":"./file-ui"}
 	}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -25,6 +26,7 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GROK2API_APP_KEY", "env-admin")
 	t.Setenv("GROK2API_DEBUG_TRACE", "true")
 	t.Setenv("GROK2API_DEBUG_TRACE_DIR", "/tmp/g2a-traces")
+	t.Setenv("GROK2API_FRONTEND_STATIC_PATH", "/app/frontend/dist")
 
 	got, err := config.Load(path)
 	if err != nil {
@@ -47,6 +49,9 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	}
 	if got.DebugTraceDir != "/tmp/g2a-traces" {
 		t.Fatalf("DebugTraceDir=%q", got.DebugTraceDir)
+	}
+	if got.Frontend.StaticPath != "/app/frontend/dist" {
+		t.Fatalf("Frontend.StaticPath=%q", got.Frontend.StaticPath)
 	}
 }
 
@@ -110,5 +115,8 @@ func TestLoadUsesSafeDefaultsWhenFileMissing(t *testing.T) {
 	}
 	if got.MaxAttempts != 3 || got.Strategy != "round-robin" {
 		t.Fatalf("pool defaults=%#v", got)
+	}
+	if got.Frontend.StaticPath != "" {
+		t.Fatalf("frontend static path=%q, want disabled by default", got.Frontend.StaticPath)
 	}
 }

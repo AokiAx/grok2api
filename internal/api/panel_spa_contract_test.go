@@ -5,12 +5,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/AokiAx/grok2api/internal/api"
 )
 
 func TestEmbeddedSPAIndexAndDeepLinkContract(t *testing.T) {
-	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+	server := newPanelServer()
 	root := requestPanel(t, server, http.MethodGet, "/")
 	if root.Code != http.StatusOK {
 		t.Fatalf("root status=%d body=%s", root.Code, root.Body.String())
@@ -46,7 +47,7 @@ func TestEmbeddedSPAIndexAndDeepLinkContract(t *testing.T) {
 }
 
 func TestEmbeddedSPAAssetCacheAndFallbackBoundary(t *testing.T) {
-	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+	server := newPanelServer()
 	root := requestPanel(t, server, http.MethodGet, "/")
 	assetPath := firstEmbeddedAssetPath(t, root.Body.String())
 
@@ -92,7 +93,7 @@ func TestEmbeddedSPAAssetCacheAndFallbackBoundary(t *testing.T) {
 }
 
 func TestEmbeddedSPADeepLinksAreGetOnly(t *testing.T) {
-	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+	server := newPanelServer()
 	recorder := requestPanel(t, server, http.MethodPost, "/accounts")
 
 	if recorder.Code != http.StatusMethodNotAllowed {
@@ -104,6 +105,27 @@ func TestEmbeddedSPADeepLinksAreGetOnly(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `id="root"`) {
 		t.Fatal("non-GET deep link returned SPA index")
 	}
+}
+
+func TestSPAIsNotMountedWithoutFrontendFileSystem(t *testing.T) {
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+	recorder := requestPanel(t, server, http.MethodGet, "/")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404; body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func newPanelServer() *api.Server {
+	return api.NewServer(
+		&fakeGateway{},
+		fakeStatus{},
+		"",
+		api.WithFrontend(fstest.MapFS{
+			"index.html":        {Data: []byte(`<html><body><div id="root"></div><script src="/assets/app.js"></script></body></html>`)},
+			"assets/app.js":     {Data: []byte(`console.log("panel")`)},
+			"assets/styles.css": {Data: []byte(`body { color: black; }`)},
+		}),
+	)
 }
 
 func requestPanel(t *testing.T, server *api.Server, method, path string) *httptest.ResponseRecorder {

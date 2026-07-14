@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,48 @@ func TestRunMigrateImportsLegacyAccountsAndPrintsPoolCounts(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"unavailable":1`) {
 		t.Fatalf("output = %s", output.String())
+	}
+}
+
+func TestFrontendFileSystemDisabledWhenPathEmpty(t *testing.T) {
+	frontendFS, err := frontendFileSystem("   ")
+	if err != nil {
+		t.Fatalf("frontend filesystem: %v", err)
+	}
+	if frontendFS != nil {
+		t.Fatal("expected nil filesystem when frontend is disabled")
+	}
+}
+
+func TestFrontendFileSystemValidatesIndexAndReturnsDistRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("panel"), 0o600); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "assets"), 0o700); err != nil {
+		t.Fatalf("mkdir assets: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("app"), 0o600); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	frontendFS, err := frontendFileSystem(dir)
+	if err != nil {
+		t.Fatalf("frontend filesystem: %v", err)
+	}
+	data, err := fs.ReadFile(frontendFS, "assets/app.js")
+	if err != nil {
+		t.Fatalf("read injected asset: %v", err)
+	}
+	if string(data) != "app" {
+		t.Fatalf("asset=%q", data)
+	}
+}
+
+func TestFrontendFileSystemRejectsMissingIndex(t *testing.T) {
+	_, err := frontendFileSystem(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "index.html") {
+		t.Fatalf("error=%v, want missing index.html", err)
 	}
 }
 
