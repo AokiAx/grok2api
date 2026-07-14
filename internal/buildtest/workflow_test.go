@@ -14,7 +14,17 @@ func repositoryRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("resolve caller")
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(current), "..", ".."))
+	for candidate := filepath.Dir(current); ; candidate = filepath.Dir(candidate) {
+		if _, err := os.Stat(filepath.Join(candidate, "Dockerfile")); err == nil {
+			if _, err := os.Stat(filepath.Join(candidate, "frontend")); err == nil {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			t.Fatal("locate repository root")
+		}
+	}
 }
 
 func readFile(t *testing.T, relative string) string {
@@ -42,6 +52,52 @@ func requireNotContains(t *testing.T, content string, values ...string) {
 			t.Errorf("content unexpectedly contains %q", value)
 		}
 	}
+}
+
+func requirePathExists(t *testing.T, relative string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(repositoryRoot(t), relative)); err != nil {
+		t.Errorf("expected repository path %s: %v", relative, err)
+	}
+}
+
+func requirePathNotExists(t *testing.T, relative string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(repositoryRoot(t), relative)); !os.IsNotExist(err) {
+		t.Errorf("expected repository path %s to be absent, stat error: %v", relative, err)
+	}
+}
+
+func TestBackendModuleLayoutContract(t *testing.T) {
+	requirePathExists(t, "backend/go.mod")
+	requirePathExists(t, "backend/go.sum")
+	requirePathExists(t, "backend/cmd/grok2api")
+	requirePathExists(t, "backend/internal/buildtest")
+	requirePathNotExists(t, "go.mod")
+	requirePathNotExists(t, "go.sum")
+	requirePathNotExists(t, "cmd")
+	requirePathNotExists(t, "internal")
+
+	module := readFile(t, "backend/go.mod")
+	requireContains(t, module, "module github.com/AokiAx/grok2api/backend")
+
+	dockerfile := readFile(t, "Dockerfile")
+	requireContains(
+		t,
+		dockerfile,
+		"WORKDIR /src/backend",
+		"COPY backend/go.mod backend/go.sum ./",
+		"COPY backend/cmd ./cmd",
+		"COPY backend/internal ./internal",
+	)
+
+	workflow := readFile(t, ".github/workflows/ci.yml")
+	requireContains(
+		t,
+		workflow,
+		"cache-dependency-path: backend/go.sum",
+		"working-directory: backend",
+	)
 }
 
 func publishedDockerfile(t *testing.T) string {
