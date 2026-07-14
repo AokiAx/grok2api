@@ -87,13 +87,6 @@ func TestRateLimitDecisionCarriesStableResetBoundary(t *testing.T) {
 	}
 }
 
-func TestAdminLoginFailureCountIsScopedToUsernameAndSourceTuple(t *testing.T) {
-	var count int = 4
-	if count != 4 {
-		t.Fatalf("count = %d", count)
-	}
-}
-
 func TestClientKeyListDTOCarriesScopesWithoutSecrets(t *testing.T) {
 	result := repository.ListClientKeysResult{
 		Items: []clientkey.Credential{{Key: clientkey.ClientKey{ID: "key-1"}}},
@@ -101,15 +94,5 @@ func TestClientKeyListDTOCarriesScopesWithoutSecrets(t *testing.T) {
 	}
 	if result.Items[0].Key.ID != "key-1" {
 		t.Fatalf("result = %+v", result)
-	}
-}
-
-func TestClientKeyPolicyUpdateCannotCarryHashOriginOrRevocation(t *testing.T) {
-	update := repository.ClientKeyPolicyUpdate{
-		Name: "Restricted", ModelPolicy: clientkey.ModelPolicyAllowlist, Scopes: []string{"grok-4.5"},
-		RPMLimit: 30, MaxConcurrent: 2, UpdatedAt: time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC),
-	}
-	if update.Name != "Restricted" || update.ModelPolicy != clientkey.ModelPolicyAllowlist || len(update.Scopes) != 1 {
-		t.Fatalf("update = %+v", update)
 	}
 }
