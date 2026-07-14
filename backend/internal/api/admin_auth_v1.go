@@ -44,7 +44,7 @@ func (h *adminAuthHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.setCookie(w, out.RefreshCookieValue, in.Remember, out.RefreshExpiresAt)
-	h.ok(w, out)
+	h.ok(w, authDTO(out))
 }
 func (h *adminAuthHandler) refresh(w http.ResponseWriter, r *http.Request) {
 	c, err := r.Cookie("grok2api_admin_refresh")
@@ -58,7 +58,7 @@ func (h *adminAuthHandler) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.setCookie(w, out.RefreshCookieValue, c.MaxAge > 0, out.RefreshExpiresAt)
-	h.ok(w, out)
+	h.ok(w, authDTO(out))
 }
 func (h *adminAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 	if c, e := r.Cookie("grok2api_admin_refresh"); e == nil {
@@ -91,6 +91,9 @@ func (h *adminAuthHandler) ok(w http.ResponseWriter, data any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": data})
+}
+func authDTO(out auth.LoginOutput) map[string]any {
+	return map[string]any{"admin": map[string]any{"id": out.Admin.ID, "username": out.Admin.Username, "role": out.Admin.Role}, "tokens": map[string]any{"accessToken": out.AccessToken, "accessTokenExpiresAt": out.AccessExpiresAt, "refreshTokenExpiresAt": out.RefreshExpiresAt}}
 }
 func (h *adminAuthHandler) error(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Cache-Control", "no-store")

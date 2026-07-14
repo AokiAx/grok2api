@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"net"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ var (
 	ErrRateLimited        = errors.New("login rate limited")
 	ErrUnauthorized       = errors.New("unauthorized")
 	ErrConflict           = errors.New("session conflict")
+	ErrInvalidRefresh     = errors.New("invalid refresh session")
 )
 
 type Clock func() time.Time
@@ -74,6 +76,9 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	now := s.clock().UTC()
 	username := strings.ToLower(strings.TrimSpace(in.Username))
 	ip := strings.TrimSpace(in.SourceIP)
+	if net.ParseIP(ip) == nil {
+		return LoginOutput{}, ErrInvalidCredentials
+	}
 	failures, err := s.repo.CountRecentAdminLoginFailures(ctx, username, ip, now.Add(-15*time.Minute))
 	if err != nil {
 		return LoginOutput{}, err
@@ -86,7 +91,9 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 		return LoginOutput{}, err
 	}
 	if !ok || !u.CanAuthenticate() || !security.VerifyAdminPassword(u.Password, in.Password) {
-		_ = s.recordAttempt(ctx, username, ip, false, "invalid_credentials", now)
+		if err := s.recordAttempt(ctx, username, ip, false, "invalid_credentials", now); err != nil {
+			return LoginOutput{}, err
+		}
 		return LoginOutput{}, ErrInvalidCredentials
 	}
 	access, err := s.randomToken(32)
@@ -114,7 +121,9 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	if err := s.repo.CreateAdminSession(ctx, session); err != nil {
 		return LoginOutput{}, err
 	}
-	_ = s.recordAttempt(ctx, username, ip, true, "", now)
+	if err := s.recordAttempt(ctx, username, ip, true, "", now); err != nil {
+		return LoginOutput{}, err
+	}
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt}, nil
 }
 
@@ -144,11 +153,17 @@ func (s *Service) AuthenticateAccess(ctx context.Context, token string) (domain.
 		return domain.AdminUser{}, domain.Session{}, ErrUnauthorized
 	}
 	sess, ok, err := s.repo.FindAdminSessionByAccessHash(ctx, sha256.Sum256([]byte(token)))
-	if err != nil || !ok || !sess.AccessActive(s.clock()) {
+	if err != nil {
+		return domain.AdminUser{}, domain.Session{}, err
+	}
+	if !ok || !sess.AccessActive(s.clock()) {
 		return domain.AdminUser{}, domain.Session{}, ErrUnauthorized
 	}
 	u, ok, err := s.repo.GetAdminUserByID(ctx, sess.AdminUserID)
-	if err != nil || !ok || !u.CanAuthenticate() {
+	if err != nil {
+		return domain.AdminUser{}, domain.Session{}, err
+	}
+	if !ok || !u.CanAuthenticate() {
 		return domain.AdminUser{}, domain.Session{}, ErrUnauthorized
 	}
 	return u, sess, nil
@@ -157,12 +172,15 @@ func (s *Service) AuthenticateAccess(ctx context.Context, token string) (domain.
 func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgent string) (LoginOutput, error) {
 	parts := strings.SplitN(cookie, ".", 2)
 	if len(parts) != 2 {
-		return LoginOutput{}, ErrUnauthorized
+		return LoginOutput{}, ErrInvalidRefresh
 	}
 	now := s.clock().UTC()
 	old, ok, err := s.repo.GetAdminSession(ctx, parts[0])
-	if err != nil || !ok || !old.Active(now) || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(parts[1]))) {
-		return LoginOutput{}, ErrUnauthorized
+	if err != nil {
+		return LoginOutput{}, err
+	}
+	if !ok || !old.Active(now) || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(parts[1]))) {
+		return LoginOutput{}, ErrInvalidRefresh
 	}
 	access, e := s.randomToken(32)
 	if e != nil {
@@ -190,14 +208,21 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 		return LoginOutput{}, ErrConflict
 	}
 	u, ok, e := s.repo.GetAdminUserByID(ctx, old.AdminUserID)
-	if e != nil || !ok {
+	if e != nil {
+		return LoginOutput{}, e
+	}
+	if !ok {
 		return LoginOutput{}, ErrUnauthorized
 	}
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: replacement.AccessExpiresAt, RefreshExpiresAt: replacement.ExpiresAt}, nil
 }
 func (s *Service) Logout(ctx context.Context, cookie string) error {
 	p := strings.SplitN(cookie, ".", 2)
-	if len(p) < 1 || p[0] == "" {
+	if len(p) != 2 || p[0] == "" {
+		return nil
+	}
+	old, ok, err := s.repo.GetAdminSession(ctx, p[0])
+	if err != nil || !ok || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(p[1]))) {
 		return nil
 	}
 	return s.repo.RevokeAdminSession(ctx, p[0], s.clock().UTC(), domain.RevocationLogout)
