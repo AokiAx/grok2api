@@ -276,11 +276,14 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 	}
 }
 
-// pickReadyLocked selects among free *eligible* ready accounts.
+// pickReadyLocked selects from the highest-priority tier among free *eligible*
+// ready accounts.
 // With activeSize>0, eligibility is the hot set only (cold ready never serve
-// until a hot slot frees). Strategy only orders within that set.
+// until a hot slot frees). Strategy only orders within the selected tier.
 func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 	candidates := make([]string, 0, len(s.ready))
+	highestPriority := 0
+	hasCandidate := false
 	// Copy ids first: parking exhausted accounts mutates s.ready.
 	readyIDs := append([]string(nil), s.ready...)
 	for _, id := range readyIDs {
@@ -301,7 +304,14 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 		if !s.eligibleLocked(id) {
 			continue
 		}
-		candidates = append(candidates, id)
+		if !hasCandidate || item.Priority > highestPriority {
+			highestPriority = item.Priority
+			candidates = candidates[:0]
+			hasCandidate = true
+		}
+		if item.Priority == highestPriority {
+			candidates = append(candidates, id)
+		}
 	}
 	if len(candidates) == 0 {
 		return "", nil
