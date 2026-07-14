@@ -32,6 +32,18 @@ case "${configured_user,,}" in
     ;;
 esac
 
+configured_entrypoint="$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")"
+if [[ "$configured_entrypoint" != *'"/app/grok2api"'* ]]; then
+  echo "image entrypoint must use /app/grok2api; got '$configured_entrypoint'" >&2
+  exit 1
+fi
+
+configured_env="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image")"
+if [[ "$configured_env" != *$'GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist'* ]]; then
+  echo "image must declare GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist" >&2
+  exit 1
+fi
+
 workdir="$(mktemp -d)"
 container="grok2api-smoke-$$"
 cleanup() {
