@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BUILDPLATFORM
+ARG BUILDPLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm AS frontend
 WORKDIR /src/frontend
@@ -12,8 +12,8 @@ RUN npm run build
 RUN find dist -name "*.map" -delete
 
 FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
