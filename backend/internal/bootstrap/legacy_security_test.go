@@ -57,6 +57,13 @@ func TestLegacySecurityBootstrapPrefersPanelPasswordAndMigratesAPIKeyHashOnly(t 
 	assertMarker(t, raw, bootstrap.AdminBootstrapMarker, "1")
 	assertMarker(t, raw, bootstrap.ClientKeyBootstrapMarker, "1")
 	assertMarker(t, raw, "client_auth_required", "1")
+	var storedPasswordHash string
+	if err := raw.QueryRow(`SELECT password_hash FROM admin_users WHERE id=?`, user.ID).Scan(&storedPasswordHash); err != nil {
+		t.Fatalf("read stored password hash: %v", err)
+	}
+	if storedPasswordHash == "panel-secret" || storedPasswordHash == "app-secret" || storedPasswordHash != user.Password.Hash {
+		t.Fatalf("stored password hash = %q", storedPasswordHash)
+	}
 	var rawSecretCount int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM client_keys WHERE CAST(key_hash AS TEXT) IN (?, ?)`, "legacy-client-secret", " panel-secret ").Scan(&rawSecretCount); err != nil {
 		t.Fatalf("scan raw secrets: %v", err)
@@ -76,6 +83,16 @@ func TestLegacySecurityBootstrapPrefersPanelPasswordAndMigratesAPIKeyHashOnly(t 
 	if unchanged.Password.Hash != user.Password.Hash {
 		t.Fatal("completed admin bootstrap overwrote the existing password")
 	}
+	withoutConfigKey, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{})
+	if err != nil || withoutConfigKey.AdminSetupRequired {
+		t.Fatalf("bootstrap after api_key removal result=%+v err=%v", withoutConfigKey, err)
+	}
+	if persisted, found, err := repo.FindClientKeyByHash(ctx, clientHash); err != nil || !found || persisted.Key.ID != credential.Key.ID {
+		t.Fatalf("legacy key disappeared after config removal: %+v found=%v err=%v", persisted.Key, found, err)
+	}
+	if required, err := repo.ClientAuthRequired(ctx); err != nil || !required {
+		t.Fatalf("client auth marker lost after config removal required=%v err=%v", required, err)
+	}
 	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{APIKey: "changed-client-secret"}); err == nil {
 		t.Fatal("changed config api_key should fail instead of rotating legacy key")
 	}
@@ -86,7 +103,8 @@ func TestLegacySecurityBootstrapOnlyAPIKeyLeavesAdminSetupRequiredAndAppKeyFalls
 	now := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
 
 	t.Run("only api key", func(t *testing.T) {
-		repo := openBootstrapRepo(t, ctx, filepath.Join(t.TempDir(), "api-only.db"))
+		database := filepath.Join(t.TempDir(), "api-only.db")
+		repo := openBootstrapRepo(t, ctx, database)
 		defer repo.Close()
 		service := bootstrap.NewLegacySecurityService(repo, func() time.Time { return now }, bcrypt.MinCost)
 		result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{APIKey: "client-only"})
@@ -99,6 +117,9 @@ func TestLegacySecurityBootstrapOnlyAPIKeyLeavesAdminSetupRequiredAndAppKeyFalls
 		if count, err := repo.CountAdminUsers(ctx); err != nil || count != 0 {
 			t.Fatalf("admin count=%d err=%v", count, err)
 		}
+		raw := openBootstrapRaw(t, database)
+		assertMarkerMissing(t, raw, bootstrap.AdminBootstrapMarker)
+		assertMarker(t, raw, bootstrap.ClientKeyBootstrapMarker, "1")
 	})
 
 	t.Run("app key fallback", func(t *testing.T) {
@@ -186,6 +207,38 @@ func TestLegacySecurityBootstrapMarkersAreIndependentAndTransactionFailureDoesNo
 	var clients int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM client_keys`).Scan(&clients); err != nil || clients != 0 {
 		t.Fatalf("client count=%d err=%v", clients, err)
+	}
+}
+
+func TestLegacyAdminBootstrapFailureDoesNotPersistAdminOrMarker(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "admin-failure.db")
+	repo := openBootstrapRepo(t, ctx, database)
+	if err := repo.Close(); err != nil {
+		t.Fatalf("close initialized repo: %v", err)
+	}
+	raw := openBootstrapRaw(t, database)
+	if _, err := raw.Exec(`CREATE TRIGGER reject_legacy_admin BEFORE INSERT ON admin_users
+		BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	repo = openBootstrapRepo(t, ctx, database)
+	defer repo.Close()
+	service := bootstrap.NewLegacySecurityService(repo, func() time.Time {
+		return time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
+	}, bcrypt.MinCost)
+	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "admin"}); err == nil {
+		t.Fatal("expected admin bootstrap transaction failure")
+	}
+	raw = openBootstrapRaw(t, database)
+	assertMarkerMissing(t, raw, bootstrap.AdminBootstrapMarker)
+	var admins int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM admin_users`).Scan(&admins); err != nil || admins != 0 {
+		t.Fatalf("admin count=%d err=%v", admins, err)
 	}
 }
 

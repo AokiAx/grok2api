@@ -243,6 +243,7 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_client_keys_origin ON client_keys(origin, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_client_keys_config_origin ON client_keys(origin) WHERE origin='config_api_key'`,
 		`CREATE TABLE IF NOT EXISTS client_key_model_scopes (
 			client_key_id TEXT NOT NULL REFERENCES client_keys(id) ON DELETE CASCADE,
 			model_id TEXT NOT NULL COLLATE NOCASE,
