@@ -45,6 +45,7 @@ jobs:
             ./internal/account \
             ./internal/admin \
             ./internal/api \
+            ./internal/application/gateway \
             ./internal/bridge \
             ./internal/compat \
             ./internal/config \
