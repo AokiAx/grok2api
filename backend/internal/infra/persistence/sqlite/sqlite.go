@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 type SQLite struct {
 	db     *sql.DB
@@ -24,6 +24,8 @@ type SQLite struct {
 }
 
 var _ repository.AccountRepository = (*SQLite)(nil)
+var _ repository.AdminAuthRepository = (*SQLite)(nil)
+var _ repository.ClientKeyRepository = (*SQLite)(nil)
 
 func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	return OpenSQLiteWithCipher(ctx, path, nil)
@@ -31,7 +33,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 
 // OpenSQLiteWithCipher opens the DB and optionally encrypts credentials at rest.
 // When cipher is non-nil, tokens are written as enc:v1:... and plaintext rows are
-// migrated on open (schema_version still 3; encryption is opaque to schema).
+// migrated on open (credential encryption is opaque to the schema version).
 func OpenSQLiteWithCipher(ctx context.Context, path string, cipher *security.Cipher) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -134,6 +136,7 @@ func (r *SQLite) encryptExistingCredentials(ctx context.Context) error {
 
 func (r *SQLite) migrate(ctx context.Context) error {
 	statements := []string{
+		`PRAGMA foreign_keys=ON`,
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA busy_timeout=30000`,
 		`CREATE TABLE IF NOT EXISTS app_meta (
@@ -176,6 +179,75 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			details_json TEXT NOT NULL DEFAULT '{}',
 			created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS admin_users (
+			id TEXT PRIMARY KEY,
+			username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			password_scheme TEXT NOT NULL CHECK(password_scheme = 'bcrypt_sha256_v1'),
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL CHECK(role = 'administrator'),
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			last_login_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS admin_sessions (
+			id TEXT PRIMARY KEY,
+			family_id TEXT NOT NULL,
+			admin_user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+			access_token_hash BLOB NOT NULL UNIQUE CHECK(length(access_token_hash) = 32),
+			refresh_secret_hash BLOB NOT NULL UNIQUE CHECK(length(refresh_secret_hash) = 32),
+			source_ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			access_expires_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			revoked_at TEXT NOT NULL DEFAULT '',
+			rotated_at TEXT NOT NULL DEFAULT '',
+			replaced_by_session_id TEXT NOT NULL DEFAULT '',
+			revocation_reason TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_sessions_family ON admin_sessions(family_id, revoked_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(admin_user_id, revoked_at, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS admin_login_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL COLLATE NOCASE,
+			source_ip TEXT NOT NULL DEFAULT '',
+			succeeded INTEGER NOT NULL CHECK(succeeded IN (0,1)),
+			failure_code TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_username ON admin_login_attempts(username, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_source ON admin_login_attempts(source_ip, created_at)`,
+		`CREATE TABLE IF NOT EXISTS client_keys (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			origin TEXT NOT NULL CHECK(origin IN ('managed','config_api_key')),
+			key_hash BLOB NOT NULL UNIQUE CHECK(length(key_hash) = 32),
+			key_prefix TEXT NOT NULL,
+			model_policy TEXT NOT NULL CHECK(model_policy IN ('all','allowlist')),
+			rpm_limit INTEGER NOT NULL DEFAULT 0 CHECK(rpm_limit >= 0),
+			max_concurrent INTEGER NOT NULL DEFAULT 0 CHECK(max_concurrent >= 0),
+			expires_at TEXT NOT NULL DEFAULT '',
+			revoked_at TEXT NOT NULL DEFAULT '',
+			last_used_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_client_keys_origin ON client_keys(origin, created_at)`,
+		`CREATE TABLE IF NOT EXISTS client_key_model_scopes (
+			client_key_id TEXT NOT NULL REFERENCES client_keys(id) ON DELETE CASCADE,
+			model_id TEXT NOT NULL COLLATE NOCASE,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(client_key_id, model_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS client_key_rate_windows (
+			client_key_id TEXT PRIMARY KEY REFERENCES client_keys(id) ON DELETE CASCADE,
+			window_start INTEGER NOT NULL,
+			request_count INTEGER NOT NULL CHECK(request_count >= 0),
+			last_allowed INTEGER NOT NULL CHECK(last_allowed IN (0,1)),
+			updated_at TEXT NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := r.db.ExecContext(ctx, statement); err != nil {
@@ -190,6 +262,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 	}
 	if err := r.migratePythonV1(ctx); err != nil {
 		return err
+	}
+	if _, err := r.db.ExecContext(ctx, `INSERT INTO app_meta(key, value) VALUES('client_auth_required', '0') ON CONFLICT(key) DO NOTHING`); err != nil {
+		return fmt.Errorf("initialize client auth marker: %w", err)
 	}
 	_, err := r.db.ExecContext(
 		ctx,
