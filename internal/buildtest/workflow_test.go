@@ -35,8 +35,23 @@ func requireContains(t *testing.T, content string, values ...string) {
 	}
 }
 
-func TestDockerfileBuildsStaticNonRootGoImage(t *testing.T) {
-	dockerfile := readFile(t, "Dockerfile.golang")
+func publishedDockerfile(t *testing.T) string {
+	t.Helper()
+	workflow := readFile(t, ".github/workflows/image.yml")
+	for _, line := range strings.Split(workflow, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "file:") {
+			path := strings.TrimSpace(strings.TrimPrefix(line, "file:"))
+			if path != "" {
+				return path
+			}
+		}
+	}
+	return "Dockerfile"
+}
+
+func TestPublishedDockerfileBuildsStaticNonRootGoImage(t *testing.T) {
+	dockerfile := readFile(t, publishedDockerfile(t))
 	requireContains(
 		t,
 		dockerfile,
