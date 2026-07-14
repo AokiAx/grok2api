@@ -227,9 +227,6 @@ type LoginAttempt struct {
 }
 
 func NewLoginAttempt(username, sourceIP string, succeeded bool, failureCode string, at time.Time) (LoginAttempt, error) {
-	if at.IsZero() {
-		return LoginAttempt{}, errors.New("login attempt time is required")
-	}
 	item := LoginAttempt{
 		Username:    normalizeUsername(username),
 		SourceIP:    strings.TrimSpace(sourceIP),
@@ -237,19 +234,36 @@ func NewLoginAttempt(username, sourceIP string, succeeded bool, failureCode stri
 		FailureCode: strings.TrimSpace(failureCode),
 		CreatedAt:   normalizeTime(at),
 	}
-	if item.Username == "" {
-		return LoginAttempt{}, errors.New("login username is required")
-	}
-	if net.ParseIP(item.SourceIP) == nil {
-		return LoginAttempt{}, errors.New("login source IP is required and must be valid")
-	}
-	if succeeded && item.FailureCode != "" {
-		return LoginAttempt{}, errors.New("successful login attempt cannot have a failure code")
-	}
-	if !succeeded && item.FailureCode == "" {
-		return LoginAttempt{}, errors.New("failed login attempt requires a failure code")
+	if err := item.Validate(); err != nil {
+		return LoginAttempt{}, err
 	}
 	return item, nil
+}
+
+func (a *LoginAttempt) Validate() error {
+	if a == nil {
+		return errors.New("login attempt is required")
+	}
+	a.Username = normalizeUsername(a.Username)
+	a.SourceIP = strings.TrimSpace(a.SourceIP)
+	a.FailureCode = strings.TrimSpace(a.FailureCode)
+	if a.CreatedAt.IsZero() {
+		return errors.New("login attempt time is required")
+	}
+	a.CreatedAt = a.CreatedAt.UTC()
+	if a.Username == "" {
+		return errors.New("login username is required")
+	}
+	if net.ParseIP(a.SourceIP) == nil {
+		return errors.New("login source IP is required and must be valid")
+	}
+	if a.Succeeded && a.FailureCode != "" {
+		return errors.New("successful login attempt cannot have a failure code")
+	}
+	if !a.Succeeded && a.FailureCode == "" {
+		return errors.New("failed login attempt requires a failure code")
+	}
+	return nil
 }
 
 func normalizeUsername(value string) string {

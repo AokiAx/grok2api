@@ -170,6 +170,9 @@ func (r *SQLite) RevokeAdminSession(
 	at time.Time,
 	reason adminauth.RevocationReason,
 ) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("session id is required")
+	}
 	if at.IsZero() {
 		return errors.New("session revocation time is required")
 	}
@@ -189,6 +192,9 @@ func (r *SQLite) RevokeAdminSessionFamily(
 	at time.Time,
 	reason adminauth.RevocationReason,
 ) error {
+	if strings.TrimSpace(familyID) == "" {
+		return errors.New("session family id is required")
+	}
 	if at.IsZero() {
 		return errors.New("session family revocation time is required")
 	}
@@ -203,8 +209,8 @@ func (r *SQLite) RevokeAdminSessionFamily(
 }
 
 func (r *SQLite) RecordAdminLoginAttempt(ctx context.Context, item adminauth.LoginAttempt) error {
-	if item.CreatedAt.IsZero() {
-		return errors.New("admin login attempt time is required")
+	if err := item.Validate(); err != nil {
+		return fmt.Errorf("validate admin login attempt: %w", err)
 	}
 	_, err := r.db.ExecContext(ctx, `INSERT INTO admin_login_attempts(
 		username, source_ip, succeeded, failure_code, created_at

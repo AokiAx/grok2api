@@ -160,6 +160,9 @@ func (r *SQLite) UpdateClientKeyPolicy(
 }
 
 func (r *SQLite) RevokeClientKey(ctx context.Context, id string, at time.Time) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("client key id is required")
+	}
 	if at.IsZero() {
 		return errors.New("client key revocation time is required")
 	}

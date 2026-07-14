@@ -58,6 +58,14 @@ func (r *SQLite) Close() error {
 	return r.db.Close()
 }
 
+func (r *SQLite) ForeignKeysEnabled(ctx context.Context) (bool, error) {
+	var enabled int
+	if err := r.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		return false, fmt.Errorf("read sqlite foreign_keys pragma: %w", err)
+	}
+	return enabled == 1, nil
+}
+
 func (r *SQLite) sealToken(value string) (string, error) {
 	if r == nil || r.cipher == nil {
 		return value, nil
