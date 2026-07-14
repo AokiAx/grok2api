@@ -56,6 +56,85 @@ func TestFillFirstBurnsOneAccountBeforeNext(t *testing.T) {
 	}
 }
 
+func TestPriorityRoundRobinStaysWithinHighestAvailableTier(t *testing.T) {
+	low := readyAccount("low")
+	low.Priority = 10
+	highA := readyAccount("high-a")
+	highA.Priority = 20
+	highB := readyAccount("high-b")
+	highB.Priority = 20
+
+	s := scheduler.New([]account.Account{low, highA, highB}).
+		WithStrategy(scheduler.StrategyRoundRobin)
+
+	want := []string{"high-a", "high-b", "high-a", "high-b"}
+	for index, expected := range want {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", index, err)
+		}
+		if lease.Account().ID != expected {
+			t.Fatalf("acquire %d = %q; want %q", index, lease.Account().ID, expected)
+		}
+		lease.Release()
+	}
+}
+
+func TestPriorityFillFirstStaysWithinHighestAvailableTier(t *testing.T) {
+	low := readyAccount("a-low")
+	low.Priority = 10
+	highB := readyAccount("b-high")
+	highB.Priority = 20
+	highC := readyAccount("c-high")
+	highC.Priority = 20
+
+	s := scheduler.New([]account.Account{low, highC, highB}).
+		WithStrategy(scheduler.StrategyFillFirst)
+
+	for index := range 4 {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", index, err)
+		}
+		if lease.Account().ID != "b-high" {
+			t.Fatalf("acquire %d = %q; want b-high", index, lease.Account().ID)
+		}
+		lease.Release()
+	}
+}
+
+func TestPriorityFallsBackWhenHigherTierIsSaturated(t *testing.T) {
+	high := readyAccount("high")
+	high.Priority = 20
+	low := readyAccount("low")
+	low.Priority = 10
+
+	s := scheduler.New([]account.Account{high, low}).
+		WithStrategy(scheduler.StrategyRoundRobin)
+
+	highLease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire high: %v", err)
+	}
+	if highLease.Account().ID != "high" {
+		t.Fatalf("first acquire = %q; want high", highLease.Account().ID)
+	}
+
+	lowLease, err := s.Acquire(context.Background())
+	if err != nil {
+		highLease.Release()
+		t.Fatalf("acquire fallback: %v", err)
+	}
+	if lowLease.Account().ID != "low" {
+		lowLease.Release()
+		highLease.Release()
+		t.Fatalf("fallback acquire = %q; want low", lowLease.Account().ID)
+	}
+
+	lowLease.Release()
+	highLease.Release()
+}
+
 func TestHotSetCapsConcurrentFanOut(t *testing.T) {
 	// active_size=2, max_active=1: only 2 accounts serve; cold stay unused.
 	s := scheduler.New([]account.Account{
