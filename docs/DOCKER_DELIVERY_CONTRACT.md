@@ -8,7 +8,7 @@ admin frontend.
 
 The image must deliver these runtime capabilities together:
 
-- the `grok2api` server;
+- the `Grok2API` server;
 - the built admin SPA and its hashed assets;
 - a writable `/app/data` mount for SQLite;
 - a read-only `/app/config.json` mount;

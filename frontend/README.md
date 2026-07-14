@@ -1,4 +1,4 @@
-# grok2api 管理前端
+# Grok2API 管理前端
 
 本目录是对接 `/api/admin/v1` 的 Vite + React 前端源码。正式交付由 Docker 多阶段构建完成，`dist/` 不提交，也不同步到 Go 包。
 

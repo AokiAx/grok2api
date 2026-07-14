@@ -69,7 +69,7 @@ export function AppShell() {
     <>
       <div className="flex h-7 shrink-0 items-center justify-between px-2.5">
         <NavLink to="/" onClick={() => setMobileOpen(false)} className="flex h-7 items-center text-base font-semibold text-foreground">
-          grok2api
+          Grok2API
         </NavLink>
         <a
           href="https://github.com/AokiAx/grok2api"
@@ -118,7 +118,7 @@ export function AppShell() {
           <Button variant="ghost" size="icon" className="size-10" onClick={() => setMobileOpen(true)} aria-label="打开导航">
             <Menu className="size-4" />
           </Button>
-          <span className="text-sm font-semibold">grok2api</span>
+          <span className="text-sm font-semibold">Grok2API</span>
           <ThemeToggle />
         </header>
 
@@ -148,7 +148,7 @@ export function AppShell() {
           <Outlet />
         </main>
         <footer className="flex h-10 shrink-0 items-center justify-end gap-1.5 whitespace-nowrap px-5 text-[11px] text-muted-foreground sm:px-8">
-          <a className="transition-colors hover:text-foreground" href="https://github.com/AokiAx/grok2api" target="_blank" rel="noreferrer">grok2api</a>
+          <a className="transition-colors hover:text-foreground" href="https://github.com/AokiAx/grok2api" target="_blank" rel="noreferrer">Grok2API</a>
           <span>© 2026</span>
         </footer>
       </div>

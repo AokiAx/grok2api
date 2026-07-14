@@ -1,4 +1,4 @@
-# grok2api
+# Grok2API
 
 用 Go 将 xAI Grok CLI 凭证转换为 OpenAI / Anthropic 兼容 HTTP API，并以两个逻辑号池管理账号：
 

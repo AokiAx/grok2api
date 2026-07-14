@@ -1,4 +1,4 @@
-# grok2api 演进路线
+# Grok2API 演进路线
 
 完善 **Grok Build / CLI** 兼容行为，同时规划管理面重写与可选加固。  
 **不引入** Web / Console 多 Provider。

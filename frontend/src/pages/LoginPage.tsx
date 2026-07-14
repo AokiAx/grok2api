@@ -33,7 +33,7 @@ export function LoginPage() {
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <header className="mx-auto flex h-16 w-full max-w-[960px] items-center justify-between px-5 sm:px-8 lg:px-0">
-        <span className="text-sm font-semibold text-foreground">grok2api</span>
+        <span className="text-sm font-semibold text-foreground">Grok2API</span>
         <div className="flex items-center gap-1">
           <span className="font-mono text-[10px] text-muted-foreground">{meta?.version || "dev"}</span>
           <ThemeToggle />
@@ -43,7 +43,7 @@ export function LoginPage() {
       <main className="mx-auto flex w-full max-w-[960px] flex-1 items-center justify-center px-5 py-12 sm:px-8 lg:px-0">
         <div className="grid w-full max-w-[840px] -translate-y-6 items-center lg:-translate-y-10 lg:grid-cols-[minmax(0,1fr)_1px_336px] lg:gap-14">
           <section className="hidden min-h-72 flex-col justify-center lg:flex">
-            <p className="text-xs font-medium text-muted-foreground">grok2api</p>
+            <p className="text-xs font-medium text-muted-foreground">Grok2API</p>
             <h2 className="mt-3 max-w-sm text-3xl leading-tight font-medium text-balance">
               CLI 号池管理台
             </h2>
@@ -101,7 +101,7 @@ export function LoginPage() {
         </div>
       </main>
       <footer className="flex h-10 shrink-0 items-center justify-end gap-1.5 whitespace-nowrap px-5 text-[11px] text-muted-foreground sm:px-8 lg:mx-auto lg:w-full lg:max-w-[960px] lg:px-0">
-        <a className="transition-colors hover:text-foreground" href="https://github.com/AokiAx/grok2api" target="_blank" rel="noreferrer">grok2api</a>
+        <a className="transition-colors hover:text-foreground" href="https://github.com/AokiAx/grok2api" target="_blank" rel="noreferrer">Grok2API</a>
         <span>© 2026</span>
       </footer>
     </div>
