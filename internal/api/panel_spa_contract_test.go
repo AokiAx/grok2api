@@ -120,12 +120,16 @@ func newPanelServer() *api.Server {
 		&fakeGateway{},
 		fakeStatus{},
 		"",
-		api.WithFrontend(fstest.MapFS{
-			"index.html":        {Data: []byte(`<html><body><div id="root"></div><script src="/assets/app.js"></script></body></html>`)},
-			"assets/app.js":     {Data: []byte(`console.log("panel")`)},
-			"assets/styles.css": {Data: []byte(`body { color: black; }`)},
-		}),
+		api.WithFrontend(panelTestFS()),
 	)
+}
+
+func panelTestFS() fstest.MapFS {
+	return fstest.MapFS{
+		"index.html":        {Data: []byte(`<html><body><div id="root"></div><script src="/assets/app.js"></script></body></html>`)},
+		"assets/app.js":     {Data: []byte(`console.log("panel")`)},
+		"assets/styles.css": {Data: []byte(`body { color: black; }`)},
+	}
 }
 
 func requestPanel(t *testing.T, server *api.Server, method, path string) *httptest.ResponseRecorder {

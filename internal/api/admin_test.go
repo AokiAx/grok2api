@@ -351,7 +351,7 @@ func TestAdminImportPreviewAndApply(t *testing.T) {
 }
 
 func TestPanelRouteServesSPA(t *testing.T) {
-	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "")
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithFrontend(panelTestFS()))
 
 	var body string
 	for _, route := range []string{"/", "/login", "/accounts", "/import", "/system"} {

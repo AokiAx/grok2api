@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,6 +54,7 @@ type Server struct {
 	tracer          *intercept.Tracer
 	admin           AdminService
 	adminKey        string
+	frontend        fs.FS
 	handler         http.Handler
 }
 
@@ -100,6 +102,14 @@ func WithAdmin(service AdminService, key string) Option {
 	}
 }
 
+// WithFrontend mounts a pre-validated SPA filesystem at the service root.
+// The filesystem root must contain index.html and any referenced assets.
+func WithFrontend(frontend fs.FS) Option {
+	return func(server *Server) {
+		server.frontend = frontend
+	}
+}
+
 func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ...Option) *Server {
 	server := &Server{
 		gateway:         gateway,
@@ -126,7 +136,9 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	mux.HandleFunc("POST /chat/completions", server.chat)
 	mux.HandleFunc("POST /v1/responses", server.responses)
 	mux.HandleFunc("POST /v1/messages", server.messages)
-	server.registerSPARoutes(mux)
+	if server.frontend != nil {
+		server.registerSPARoutes(mux)
+	}
 	server.registerAdminRoutes(mux)
 	var handler http.Handler = mux
 	if server.tracer != nil && server.tracer.Enabled() {

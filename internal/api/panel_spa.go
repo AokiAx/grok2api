@@ -1,7 +1,6 @@
 package api
 
 import (
-	"embed"
 	"io"
 	"io/fs"
 	"net/http"
@@ -9,29 +8,18 @@ import (
 	"strings"
 )
 
-// SPA assets produced by `frontend` (Vite base `/`).
-//
-//go:embed all:paneldist
-var panelDistFS embed.FS
-
-// registerSPARoutes mounts the embedded admin SPA directly at the service root.
+// registerSPARoutes mounts the configured admin SPA directly at the service root.
 // More specific API routes registered on the same ServeMux take precedence.
 func (s *Server) registerSPARoutes(mux *http.ServeMux) {
 	mux.Handle("GET /", s.panelSPA())
 }
 
 func (s *Server) panelSPA() http.Handler {
-	sub, err := fs.Sub(panelDistFS, "paneldist")
-	if err != nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "panel assets missing", http.StatusServiceUnavailable)
-		})
-	}
-	static := http.FileServer(http.FS(sub))
+	static := http.FileServer(http.FS(s.frontend))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		rel := strings.TrimPrefix(request.URL.Path, "/")
 		if rel == "" || rel == "." {
-			writePanelIndex(writer, sub, s)
+			writePanelIndex(writer, s.frontend)
 			return
 		}
 		rel = path.Clean(rel)
@@ -44,7 +32,7 @@ func (s *Server) panelSPA() http.Handler {
 			return
 		}
 
-		if f, openErr := sub.Open(rel); openErr == nil {
+		if f, openErr := s.frontend.Open(rel); openErr == nil {
 			info, statErr := f.Stat()
 			_ = f.Close()
 			if statErr == nil && !info.IsDir() {
@@ -64,7 +52,7 @@ func (s *Server) panelSPA() http.Handler {
 			return
 		}
 
-		writePanelIndex(writer, sub, s)
+		writePanelIndex(writer, s.frontend)
 	})
 }
 
@@ -81,8 +69,8 @@ func rejectsSPAFallback(rel string) bool {
 	return false
 }
 
-func writePanelIndex(writer http.ResponseWriter, sub fs.FS, s *Server) {
-	index, err := sub.Open("index.html")
+func writePanelIndex(writer http.ResponseWriter, frontend fs.FS) {
+	index, err := frontend.Open("index.html")
 	if err != nil {
 		http.Error(writer, "panel assets missing", http.StatusServiceUnavailable)
 		return
@@ -92,17 +80,4 @@ func writePanelIndex(writer http.ResponseWriter, sub fs.FS, s *Server) {
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(writer, index)
-}
-
-func panelDistAvailable() bool {
-	sub, err := fs.Sub(panelDistFS, "paneldist")
-	if err != nil {
-		return false
-	}
-	f, err := sub.Open("index.html")
-	if err != nil {
-		return false
-	}
-	_ = f.Close()
-	return true
 }

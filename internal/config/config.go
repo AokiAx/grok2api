@@ -51,6 +51,12 @@ type Config struct {
 	DebugTrace           bool   `json:"debug_trace"`
 	DebugTraceDir        string `json:"debug_trace_dir"`
 	DebugTraceErrorsOnly bool   `json:"debug_trace_errors_only"`
+
+	Frontend FrontendConfig `json:"frontend"`
+}
+
+type FrontendConfig struct {
+	StaticPath string `json:"static_path"`
 }
 
 func Defaults() Config {
@@ -147,21 +153,22 @@ func normalize(config *Config) {
 
 func applyEnvironment(config *Config) error {
 	stringValues := map[string]*string{
-		"GROK2API_HOST":              &config.Host,
-		"GROK2API_API_KEY":           &config.APIKey,
-		"GROK2API_APP_KEY":           &config.AppKey,
-		"GROK2API_PANEL_PASSWORD":    &config.PanelPassword,
-		"GROK2API_PROXY_BASE_URL":    &config.ProxyBaseURL,
-		"GROK2API_CLIENT_VERSION":    &config.ClientVersion,
-		"GROK2API_CLIENT_IDENTIFIER": &config.ClientIdentifier,
-		"GROK2API_CLIENT_USER_AGENT": &config.ClientUserAgent,
-		"GROK2API_TOKEN_AUTH":        &config.TokenAuth,
-		"GROK2API_CREDENTIAL_KEY":    &config.CredentialKey,
-		"GROK2API_DEFAULT_MODEL":     &config.DefaultModel,
-		"GROK2API_DATA_DIR":          &config.DataDir,
-		"GROK2API_PROXY":             &config.Proxy,
-		"PROXY_URL":                  &config.Proxy,
-		"GROK2API_DEBUG_TRACE_DIR":   &config.DebugTraceDir,
+		"GROK2API_HOST":                 &config.Host,
+		"GROK2API_API_KEY":              &config.APIKey,
+		"GROK2API_APP_KEY":              &config.AppKey,
+		"GROK2API_PANEL_PASSWORD":       &config.PanelPassword,
+		"GROK2API_PROXY_BASE_URL":       &config.ProxyBaseURL,
+		"GROK2API_CLIENT_VERSION":       &config.ClientVersion,
+		"GROK2API_CLIENT_IDENTIFIER":    &config.ClientIdentifier,
+		"GROK2API_CLIENT_USER_AGENT":    &config.ClientUserAgent,
+		"GROK2API_TOKEN_AUTH":           &config.TokenAuth,
+		"GROK2API_CREDENTIAL_KEY":       &config.CredentialKey,
+		"GROK2API_DEFAULT_MODEL":        &config.DefaultModel,
+		"GROK2API_DATA_DIR":             &config.DataDir,
+		"GROK2API_PROXY":                &config.Proxy,
+		"PROXY_URL":                     &config.Proxy,
+		"GROK2API_DEBUG_TRACE_DIR":      &config.DebugTraceDir,
+		"GROK2API_FRONTEND_STATIC_PATH": &config.Frontend.StaticPath,
 	}
 	for name, target := range stringValues {
 		if value, ok := os.LookupEnv(name); ok {

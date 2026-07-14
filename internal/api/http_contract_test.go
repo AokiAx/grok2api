@@ -16,6 +16,7 @@ func TestPublicRouteMethodContracts(t *testing.T) {
 		fakeStatus{},
 		"",
 		api.WithAdmin(&fakeAdmin{}, "panel-secret"),
+		api.WithFrontend(panelTestFS()),
 	)
 
 	tests := []struct {
@@ -27,7 +28,7 @@ func TestPublicRouteMethodContracts(t *testing.T) {
 	}{
 		{name: "health rejects post with allow", method: http.MethodPost, path: "/health", wantStatus: http.StatusMethodNotAllowed, allowedVerb: http.MethodGet},
 		{name: "models rejects post with allow", method: http.MethodPost, path: "/v1/models", wantStatus: http.StatusMethodNotAllowed, allowedVerb: http.MethodGet},
-		// Characterization: the embedded SPA's GET catch-all currently wins over
+		// Characterization: the configured SPA's GET catch-all currently wins over
 		// these POST-only patterns and deliberately rejects their reserved paths.
 		// A future transport/SPA split may choose to restore 405 + Allow instead.
 		{name: "spa catch-all makes get on chat not found", method: http.MethodGet, path: "/v1/chat/completions", wantStatus: http.StatusNotFound},

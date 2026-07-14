@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -139,6 +140,10 @@ func printStatus(ctx context.Context, output io.Writer, repo *repository.SQLite)
 }
 
 func serve(ctx context.Context, settings config.Config, repo *repository.SQLite) error {
+	frontendFS, err := frontendFileSystem(settings.Frontend.StaticPath)
+	if err != nil {
+		return err
+	}
 	accounts, err := repo.ListAccounts(ctx)
 	if err != nil {
 		return err
@@ -221,6 +226,9 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		api.WithDefaultModel(settings.DefaultModel),
 		api.WithAdmin(adminService, settings.AdminKey()),
 	}
+	if frontendFS != nil {
+		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
+	}
 	if tracer != nil {
 		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
 	}
@@ -279,6 +287,22 @@ func serve(ctx context.Context, settings config.Config, repo *repository.SQLite)
 		}
 		return err
 	}
+}
+
+func frontendFileSystem(staticPath string) (fs.FS, error) {
+	staticPath = strings.TrimSpace(staticPath)
+	if staticPath == "" {
+		return nil, nil
+	}
+	frontendFS := os.DirFS(filepath.Clean(staticPath))
+	info, err := fs.Stat(frontendFS, "index.html")
+	if err != nil {
+		return nil, fmt.Errorf("validate frontend static path %q: index.html: %w", staticPath, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("validate frontend static path %q: index.html is a directory", staticPath)
+	}
+	return frontendFS, nil
 }
 
 type poolStatusProvider struct {
