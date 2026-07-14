@@ -3,10 +3,11 @@ const exactNumber = new Intl.NumberFormat("zh-CN", {
 });
 
 const units = [
-  { value: 1e16, label: "京" },
-  { value: 1e12, label: "万亿" },
-  { value: 1e8, label: "亿" },
-  { value: 1e4, label: "万" },
+  { value: 1e15, label: "Q" },
+  { value: 1e12, label: "T" },
+  { value: 1e9, label: "B" },
+  { value: 1e6, label: "M" },
+  { value: 1e3, label: "K" },
 ] as const;
 
 export type FormattedNumber = {
