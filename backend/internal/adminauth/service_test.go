@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/security"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,5 +113,33 @@ func TestLoginSetupRequiredAndThrottle(t *testing.T) {
 		if i == 5 && err != ErrRateLimited {
 			t.Fatalf("attempt 6 err %v", err)
 		}
+	}
+}
+
+func TestRememberPersistsAndSurvivesRefresh(t *testing.T) {
+	cred, _ := security.HashAdminPassword("secret", 4)
+	now := time.Unix(2000, 0).UTC()
+	repo := &fakeRepo{users: map[string]adminauth.AdminUser{}, sessions: map[string]adminauth.Session{}, rotateOK: true}
+	u, _ := adminauth.NewAdminUser("u1", "admin", cred, now)
+	repo.users[u.ID] = u
+	svc := NewService(repo, WithClock(func() time.Time { return now }))
+	out, err := svc.Login(context.Background(), LoginInput{Username: "admin", Password: "secret", SourceIP: "127.0.0.1", Remember: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Remember {
+		t.Fatal("login output lost remember")
+	}
+	parts := strings.SplitN(out.RefreshCookieValue, ".", 2)
+	stored := repo.sessions[parts[0]]
+	if !stored.Remember {
+		t.Fatal("session did not persist remember")
+	}
+	refreshed, err := svc.Refresh(context.Background(), out.RefreshCookieValue, "127.0.0.1", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed.Remember {
+		t.Fatal("refresh did not inherit remember")
 	}
 }
