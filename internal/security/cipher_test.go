@@ -3,6 +3,7 @@ package security_test
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/AokiAx/grok2api/internal/security"
@@ -93,5 +94,45 @@ func TestLegacyPrefixDecrypt(t *testing.T) {
 	got, err := c.NormalizeStored(legacy)
 	if err != nil || got != "legacy-token" {
 		t.Fatalf("legacy: %v %q", err, got)
+	}
+}
+
+func TestCipherRejectsCiphertextFromDifferentKey(t *testing.T) {
+	first, err := security.NewCipher(testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := security.NewCipher(testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := first.Encrypt("credential-owned-by-first-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Decrypt(ciphertext); err == nil || !strings.Contains(err.Error(), "decrypt credential") {
+		t.Fatalf("wrong-key decrypt error = %v", err)
+	}
+}
+
+func TestNilCipherRejectsExplicitLegacyEnvelope(t *testing.T) {
+	var c *security.Cipher
+	if _, err := c.NormalizeStored("enc:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); err == nil {
+		t.Fatal("expected missing-key error")
+	}
+}
+
+func TestCipherEmptyCredentialRoundTrip(t *testing.T) {
+	c, err := security.NewCipher(testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := c.Encrypt("")
+	if err != nil || encrypted != "" {
+		t.Fatalf("encrypt empty = %q, %v", encrypted, err)
+	}
+	decrypted, err := c.Decrypt("")
+	if err != nil || decrypted != "" {
+		t.Fatalf("decrypt empty = %q, %v", decrypted, err)
 	}
 }

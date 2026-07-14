@@ -631,3 +631,115 @@ func TestBase64RefreshTokenDoesNotRequireCredentialKey(t *testing.T) {
 		t.Fatalf("refresh token changed: %#v", accounts)
 	}
 }
+
+func TestOpeningPlaintextDatabaseWithCredentialKeyEncryptsExistingRows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "plaintext-to-encrypted.db")
+	plainRepo, err := repository.OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatalf("open plaintext database: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := plainRepo.SaveAccount(ctx, account.Account{
+		ID: "migrate-credentials", AccessToken: "plain-access", RefreshToken: "plain-refresh",
+		Pool: account.PoolReady, MaxActive: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("save plaintext account: %v", err)
+	}
+	if err := plainRepo.Close(); err != nil {
+		t.Fatalf("close plaintext database: %v", err)
+	}
+
+	rawKey := bytes.Repeat([]byte{0x2a}, 32)
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(rawKey))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	encryptedRepo, err := repository.OpenSQLiteWithCipher(ctx, path, cipher)
+	if err != nil {
+		t.Fatalf("reopen with key: %v", err)
+	}
+	defer encryptedRepo.Close()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer db.Close()
+	var rawAccess, rawRefresh string
+	if err := db.QueryRowContext(ctx, `SELECT access_token, refresh_token FROM accounts WHERE id=?`, "migrate-credentials").Scan(&rawAccess, &rawRefresh); err != nil {
+		t.Fatalf("read raw credentials: %v", err)
+	}
+	if !security.IsEncrypted(rawAccess) || !security.IsEncrypted(rawRefresh) {
+		t.Fatalf("raw credentials not encrypted: access=%q refresh=%q", rawAccess, rawRefresh)
+	}
+	accounts, err := encryptedRepo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list with key: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].AccessToken != "plain-access" || accounts[0].RefreshToken != "plain-refresh" {
+		t.Fatalf("decrypted accounts = %#v", accounts)
+	}
+}
+
+func TestEncryptedDatabaseWithWrongCredentialKeyFailsClosedOnRead(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wrong-key.db")
+	first, err := security.NewCipher(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := repository.OpenSQLiteWithCipher(ctx, path, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := repo.SaveAccount(ctx, account.Account{
+		ID: "wrong-key", AccessToken: "secret-access", RefreshToken: "secret-refresh",
+		Pool: account.PoolReady, MaxActive: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := security.NewCipher(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err = repository.OpenSQLiteWithCipher(ctx, path, second)
+	if err != nil {
+		t.Fatalf("open with wrong key: %v", err)
+	}
+	defer repo.Close()
+	if _, err := repo.ListAccounts(ctx); err == nil {
+		t.Fatal("expected wrong-key read to fail")
+	}
+}
+
+func TestLegacyEnvelopeRequiresCredentialKey(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-envelope.db")
+	repo, err := repository.OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO accounts (
+		id, access_token, refresh_token, pool, created_at, updated_at
+	) VALUES (?, ?, '', 'ready', ?, ?)`, "legacy-envelope", "enc:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", now, now); err != nil {
+		t.Fatalf("insert legacy envelope: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ListAccounts(ctx); err == nil {
+		t.Fatal("expected missing credential key error")
+	}
+	_ = repo.Close()
+}

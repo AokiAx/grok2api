@@ -1,0 +1,46 @@
+{
+  "accounts": [
+    {
+      "id": "legacy-ready",
+      "key": "access-legacy-ready",
+      "refresh_token": "refresh-legacy-ready",
+      "expires_at": "2099-02-03T04:05:06Z",
+      "oidc_issuer": "https://issuer.example.test",
+      "oidc_client_id": "legacy-client",
+      "email": " LEGACY@EXAMPLE.TEST ",
+      "user_id": "legacy-user",
+      "team_id": "legacy-team",
+      "enabled": true,
+      "request_count": 73,
+      "fail_count": 4,
+      "last_error_code": "historical-warning"
+    },
+    {
+      "id": "legacy-quota",
+      "access_token": "access-legacy-quota",
+      "refresh_token": "",
+      "expires_at": "2099-02-03T04:05:06Z",
+      "email": "quota@example.test",
+      "enabled": false,
+      "request_count": 79,
+      "fail_count": 5,
+      "last_error_code": "subscription:free-usage-exhausted"
+    },
+    {
+      "id": "legacy-auth",
+      "key": "access-legacy-auth",
+      "refresh_token": "refresh-legacy-auth",
+      "expires_at": "2020-02-03T04:05:06Z",
+      "email": "auth@example.test",
+      "enabled": true,
+      "request_count": 83,
+      "fail_count": 6,
+      "last_error_code": "invalid-token"
+    },
+    {
+      "id": "ignored-without-token",
+      "email": "ignored@example.test",
+      "enabled": true
+    }
+  ]
+}
