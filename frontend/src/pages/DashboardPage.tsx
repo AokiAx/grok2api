@@ -13,10 +13,15 @@ import { adminApi, AdminApiError, type Dashboard } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { formatAdaptiveNumber, formatAdaptiveRatio } from "@/lib/formatNumber";
 
 function n(v?: number) {
   if (v == null || Number.isNaN(v)) return "—";
   return new Intl.NumberFormat("zh-CN").format(v);
+}
+
+function compact(v?: number) {
+  return formatAdaptiveNumber(v);
 }
 
 function Stat({
@@ -24,18 +29,25 @@ function Stat({
   value,
   hint,
   icon,
+  title,
 }: {
   label: string;
   value: string | number;
   hint?: string;
   icon: ReactNode;
+  title?: string;
 }) {
   return (
     <Card className="min-w-0">
       <CardContent className="flex items-start justify-between gap-4 p-4">
         <div className="min-w-0">
           <p className="text-xs text-muted-foreground">{label}</p>
-          <p className="mt-2 truncate text-2xl font-semibold tracking-tight tabular-nums">{value}</p>
+          <p
+            className="mt-2 max-w-full truncate text-2xl font-semibold tracking-tight tabular-nums"
+            title={title}
+          >
+            {value}
+          </p>
           {hint ? <p className="mt-1 truncate text-[11px] text-muted-foreground">{hint}</p> : null}
         </div>
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground">
@@ -80,6 +92,8 @@ export function DashboardPage() {
   const unavailable = s?.unavailable_accounts ?? pool?.unavailable;
   const requests = s?.total_requests ?? resources?.allTimeRequests;
   const circuit = data?.quota_circuit as { open?: boolean; retry_at?: string } | null | undefined;
+  const quotaRemaining = compact(s?.quota_remaining);
+  const quotaUsage = formatAdaptiveRatio(s?.quota_actual, s?.quota_limit);
 
   return (
     <div className="space-y-6">
@@ -141,8 +155,9 @@ export function DashboardPage() {
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Stat
             label="Free 剩余"
-            value={n(s?.quota_remaining)}
-            hint={s?.quota_limit ? `${n(s.quota_actual)} / ${n(s.quota_limit)} 已使用` : "暂无额度观测"}
+            value={quotaRemaining.display}
+            title={quotaRemaining.exact}
+            hint={s?.quota_limit ? `${quotaUsage.display} 已使用` : "暂无额度观测"}
             icon={<Gauge className="h-4 w-4" />}
           />
           <Stat

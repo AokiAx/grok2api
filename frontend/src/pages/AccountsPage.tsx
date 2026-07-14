@@ -21,6 +21,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
+import { formatAdaptiveRatio } from "@/lib/formatNumber";
 
 function formatDate(value?: string) {
   if (!value) return "—";
@@ -29,7 +30,7 @@ function formatDate(value?: string) {
 }
 
 function quotaText(item: PublicAccount) {
-  return item.quota_limit > 0 ? `${item.quota_actual}/${item.quota_limit}` : "—";
+  return item.quota_limit > 0 ? formatAdaptiveRatio(item.quota_actual, item.quota_limit) : { display: "—", exact: "—" };
 }
 
 export function AccountsPage() {
@@ -233,7 +234,12 @@ export function AccountsPage() {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </td>
-                    <td className="mono px-3 py-2.5 text-right align-middle tabular-nums">{quotaText(item)}</td>
+                    <td
+                      className="mono max-w-[150px] px-3 py-2.5 text-right align-middle tabular-nums"
+                      title={quotaText(item).exact}
+                    >
+                      <span className="block truncate">{quotaText(item).display}</span>
+                    </td>
                     <td className="mono px-3 py-2.5 text-right align-middle tabular-nums">
                       {item.active}/{item.max_active || 1}
                     </td>
@@ -341,7 +347,7 @@ export function AccountsPage() {
                       ["团队 ID", selected.team_id || "—"],
                       ["错误码", selected.last_error_code || "—"],
                       ["恢复时间", formatDate(selected.retry_at)],
-                      ["额度", quotaText(selected)],
+                      ["额度", quotaText(selected).display],
                       ["并发", `${selected.active}/${selected.max_active || 1}`],
                       ["请求数", String(selected.request_count)],
                       ["Refresh Token", selected.has_refresh_token ? "有" : "无"],
