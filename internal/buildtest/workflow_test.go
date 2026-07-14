@@ -99,3 +99,19 @@ func TestDeployWorkflowIsManualAndPinsDigest(t *testing.T) {
 		"docker start grok2api-cli",
 	)
 }
+
+func TestDockerImageSmokeScriptCoversRuntimeDeliveryContract(t *testing.T) {
+	script := readFile(t, "scripts/smoke-docker-image.sh")
+	requireContains(
+		t,
+		script,
+		"docker image inspect",
+		".Config.User",
+		"docker run",
+		"/app/config.json:ro",
+		"/app/data",
+		"/health",
+		"/assets/",
+		"grok2api.db",
+	)
+}
