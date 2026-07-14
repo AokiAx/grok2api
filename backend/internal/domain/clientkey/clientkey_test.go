@@ -85,14 +85,25 @@ func TestClientKeyRejectsInvalidScopesLimitsAndLifecycle(t *testing.T) {
 	if !active.Active(now) || active.Active(now.Add(time.Hour)) {
 		t.Fatalf("expiry boundary is incorrect: %+v", active)
 	}
-	active.Revoke(now.Add(time.Minute))
+	if err := active.Revoke(now.Add(time.Minute)); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
 	if active.Active(now.Add(2*time.Minute)) || active.RevokedAt.IsZero() {
 		t.Fatalf("revoked key remained active: %+v", active)
 	}
 	firstRevocation := active.RevokedAt
-	active.Revoke(now.Add(3 * time.Minute))
+	if err := active.Revoke(now.Add(3 * time.Minute)); err != nil {
+		t.Fatalf("idempotent revoke: %v", err)
+	}
 	if !active.RevokedAt.Equal(firstRevocation) {
 		t.Fatalf("revocation should be irreversible/idempotent: first=%v second=%v", firstRevocation, active.RevokedAt)
+	}
+	zero := base
+	if err := zero.Revoke(time.Time{}); err == nil {
+		t.Fatal("zero revocation time should be rejected")
+	}
+	if !zero.RevokedAt.IsZero() {
+		t.Fatalf("failed revoke changed key: %+v", zero)
 	}
 }
 

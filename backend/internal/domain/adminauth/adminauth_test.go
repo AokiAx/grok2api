@@ -87,12 +87,25 @@ func TestAdminSessionLifecycleAndLoginAttemptValidation(t *testing.T) {
 		t.Fatal("session hash comparison accepted a different secret hash")
 	}
 
-	session.Revoke(now.Add(time.Minute), RevocationLogout)
+	if err := session.Revoke(now.Add(time.Minute), RevocationLogout); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
 	if session.Active(now.Add(2*time.Minute)) || session.AccessActive(now.Add(2*time.Minute)) || session.RevokedAt.IsZero() {
 		t.Fatalf("revoked session remained active: %+v", session)
 	}
 	if session.RevocationReason != RevocationLogout {
 		t.Fatalf("revocation reason = %q; want logout", session.RevocationReason)
+	}
+
+	zeroRevoke, err := NewSession("zero-revoke", "family-2", "admin-1", accessHash, refreshHash, now.Add(5*time.Minute), now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("new zero-revoke fixture: %v", err)
+	}
+	if err := zeroRevoke.Revoke(time.Time{}, RevocationLogout); err == nil {
+		t.Fatal("zero revocation time should be rejected")
+	}
+	if !zeroRevoke.RevokedAt.IsZero() || !zeroRevoke.Active(now) {
+		t.Fatalf("failed revoke changed session: %+v", zeroRevoke)
 	}
 
 	failed, err := NewLoginAttempt(" Admin ", " 127.0.0.1 ", false, "bad_password", now)
