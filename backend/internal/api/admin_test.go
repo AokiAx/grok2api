@@ -22,6 +22,8 @@ type fakeAdmin struct {
 	deleted   string
 	recovered string
 	lastQuery admin.ListAccountsQuery
+	refreshedCredential string
+	refreshedQuota string
 }
 
 func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (admin.ListAccountsPage, error) {
@@ -199,6 +201,31 @@ func (a *fakeAdmin) Events(_ context.Context, id string, page, pageSize int) (re
 		Items: []repository.AccountEvent{{ID: 1, AccountID: id, Type: repository.AccountEventStateTransition, ToPool: account.PoolReady, CreatedAt: time.Now().UTC()}},
 		Total: 1, Page: page, PageSize: pageSize,
 	}, nil
+}
+
+func (a *fakeAdmin) RefreshCredential(_ context.Context, id string) (account.Account, error) {
+	a.refreshedCredential = id
+	item, err := a.Get(context.Background(), id)
+	if err != nil {
+		return account.Account{}, err
+	}
+	item.AccessToken = "rotated-secret"
+	return item, nil
+}
+
+func (a *fakeAdmin) RefreshQuota(_ context.Context, id string) (admin.QuotaRefreshResult, error) {
+	a.refreshedQuota = id
+	if _, err := a.Get(context.Background(), id); err != nil {
+		return admin.QuotaRefreshResult{}, err
+	}
+	return admin.QuotaRefreshResult{AccountID: id, Actual: 25, Limit: 100, Observed: true}, nil
+}
+
+func (a *fakeAdmin) ExportCredential(_ context.Context, id string) (admin.CredentialExport, error) {
+	if _, err := a.Get(context.Background(), id); err != nil {
+		return admin.CredentialExport{}, err
+	}
+	return admin.CredentialExport{ID: id, Key: "access-secret", RefreshToken: "refresh-secret"}, nil
 }
 
 func TestAdminListNeverReturnsTokens(t *testing.T) {

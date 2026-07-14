@@ -204,6 +204,30 @@ type validator struct {
 	err    error
 }
 
+type maintenanceClient struct {
+	refreshed account.Account
+	refreshErr error
+	reason account.UnavailableReason
+	code string
+	actual int64
+	limit int64
+	observed bool
+	probeErr error
+}
+
+func (m maintenanceClient) Refresh(context.Context, account.Account) (account.Account, error) {
+	return m.refreshed, m.refreshErr
+}
+
+func (m maintenanceClient) ProbeFreeQuotaUsage(context.Context, account.Account) (account.UnavailableReason, string, int64, int64, bool, error) {
+	return m.reason, m.code, m.actual, m.limit, m.observed, m.probeErr
+}
+
+type permanentRefreshError struct{}
+
+func (permanentRefreshError) Error() string { return "refresh token revoked" }
+func (permanentRefreshError) Permanent() bool { return true }
+
 func (v validator) Validate(context.Context, account.Account) (account.UnavailableReason, string, error) {
 	return v.reason, v.code, v.err
 }
@@ -564,5 +588,108 @@ func TestGetAccountAndEvents(t *testing.T) {
 	events, err := service.Events(context.Background(), "a", 1, 20)
 	if err != nil || events.Page != 1 || events.PageSize != 20 {
 		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}
+
+func TestRefreshCredentialPersistsRotatedTokensWithoutImplicitRecovery(t *testing.T) {
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {
+			ID: "a", AccessToken: "old-access", RefreshToken: "old-refresh",
+			Pool: account.PoolUnavailable, UnavailableReason: account.ReasonAuth,
+			LastErrorCode: "expired", MaxActive: 1,
+		},
+	}}
+	sink := &memorySink{}
+	service := admin.NewService(repository, validator{},
+		admin.WithMaintenance(maintenanceClient{refreshed: account.Account{
+			ID: "a", AccessToken: "new-access", RefreshToken: "new-refresh",
+			Pool: account.PoolUnavailable, UnavailableReason: account.ReasonAuth,
+			LastErrorCode: "expired", MaxActive: 1,
+		}}),
+		admin.WithSink(sink),
+		admin.WithClock(func() time.Time { return now }),
+	)
+
+	item, err := service.RefreshCredential(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("refresh credential: %v", err)
+	}
+	if item.AccessToken != "new-access" || item.RefreshToken != "new-refresh" {
+		t.Fatalf("tokens not rotated: %+v", item)
+	}
+	if item.Pool != account.PoolUnavailable || item.UnavailableReason != account.ReasonAuth {
+		t.Fatalf("refresh must not bypass validation: %+v", item)
+	}
+	if repository.saves != 1 || len(sink.items) != 1 {
+		t.Fatalf("saves=%d sink=%d", repository.saves, len(sink.items))
+	}
+}
+
+func TestRefreshCredentialPersistsPermanentFailureState(t *testing.T) {
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {ID: "a", RefreshToken: "revoked", Pool: account.PoolReady, MaxActive: 1},
+	}}
+	service := admin.NewService(repository, validator{},
+		admin.WithMaintenance(maintenanceClient{refreshErr: permanentRefreshError{}}),
+		admin.WithClock(func() time.Time { return now }),
+	)
+
+	_, err := service.RefreshCredential(context.Background(), "a")
+	if err == nil {
+		t.Fatal("expected refresh error")
+	}
+	item := repository.accounts["a"]
+	if item.Pool != account.PoolUnavailable || item.UnavailableReason != account.ReasonDisabled || item.LastErrorCode != "refresh-revoked" {
+		t.Fatalf("permanent refresh state=%+v", item)
+	}
+	if item.AuthenticationFails != 1 || repository.saves != 1 {
+		t.Fatalf("auth failures=%d saves=%d", item.AuthenticationFails, repository.saves)
+	}
+}
+
+func TestRefreshQuotaPersistsObservedUsageAndRecoveryState(t *testing.T) {
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {ID: "a", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota, QuotaActual: 100, QuotaLimit: 100, MaxActive: 1},
+	}}
+	service := admin.NewService(repository, validator{},
+		admin.WithMaintenance(maintenanceClient{actual: 25, limit: 100, observed: true}),
+		admin.WithClock(func() time.Time { return now }),
+	)
+
+	result, err := service.RefreshQuota(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("refresh quota: %v", err)
+	}
+	if !result.Observed || result.Actual != 25 || result.Limit != 100 {
+		t.Fatalf("result=%+v", result)
+	}
+	item := repository.accounts["a"]
+	if item.Pool != account.PoolReady || item.QuotaActual != 25 || item.QuotaLimit != 100 {
+		t.Fatalf("saved quota state=%+v", item)
+	}
+}
+
+func TestExportCredentialReturnsImportCompatibleSecretsOnlyOnExplicitCall(t *testing.T) {
+	expires := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	repository := &memoryRepository{accounts: map[string]account.Account{
+		"a": {
+			ID: "a", AccessToken: "access-secret", RefreshToken: "refresh-secret", ExpiresAt: expires,
+			Email: "a@example.test", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client", UserID: "user", TeamID: "team",
+		},
+	}}
+	service := admin.NewService(repository, validator{})
+
+	exported, err := service.ExportCredential(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("export credential: %v", err)
+	}
+	if exported.Key != "access-secret" || exported.RefreshToken != "refresh-secret" || exported.ExpiresAt != expires.Format(time.RFC3339) {
+		t.Fatalf("export=%+v", exported)
+	}
+	if exported.ID != "a" || exported.OIDCIssuer == "" || exported.OIDCClientID == "" {
+		t.Fatalf("import compatibility fields missing: %+v", exported)
 	}
 }

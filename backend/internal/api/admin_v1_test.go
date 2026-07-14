@@ -223,3 +223,43 @@ func TestAdminV1AccountAdministrationEndpoints(t *testing.T) {
 		t.Fatalf("events status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestAdminV1AccountMaintenanceAndCredentialExport(t *testing.T) {
+	adminService := &fakeAdmin{accounts: []account.Account{{
+		ID: "a1", AccessToken: "access-secret", RefreshToken: "refresh-secret", Pool: account.PoolReady, MaxActive: 1,
+	}}}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(adminService, "secret"))
+	authorized := func(method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := authorized(http.MethodPost, "/api/admin/v1/accounts/a1/refresh-token")
+	if rec.Code != http.StatusOK || adminService.refreshedCredential != "a1" {
+		t.Fatalf("refresh token status=%d body=%s called=%q", rec.Code, rec.Body.String(), adminService.refreshedCredential)
+	}
+	if strings.Contains(rec.Body.String(), "rotated-secret") {
+		t.Fatalf("refresh response leaked credential: %s", rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPost, "/api/admin/v1/accounts/a1/refresh-quota")
+	if rec.Code != http.StatusOK || adminService.refreshedQuota != "a1" || !strings.Contains(rec.Body.String(), `"observed":true`) {
+		t.Fatalf("refresh quota status=%d body=%s called=%q", rec.Code, rec.Body.String(), adminService.refreshedQuota)
+	}
+
+	rec = authorized(http.MethodGet, "/api/admin/v1/accounts/a1/credentials/export")
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Disposition") != `attachment; filename="grok2api-account-a1.json"` {
+		t.Fatalf("export status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" || !strings.Contains(rec.Body.String(), `"key":"access-secret"`) || !strings.Contains(rec.Body.String(), `"refresh_token":"refresh-secret"`) {
+		t.Fatalf("export headers=%v body=%s", rec.Header(), rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPost, "/api/admin/v1/accounts/a1/refresh-billing")
+	if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), `"code":"billing_unsupported"`) {
+		t.Fatalf("billing diagnostic status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
