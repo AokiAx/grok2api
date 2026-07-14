@@ -21,7 +21,8 @@ export class AdminApiError extends Error {
 const LEGACY_TOKEN_KEY = "grok2api.admin.token";
 const LEGACY_REMEMBER_KEY = "grok2api.admin.remember";
 let accessToken = "";
-let refreshPromise: Promise<boolean> | null = null;
+let sessionGeneration = 0;
+let refreshFlight: { generation: number; promise: Promise<boolean> } | null = null;
 
 function clearLegacyAuthStorage(): void {
   try {
@@ -86,7 +87,7 @@ async function parseEnvelope<T>(response: Response): Promise<T> {
   return body.data as T;
 }
 
-async function refreshAccessToken(): Promise<boolean> {
+async function refreshAccessToken(generation: number): Promise<boolean> {
   try {
     const response = await fetch("/api/admin/v1/auth/refresh", {
       method: "POST",
@@ -97,21 +98,24 @@ async function refreshAccessToken(): Promise<boolean> {
     if (!nextToken) {
       throw new AdminApiError(response.status, "invalid_session", "Refresh response omitted access token");
     }
+    if (generation !== sessionGeneration) return false;
     setAccessToken(nextToken);
     return true;
   } catch {
-    clearAccessToken();
+    if (generation === sessionGeneration) clearAccessToken();
     return false;
   }
 }
 
 function refreshSingleFlight(): Promise<boolean> {
-  if (!refreshPromise) {
-    refreshPromise = refreshAccessToken().finally(() => {
-      refreshPromise = null;
-    });
-  }
-  return refreshPromise;
+  const generation = sessionGeneration;
+  if (refreshFlight?.generation === generation) return refreshFlight.promise;
+
+  const promise = refreshAccessToken(generation).finally(() => {
+    if (refreshFlight?.promise === promise) refreshFlight = null;
+  });
+  refreshFlight = { generation, promise };
+  return promise;
 }
 
 type TransportOptions = {
@@ -349,6 +353,7 @@ export const adminApi = {
     if (!token) {
       throw new AdminApiError(200, "invalid_session", "Login response omitted access token");
     }
+    sessionGeneration += 1;
     setAccessToken(token);
     return data;
   },
@@ -364,6 +369,7 @@ export const adminApi = {
         { method: "POST" },
       );
     } finally {
+      sessionGeneration += 1;
       clearAccessToken();
     }
   },
