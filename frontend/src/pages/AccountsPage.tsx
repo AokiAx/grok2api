@@ -42,6 +42,8 @@ export function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [selected, setSelected] = useState<PublicAccount | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -90,6 +92,25 @@ export function AccountsPage() {
       setError(err instanceof AdminApiError ? err.message : "删除失败");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function runBatch(action: "enable" | "disable" | "recover" | "delete") {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    const labels = { enable: "启用", disable: "禁用", recover: "恢复", delete: "删除" } as const;
+    if (!window.confirm(`确认批量${labels[action]} ${ids.length} 个账号？`)) return;
+    setBatchBusy(true);
+    setError(null);
+    try {
+      await adminApi.batchAccounts(ids, action);
+      setSelectedIds(new Set());
+      if (action === "delete" && selected && ids.includes(selected.id)) setSelected(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : `批量${labels[action]}失败`);
+    } finally {
+      setBatchBusy(false);
     }
   }
 
@@ -182,12 +203,34 @@ export function AccountsPage() {
         </div>
       ) : null}
 
+      {selectedIds.size > 0 ? (
+        <div className="flex flex-col gap-2 rounded-[10px] bg-card px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-xs text-muted-foreground">已选择 <strong className="font-medium text-foreground">{selectedIds.size}</strong> 个账号</span>
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatch("enable")}>批量启用</Button>
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatch("disable")}>批量禁用</Button>
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatch("recover")}>批量恢复</Button>
+            <Button size="sm" variant="destructive" disabled={batchBusy} onClick={() => void runBatch("delete")}>批量删除</Button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
         <Card className="min-w-0 overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left text-xs">
+            <table className="w-full min-w-[960px] text-left text-xs">
               <thead className="border-b border-border/80 bg-background text-[11px] text-muted-foreground">
                 <tr>
+                  <th className="w-10 px-3 py-2.5">
+                    <input
+                      type="checkbox"
+                      aria-label="选择全部账号"
+                      checked={accounts.length > 0 && accounts.every((item) => selectedIds.has(item.id))}
+                      onChange={(event) => {
+                        setSelectedIds(event.target.checked ? new Set(accounts.map((item) => item.id)) : new Set());
+                      }}
+                    />
+                  </th>
                   <th className="w-[250px] px-3 py-2.5 font-medium">账号</th>
                   <th className="px-3 py-2.5 font-medium">状态</th>
                   <th className="px-3 py-2.5 font-medium">不可用原因</th>
@@ -215,6 +258,21 @@ export function AccountsPage() {
                       }
                     }}
                   >
+                    <td className="px-3 py-2.5 align-middle" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`选择账号 ${item.id}`}
+                        checked={selectedIds.has(item.id)}
+                        onChange={(event) => {
+                          setSelectedIds((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) next.add(item.id);
+                            else next.delete(item.id);
+                            return next;
+                          });
+                        }}
+                      />
+                    </td>
                     <td className="px-3 py-2.5 align-middle">
                       <div className="mono max-w-[230px] truncate text-xs text-foreground" title={item.id}>{item.id}</div>
                       <div className="mt-0.5 max-w-[230px] truncate text-[11px] text-muted-foreground" title={item.email || undefined}>
@@ -266,14 +324,14 @@ export function AccountsPage() {
                 ))}
                 {!loading && accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-12 text-center text-xs text-muted-foreground">
+                    <td colSpan={8} className="px-3 py-12 text-center text-xs text-muted-foreground">
                       {q || pool !== "all" ? "没有符合当前筛选条件的账号" : "暂无账号"}
                     </td>
                   </tr>
                 ) : null}
                 {loading && accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-12 text-center text-xs text-muted-foreground">正在加载账号…</td>
+                    <td colSpan={8} className="px-3 py-12 text-center text-xs text-muted-foreground">正在加载账号…</td>
                   </tr>
                 ) : null}
               </tbody>

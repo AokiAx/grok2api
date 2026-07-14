@@ -160,6 +160,7 @@ export type PublicAccount = {
   request_count: number;
   active: number;
   max_active: number;
+  priority: number;
   has_refresh_token: boolean;
 };
 
@@ -193,6 +194,7 @@ function normalizeAccountItem(item: any): PublicAccount {
     request_count: Number(item?.request_count ?? 0),
     active: Number(item?.active ?? 0),
     max_active: Number(item?.maxConcurrent ?? item?.max_active ?? 1),
+    priority: Number(item?.priority ?? 0),
     has_refresh_token: Boolean(item?.refreshable ?? item?.has_refresh_token),
   };
 }
@@ -257,6 +259,11 @@ export const adminApi = {
   recoverAccount: (id: string) =>
     request<PublicAccount>(`/api/admin/v1/accounts/${encodeURIComponent(id)}/recover`, {
       method: "POST",
+    }),
+  batchAccounts: (ids: string[], action: "enable" | "disable" | "recover" | "delete") =>
+    request<{ updated: number; deleted: number; ids: string[] }>("/api/admin/v1/accounts/batch", {
+      method: "POST",
+      body: JSON.stringify({ ids, action }),
     }),
   importPreview: (accounts: ImportAccount[]) =>
     request<ImportResult>("/api/admin/v1/accounts/import/preview", {
