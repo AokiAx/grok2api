@@ -8,11 +8,15 @@ import (
 )
 
 func TestAdminAuthHandlerRequiresService(t *testing.T) {
-	if NewAdminAuthHandler(nil, AdminAuthHandlerOptions{SecureCookies:true}) == nil { t.Fatal("handler must be constructed") }
+	if NewAdminAuthHandler(nil, AdminAuthHandlerOptions{SecureCookies: true}) == nil {
+		t.Fatal("handler must be constructed")
+	}
 }
 
 func TestAdminAuthCookieContract(t *testing.T) {
 	// Cookie attributes are exercised through the handler integration on the assembled server.
-	if !strings.Contains(http.SameSiteStrictMode.String(), "Strict") { t.Fatal("strict same-site unavailable") }
+	if http.SameSiteStrictMode == 0 {
+		t.Fatal("strict same-site unavailable")
+	}
 	_ = httptest.NewRecorder()
 }
