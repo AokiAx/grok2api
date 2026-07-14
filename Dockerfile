@@ -1,21 +1,28 @@
-FROM node:22-bookworm AS frontend
+# syntax=docker/dockerfile:1.7
+
+ARG BUILDPLATFORM
+
+FROM --platform=$BUILDPLATFORM node:22-bookworm AS frontend
 WORKDIR /src/frontend
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+COPY frontend/package.json frontend/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
+RUN find dist -name "*.map" -delete
 
-FROM golang:1.25-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-# Refresh embedded SPA from the frontend build stage.
-RUN rm -rf internal/api/paneldist && mkdir -p internal/api/paneldist
-COPY --from=frontend /src/frontend/dist/ ./internal/api/paneldist/
-RUN find internal/api/paneldist -name "*.map" -delete
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags="-s -w" \
     -o /out/grok2api \
@@ -23,8 +30,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
-COPY --from=build /out/grok2api /grok2api
+COPY --from=build /out/grok2api /app/grok2api
+COPY --from=frontend /src/frontend/dist/ /app/frontend/dist/
+ENV GROK2API_FRONTEND_STATIC_PATH=/app/frontend/dist
 USER nonroot:nonroot
 EXPOSE 8787
-ENTRYPOINT ["/grok2api"]
+ENTRYPOINT ["/app/grok2api"]
 CMD ["serve", "--config", "/app/config.json"]

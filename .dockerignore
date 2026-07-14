@@ -13,3 +13,6 @@ data/
 coverage*.out
 grok2api
 grok2api.exe
+frontend/node_modules/
+frontend/dist/
+internal/api/paneldist/

@@ -75,6 +75,7 @@ services:
       GROK2API_HOST: 0.0.0.0
       GROK2API_PORT: 8787
       GROK2API_DATA_DIR: /app/data
+      GROK2API_FRONTEND_STATIC_PATH: /app/frontend/dist
       # Optional overrides; file config remains source of truth for most keys.
       GROK2API_PROXY: ${GROK2API_PROXY:-http://privoxy:8118}
       TZ: ${TZ:-Asia/Shanghai}
@@ -85,7 +86,7 @@ services:
       test:
         [
           "CMD",
-          "/grok2api",
+          "/app/grok2api",
           "status",
           "--config",
           "/app/config.json",
