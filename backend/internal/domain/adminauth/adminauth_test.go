@@ -7,12 +7,14 @@ import (
 	"time"
 )
 
+const validBcryptFixture = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
 func TestNewAdminUserNormalizesAndValidatesCredential(t *testing.T) {
 	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.FixedZone("HKT", 8*60*60))
 	user, err := NewAdminUser(
 		" admin-1 ",
 		" Admin ",
-		PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: "$2a$12$fixture"},
+		PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: validBcryptFixture},
 		now,
 	)
 	if err != nil {
@@ -34,10 +36,14 @@ func TestNewAdminUserNormalizesAndValidatesCredential(t *testing.T) {
 		username   string
 		credential PasswordCredential
 	}{
-		{name: "blank id", username: "admin", credential: PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: "hash"}},
-		{name: "blank username", id: "admin-1", credential: PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: "hash"}},
+		{name: "blank id", username: "admin", credential: PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: validBcryptFixture}},
+		{name: "blank username", id: "admin-1", credential: PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: validBcryptFixture}},
 		{name: "unsupported scheme", id: "admin-1", username: "admin", credential: PasswordCredential{Scheme: "plain", Hash: "secret"}},
 		{name: "blank hash", id: "admin-1", username: "admin", credential: PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1}},
+		{name: "malformed bcrypt hash", id: "admin-1", username: "admin", credential: PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: "hash"}},
+	}
+	if _, err := NewAdminUser("admin-1", "admin", PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: validBcryptFixture}, time.Time{}); err == nil {
+		t.Fatal("zero creation time should be rejected")
 	}
 	for _, tt := range invalid {
 		t.Run(tt.name, func(t *testing.T) {
@@ -105,6 +111,9 @@ func TestAdminSessionLifecycleAndLoginAttemptValidation(t *testing.T) {
 	if _, err := NewLoginAttempt("admin", "not-an-ip", false, "bad_password", now); err == nil {
 		t.Fatal("invalid source IP should be rejected")
 	}
+	if _, err := NewLoginAttempt("admin", "127.0.0.1", false, "bad_password", time.Time{}); err == nil {
+		t.Fatal("zero login attempt time should be rejected")
+	}
 }
 
 func TestAdminSessionRotationRecordsLineage(t *testing.T) {
@@ -114,7 +123,11 @@ func TestAdminSessionRotationRecordsLineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	if err := session.Rotate(now.Add(time.Minute), "session-2"); err != nil {
+	replacement, err := NewSession("session-2", session.FamilyID, session.AdminUserID, sha256.Sum256([]byte("access-2")), sha256.Sum256([]byte("refresh-2")), now.Add(6*time.Minute), now.Add(time.Hour), now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("new replacement: %v", err)
+	}
+	if err := session.Rotate(now.Add(time.Minute), replacement); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 	if session.RotatedAt.IsZero() || session.RevokedAt.IsZero() || session.ReplacedBySessionID != "session-2" {
@@ -124,7 +137,7 @@ func TestAdminSessionRotationRecordsLineage(t *testing.T) {
 		t.Fatalf("rotated session lifecycle = %+v", session)
 	}
 	rotatedAt := session.RotatedAt
-	if err := session.Rotate(now.Add(2*time.Minute), "session-3"); err == nil {
+	if err := session.Rotate(now.Add(2*time.Minute), replacement); err == nil {
 		t.Fatal("second rotation should be rejected")
 	}
 	if !session.RotatedAt.Equal(rotatedAt) || session.ReplacedBySessionID != "session-2" {
@@ -135,15 +148,32 @@ func TestAdminSessionRotationRecordsLineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new expired fixture: %v", err)
 	}
-	if err := expired.Rotate(now.Add(2*time.Minute), "replacement"); err == nil {
+	expiredReplacement, err := NewSession("replacement", expired.FamilyID, expired.AdminUserID, sha256.Sum256([]byte("access-3")), sha256.Sum256([]byte("refresh-3")), now.Add(3*time.Minute), now.Add(time.Hour), now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("new expired replacement: %v", err)
+	}
+	if err := expired.Rotate(now.Add(2*time.Minute), expiredReplacement); err == nil {
 		t.Fatal("expired refresh session should not rotate")
+	}
+	crossFamily := replacement
+	crossFamily.ID = "cross-family"
+	crossFamily.FamilyID = "different-family"
+	fresh, _ := NewSession("fresh", "family-1", "admin-1", hash, sha256.Sum256([]byte("fresh-refresh")), now.Add(5*time.Minute), now.Add(time.Hour), now)
+	if err := fresh.Rotate(now.Add(time.Minute), crossFamily); err == nil {
+		t.Fatal("cross-family replacement should be rejected")
+	}
+	crossAdmin := replacement
+	crossAdmin.ID = "cross-admin"
+	crossAdmin.AdminUserID = "admin-2"
+	if err := fresh.Rotate(now.Add(time.Minute), crossAdmin); err == nil {
+		t.Fatal("cross-admin replacement should be rejected")
 	}
 }
 
 func TestAdminAuthJSONNeverSerializesCredentialHashes(t *testing.T) {
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
 	hash := sha256.Sum256([]byte("secret"))
-	user, err := NewAdminUser("admin-1", "admin", PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: "sensitive-password-hash"}, now)
+	user, err := NewAdminUser("admin-1", "admin", PasswordCredential{Scheme: PasswordSchemeBcryptSHA256V1, Hash: validBcryptFixture}, now)
 	if err != nil {
 		t.Fatalf("new user: %v", err)
 	}

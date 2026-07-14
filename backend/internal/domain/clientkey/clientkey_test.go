@@ -97,16 +97,36 @@ func TestClientKeyRejectsInvalidScopesLimitsAndLifecycle(t *testing.T) {
 }
 
 func TestClientKeyModelAuthorization(t *testing.T) {
-	all := ClientKey{ModelPolicy: ModelPolicyAll}
-	if !all.AllowsModel("anything", nil) {
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	hash := sha256.Sum256([]byte("secret"))
+	all, err := NewCredential(ClientKey{
+		ID: "all", Name: "All", Origin: OriginManaged, KeyHash: hash, KeyPrefix: "g2a_all",
+		ModelPolicy: ModelPolicyAll, CreatedAt: now, UpdatedAt: now,
+	}, nil)
+	if err != nil {
+		t.Fatalf("new all credential: %v", err)
+	}
+	if !all.AllowsModel("anything") {
 		t.Fatal("all policy should authorize any non-empty model")
 	}
-	allowlist := ClientKey{ModelPolicy: ModelPolicyAllowlist}
-	if !allowlist.AllowsModel("GROK-4.5", []string{"grok-4.5"}) {
+	allowlistKey := all.Key
+	allowlistKey.ID = "allowlist"
+	allowlistKey.Name = "Allowlist"
+	allowlistKey.ModelPolicy = ModelPolicyAllowlist
+	allowlist, err := NewCredential(allowlistKey, []string{"grok-4.5"})
+	if err != nil {
+		t.Fatalf("new allowlist credential: %v", err)
+	}
+	if !allowlist.AllowsModel("GROK-4.5") {
 		t.Fatal("allowlist comparison should be normalized")
 	}
-	if allowlist.AllowsModel("grok-3", []string{"grok-4.5"}) || allowlist.AllowsModel("", []string{"grok-4.5"}) {
+	if allowlist.AllowsModel("grok-3") || allowlist.AllowsModel("") {
 		t.Fatal("allowlist authorized an unscoped model")
+	}
+	returnedScopes := allowlist.Scopes()
+	returnedScopes[0] = "grok-3"
+	if allowlist.AllowsModel("grok-3") {
+		t.Fatal("mutating returned scopes changed authorization")
 	}
 }
 
@@ -122,5 +142,16 @@ func TestClientKeyJSONNeverSerializesKeyHash(t *testing.T) {
 	}
 	if _, found := payload["KeyHash"]; found {
 		t.Fatalf("key hash was serialized: %s", data)
+	}
+}
+
+func TestClientKeyRejectsZeroSecurityTimestamps(t *testing.T) {
+	hash := sha256.Sum256([]byte("secret"))
+	item := ClientKey{
+		ID: "key-1", Name: "Key", Origin: OriginManaged, KeyHash: hash,
+		KeyPrefix: "g2a_key", ModelPolicy: ModelPolicyAll,
+	}
+	if _, err := item.NormalizeAndValidate(nil); err == nil {
+		t.Fatal("zero created/updated timestamps should be rejected")
 	}
 }

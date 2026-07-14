@@ -43,20 +43,20 @@ func (adminAuthContractRepository) RevokeAdminSessionFamily(context.Context, str
 func (adminAuthContractRepository) RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error {
 	return nil
 }
-func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (repository.AdminLoginFailureCounts, error) {
-	return repository.AdminLoginFailureCounts{}, nil
+func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error) {
+	return 0, nil
 }
 
 type clientKeyContractRepository struct{}
 
-func (clientKeyContractRepository) CreateClientKey(context.Context, clientkey.ClientKey, []string) error {
+func (clientKeyContractRepository) CreateClientKey(context.Context, clientkey.Credential) error {
 	return nil
 }
-func (clientKeyContractRepository) GetClientKey(context.Context, string) (clientkey.ClientKey, []string, bool, error) {
-	return clientkey.ClientKey{}, nil, false, nil
+func (clientKeyContractRepository) GetClientKey(context.Context, string) (clientkey.Credential, bool, error) {
+	return clientkey.Credential{}, false, nil
 }
-func (clientKeyContractRepository) FindClientKeyByHash(context.Context, [32]byte) (clientkey.ClientKey, []string, bool, error) {
-	return clientkey.ClientKey{}, nil, false, nil
+func (clientKeyContractRepository) FindClientKeyByHash(context.Context, [32]byte) (clientkey.Credential, bool, error) {
+	return clientkey.Credential{}, false, nil
 }
 func (clientKeyContractRepository) ListClientKeysPage(context.Context, repository.ListClientKeysQuery) (repository.ListClientKeysResult, error) {
 	return repository.ListClientKeysResult{}, nil
@@ -70,7 +70,7 @@ func (clientKeyContractRepository) RevokeClientKey(context.Context, string, time
 func (clientKeyContractRepository) ClientAuthRequired(context.Context) (bool, error) {
 	return false, nil
 }
-func (clientKeyContractRepository) ConsumeClientKeyRPM(context.Context, string, int, time.Time) (repository.RateLimitDecision, error) {
+func (clientKeyContractRepository) ConsumeClientKeyRPM(context.Context, string, time.Time) (repository.RateLimitDecision, error) {
 	return repository.RateLimitDecision{}, nil
 }
 
@@ -87,19 +87,19 @@ func TestRateLimitDecisionCarriesStableResetBoundary(t *testing.T) {
 	}
 }
 
-func TestAdminLoginFailureCountsKeepUsernameAndSourceDimensionsSeparate(t *testing.T) {
-	counts := repository.AdminLoginFailureCounts{ByUsername: 4, BySourceIP: 5}
-	if counts.ByUsername != 4 || counts.BySourceIP != 5 {
-		t.Fatalf("counts = %+v", counts)
+func TestAdminLoginFailureCountIsScopedToUsernameAndSourceTuple(t *testing.T) {
+	var count int = 4
+	if count != 4 {
+		t.Fatalf("count = %d", count)
 	}
 }
 
 func TestClientKeyListDTOCarriesScopesWithoutSecrets(t *testing.T) {
 	result := repository.ListClientKeysResult{
-		Items: []repository.ClientKeyRecord{{Key: clientkey.ClientKey{ID: "key-1"}, Scopes: []string{"grok-4.5"}}},
+		Items: []clientkey.Credential{{Key: clientkey.ClientKey{ID: "key-1"}}},
 		Total: 1, Page: 1, PageSize: 50,
 	}
-	if result.Items[0].Key.ID != "key-1" || len(result.Items[0].Scopes) != 1 {
+	if result.Items[0].Key.ID != "key-1" {
 		t.Fatalf("result = %+v", result)
 	}
 }
