@@ -60,3 +60,24 @@ func TestPayloadAffinityKeyAndCompose(t *testing.T) {
 		t.Fatalf("compose aff only: %q", got)
 	}
 }
+
+func TestPromptCacheKeyStickyPriority(t *testing.T) {
+	if got := service.PromptCacheKeyFromPayload(nil); got != "" {
+		t.Fatalf("nil: %q", got)
+	}
+	if got := service.PromptCacheKeyFromPayload([]byte(`{"prompt_cache_key":" sess-1 "}`)); got != "sess-1" {
+		t.Fatalf("extract: %q", got)
+	}
+	// prompt_cache_key wins over affinity when no tenant header.
+	if got := service.ComposeStickyKeyParts("auth:shared", "sess-1", "aff:x"); got != "cache:sess-1" {
+		t.Fatalf("auth+cache: %q", got)
+	}
+	// tenant header + cache keeps isolation.
+	if got := service.ComposeStickyKeyParts("X-User-Id:u1", "sess-1", "aff:x"); got != "X-User-Id:u1|cache:sess-1" {
+		t.Fatalf("tenant+cache: %q", got)
+	}
+	// without cache, client + affinity still compose.
+	if got := service.ComposeStickyKeyParts("X-User-Id:u1", "", "aff:x"); got != "X-User-Id:u1|aff:x" {
+		t.Fatalf("tenant+aff: %q", got)
+	}
+}

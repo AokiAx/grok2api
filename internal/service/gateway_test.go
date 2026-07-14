@@ -461,3 +461,36 @@ func TestPoolUnavailableErrorString(t *testing.T) {
 		t.Fatal("empty error string")
 	}
 }
+
+func TestPoolUnavailableReasons(t *testing.T) {
+	store := &fakeStore{}
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(429, `{"code":"subscription:free-usage-exhausted"}`)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		upstream,
+		service.WithQuotaRetry(45*time.Minute),
+	)
+	_, err := gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	poolErr, ok := service.AsPoolUnavailable(err)
+	if !ok {
+		t.Fatalf("err=%v", err)
+	}
+	// After burning the only account on quota, pool is empty/quota (or circuit).
+	if poolErr.Reason != service.PoolReasonQuota && poolErr.Reason != service.PoolReasonCircuit {
+		t.Fatalf("reason=%q", poolErr.Reason)
+	}
+	if poolErr.Status != http.StatusTooManyRequests {
+		t.Fatalf("status=%d", poolErr.Status)
+	}
+
+	// No accounts at all.
+	gateway = service.NewGateway(scheduler.New(nil), store, upstream)
+	_, err = gateway.Chat(context.Background(), []byte(`{"stream":false}`), false)
+	poolErr, ok = service.AsPoolUnavailable(err)
+	if !ok || poolErr.Reason != service.PoolReasonEmpty {
+		t.Fatalf("empty: ok=%v err=%v reason=%q", ok, err, poolErr)
+	}
+}

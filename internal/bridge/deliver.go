@@ -3,6 +3,7 @@ package bridge
 import (
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/AokiAx/grok2api/internal/compat"
 )
@@ -135,5 +136,19 @@ func withJSONHeaders(result Result) Result {
 	}
 	result.Header.Del("Content-Length")
 	result.Header.Set("Content-Type", "application/json")
+	return result
+}
+
+func withCompatibilityWarnings(result Result, warnings []string) Result {
+	if len(warnings) == 0 {
+		return result
+	}
+	if result.Header == nil {
+		result.Header = make(http.Header)
+	}
+	// Do not overwrite an upstream-provided value.
+	if result.Header.Get("X-Grok2API-Compatibility-Warnings") == "" {
+		result.Header.Set("X-Grok2API-Compatibility-Warnings", strings.Join(warnings, ","))
+	}
 	return result
 }

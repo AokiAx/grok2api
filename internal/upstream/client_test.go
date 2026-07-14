@@ -16,6 +16,12 @@ import (
 )
 
 func TestClientSendsGrokCLIHeaders(t *testing.T) {
+	var (
+		agentID   string
+		sessionID string
+		reqID     string
+		convID    string
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
 			t.Errorf("authorization = %q", got)
@@ -26,8 +32,33 @@ func TestClientSendsGrokCLIHeaders(t *testing.T) {
 		if got := r.Header.Get("x-grok-client-version"); got != "0.2.93" {
 			t.Errorf("client version = %q", got)
 		}
+		if got := r.Header.Get("x-grok-client-identifier"); got != "grok-cli" {
+			t.Errorf("client identifier = %q", got)
+		}
+		if got := r.Header.Get("x-grok-client-surface"); got != "tui" {
+			t.Errorf("client surface = %q", got)
+		}
 		if got := r.Header.Get("x-grok-model-override"); got != "grok-test" {
 			t.Errorf("model override = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "xai-grok-build/0.2.93" {
+			t.Errorf("user-agent = %q", got)
+		}
+		if got := r.Header.Get("x-userid"); got != "user-1" {
+			t.Errorf("userid = %q", got)
+		}
+		agentID = r.Header.Get("x-grok-agent-id")
+		sessionID = r.Header.Get("x-grok-session-id")
+		reqID = r.Header.Get("x-grok-req-id")
+		convID = r.Header.Get("x-grok-conv-id")
+		if agentID == "" || sessionID == "" || reqID == "" || convID == "" {
+			t.Errorf("missing identity headers agent=%q session=%q req=%q conv=%q", agentID, sessionID, reqID, convID)
+		}
+		if got := r.Header.Get("x-grok-conversation-id"); got != convID {
+			t.Errorf("conversation-id = %q want %q", got, convID)
+		}
+		if got := r.Header.Get("traceparent"); !strings.HasPrefix(got, "00-") {
+			t.Errorf("traceparent = %q", got)
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -46,9 +77,10 @@ func TestClientSendsGrokCLIHeaders(t *testing.T) {
 	defer server.Close()
 
 	client := upstream.NewClient(server.URL+"/v1", "0.2.93", server.Client())
+	item := account.Account{ID: "acct-1", AccessToken: "access-token", UserID: "user-1"}
 	response, err := client.Chat(
 		context.Background(),
-		account.Account{AccessToken: "access-token"},
+		item,
 		[]byte(`{"model":"grok-test","stream":false}`),
 		false,
 	)
@@ -58,6 +90,84 @@ func TestClientSendsGrokCLIHeaders(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+
+	// Second request: prefer ctx conv-id for x-grok-conv-id.
+	var gotConv string
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConv = r.Header.Get("x-grok-conv-id")
+		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Errorf("stream Accept-Encoding = %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server2.Close()
+	client2 := upstream.NewClientWithOptions(server2.URL+"/v1", "0.2.93", server2.Client(), upstream.ClientOptions{
+		TokenAuth:        "xai-grok-cli",
+		ClientIdentifier: "custom-cli",
+		UserAgent:        "custom-ua/1",
+	})
+	response2, err := client2.Request(
+		upstream.WithConvID(context.Background(), "cache-key-abc"),
+		item,
+		http.MethodPost,
+		"/responses",
+		[]byte(`{"model":"grok-test","stream":true}`),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	defer response2.Body.Close()
+	if gotConv != "cache-key-abc" {
+		t.Fatalf("conv-id = %q", gotConv)
+	}
+}
+
+func TestClientStableIdentityAndStreamEncoding(t *testing.T) {
+	var firstAgent, firstSession, secondAgent, secondSession string
+	var acceptEncoding string
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			firstAgent = r.Header.Get("x-grok-agent-id")
+			firstSession = r.Header.Get("x-grok-session-id")
+			if got := r.Header.Get("x-grok-conv-id"); got != "sticky-conv" {
+				t.Errorf("conv-id = %q", got)
+			}
+		} else {
+			secondAgent = r.Header.Get("x-grok-agent-id")
+			secondSession = r.Header.Get("x-grok-session-id")
+			acceptEncoding = r.Header.Get("Accept-Encoding")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	client := upstream.NewClient(server.URL+"/v1", "0.2.93", server.Client())
+	item := account.Account{ID: "stable-1", AccessToken: "tok"}
+	ctx := upstream.WithConvID(context.Background(), "sticky-conv")
+	resp1, err := client.Request(ctx, item, http.MethodPost, "/responses", []byte(`{"model":"m"}`), false)
+	if err != nil {
+		t.Fatalf("req1: %v", err)
+	}
+	resp1.Body.Close()
+	resp2, err := client.Request(ctx, item, http.MethodPost, "/responses", []byte(`{"model":"m"}`), true)
+	if err != nil {
+		t.Fatalf("req2: %v", err)
+	}
+	resp2.Body.Close()
+	if firstAgent == "" || firstAgent != secondAgent {
+		t.Fatalf("agent identity unstable: %q vs %q", firstAgent, secondAgent)
+	}
+	if firstSession == "" || firstSession != secondSession {
+		t.Fatalf("session identity unstable: %q vs %q", firstSession, secondSession)
+	}
+	if acceptEncoding != "identity" {
+		t.Fatalf("stream Accept-Encoding = %q", acceptEncoding)
 	}
 }
 

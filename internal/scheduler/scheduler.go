@@ -12,6 +12,63 @@ import (
 
 var ErrNoReadyAccount = errors.New("no ready account")
 
+// SelectionReason explains why Acquire could not hand out a lease.
+// SelectionError describes why the CLI account pool could not provide a lease.
+type SelectionReason string
+
+const (
+	SelectionNoReady    SelectionReason = "no_ready"
+	SelectionSaturated  SelectionReason = "saturated"
+	SelectionQuota      SelectionReason = "quota"
+	SelectionCooling    SelectionReason = "cooling"
+	SelectionAuth       SelectionReason = "auth"
+	SelectionValidating SelectionReason = "validating"
+)
+
+// SelectionError is returned when no account can be leased right now.
+// errors.Is(err, ErrNoReadyAccount) remains true for callers that only check emptiness.
+type SelectionError struct {
+	Reason     SelectionReason
+	RetryAfter time.Duration
+	// Ready is the ready-pool size at failure time (may be >0 when saturated).
+	Ready int
+	// Unavailable is the unavailable-pool size at failure time.
+	Unavailable int
+}
+
+func (e *SelectionError) Error() string {
+	if e == nil {
+		return "no ready account"
+	}
+	switch e.Reason {
+	case SelectionSaturated:
+		return "ready accounts are at concurrency capacity"
+	case SelectionQuota:
+		return "ready account pool exhausted by quota"
+	case SelectionCooling:
+		return "ready account pool cooling down"
+	case SelectionAuth:
+		return "ready account pool blocked by auth failures"
+	case SelectionValidating:
+		return "ready account pool validating"
+	default:
+		return "no ready account"
+	}
+}
+
+func (e *SelectionError) Is(target error) bool {
+	return target == ErrNoReadyAccount
+}
+
+// AsSelectionError unwraps a SelectionError.
+func AsSelectionError(err error) (*SelectionError, bool) {
+	var target *SelectionError
+	if errors.As(err, &target) {
+		return target, true
+	}
+	return nil, false
+}
+
 const defaultStickyTTL = 30 * time.Minute
 
 // Strategy selects among free ready accounts (CLIProxyAPI-style).
@@ -167,8 +224,9 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 	for {
 		s.mu.Lock()
 		if len(s.ready) == 0 {
+			err := s.selectionFailureLocked(time.Now())
 			s.mu.Unlock()
-			return nil, ErrNoReadyAccount
+			return nil, err
 		}
 		now := time.Now()
 		if s.stickyOn && stickyKey != "" {
@@ -201,10 +259,17 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 			s.mu.Unlock()
 			return lease, nil
 		}
+		// No free eligible account right now (concurrency full and/or hot set full).
+		// Snapshot a saturated failure in case the waiter times out.
+		saturated := s.selectionSaturatedLocked(now)
 		s.mu.Unlock()
 
 		select {
 		case <-ctx.Done():
+			if saturated != nil {
+				// Prefer structured capacity signal over bare context deadline.
+				return nil, saturated
+			}
 			return nil, ctx.Err()
 		case <-s.notify:
 		}
@@ -330,6 +395,85 @@ func (s *Scheduler) bumpStickyLocked(key, accountID string, now time.Time) {
 	}
 }
 
+func (s *Scheduler) selectionFailureLocked(now time.Time) *SelectionError {
+	ready, unavailable, reasons := s.statusLocked()
+	reason := SelectionNoReady
+	// Dominant unavailable reason when the ready pool is empty.
+	if unavailable > 0 {
+		switch {
+		case reasons[account.ReasonQuota] > 0 && reasons[account.ReasonQuota] >= reasons[account.ReasonCooldown] &&
+			reasons[account.ReasonQuota] >= reasons[account.ReasonAuth] &&
+			reasons[account.ReasonQuota] >= reasons[account.ReasonValidating]:
+			reason = SelectionQuota
+		case reasons[account.ReasonCooldown] > 0 && reasons[account.ReasonCooldown] >= reasons[account.ReasonAuth] &&
+			reasons[account.ReasonCooldown] >= reasons[account.ReasonValidating]:
+			reason = SelectionCooling
+		case reasons[account.ReasonAuth] > 0 && reasons[account.ReasonAuth] >= reasons[account.ReasonValidating]:
+			reason = SelectionAuth
+		case reasons[account.ReasonValidating] > 0:
+			reason = SelectionValidating
+		}
+	}
+	return &SelectionError{
+		Reason:      reason,
+		RetryAfter:  s.retryAfterLocked(now),
+		Ready:       ready,
+		Unavailable: unavailable,
+	}
+}
+
+func (s *Scheduler) selectionSaturatedLocked(now time.Time) *SelectionError {
+	ready, unavailable, _ := s.statusLocked()
+	if ready == 0 {
+		return s.selectionFailureLocked(now)
+	}
+	// Ready accounts exist but none are free/eligible.
+	return &SelectionError{
+		Reason:      SelectionSaturated,
+		RetryAfter:  time.Second,
+		Ready:       ready,
+		Unavailable: unavailable,
+	}
+}
+
+func (s *Scheduler) retryAfterLocked(now time.Time) time.Duration {
+	var earliest time.Time
+	for _, item := range s.accounts {
+		if item == nil || item.Pool != account.PoolUnavailable || item.RetryAt.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || item.RetryAt.Before(earliest) {
+			earliest = item.RetryAt
+		}
+	}
+	if earliest.IsZero() {
+		return time.Second
+	}
+	d := earliest.Sub(now)
+	if d < time.Second {
+		return time.Second
+	}
+	return d
+}
+
+func (s *Scheduler) statusLocked() (int, int, map[account.UnavailableReason]int) {
+	reasons := make(map[account.UnavailableReason]int)
+	ready := 0
+	unavailable := 0
+	for _, item := range s.accounts {
+		if item == nil {
+			continue
+		}
+		if item.Pool == account.PoolReady {
+			ready++
+			continue
+		}
+		unavailable++
+		reasons[item.UnavailableReason]++
+	}
+	return ready, unavailable, reasons
+}
+
 func (s *Scheduler) ReadyCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -339,18 +483,7 @@ func (s *Scheduler) ReadyCount() int {
 func (s *Scheduler) Status() (int, int, map[account.UnavailableReason]int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	reasons := make(map[account.UnavailableReason]int)
-	ready := 0
-	unavailable := 0
-	for _, item := range s.accounts {
-		if item.Pool == account.PoolReady {
-			ready++
-			continue
-		}
-		unavailable++
-		reasons[item.UnavailableReason]++
-	}
-	return ready, unavailable, reasons
+	return s.statusLocked()
 }
 
 // ActiveByID returns in-memory lease counts keyed by account ID.

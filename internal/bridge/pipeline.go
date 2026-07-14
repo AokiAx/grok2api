@@ -118,7 +118,7 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 	if p == nil || p.Gateway == nil {
 		return Result{}, badGateway("gateway unavailable", nil)
 	}
-	upstreamBody, err := compat.FinalizeResponsesUpstream(req.Body, p.hintsFor(req.UpstreamModel))
+	upstreamBody, warnings, err := compat.FinalizeResponsesUpstreamDetailed(req.Body, p.hintsFor(req.UpstreamModel))
 	if err != nil {
 		return Result{}, invalidRequest("Invalid request payload", err)
 	}
@@ -135,6 +135,7 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 	if result.Status >= http.StatusBadRequest {
 		return materializeErrorResult(result), nil
 	}
+	result = withCompatibilityWarnings(result, warnings)
 	return p.deliver(result, req)
 }
 

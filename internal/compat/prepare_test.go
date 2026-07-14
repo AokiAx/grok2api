@@ -267,3 +267,137 @@ func TestExtractCompletedResponseBareJSON(t *testing.T) {
 		t.Fatalf("bare json should pass through: %s", out)
 	}
 }
+
+func TestResponseFormatPromotedToTextFormat(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"answer",
+				"schema":{"type":"object","properties":{"ok":{"type":"boolean"}}},
+				"strict":true
+			}
+		}
+	}`)
+	out, _, _, err := compat.NormalizeResponsesRequest(body, "fallback")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := payload["response_format"]; ok {
+		t.Fatalf("response_format should be promoted away: %#v", payload)
+	}
+	textObj, ok := payload["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing text: %#v", payload)
+	}
+	format, ok := textObj["format"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing text.format: %#v", textObj)
+	}
+	if format["type"] != "json_schema" {
+		t.Fatalf("type=%#v", format["type"])
+	}
+	if format["name"] != "answer" {
+		t.Fatalf("name=%#v", format["name"])
+	}
+	if format["json_schema"] != nil {
+		t.Fatalf("nested json_schema wrapper should be flattened: %#v", format)
+	}
+	if format["schema"] == nil {
+		t.Fatalf("schema missing: %#v", format)
+	}
+
+	// Finalize must keep text.format (allowed field) and still drop response_format.
+	final, err := compat.FinalizeResponsesUpstream(out, compat.ModelHints{})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if err := json.Unmarshal(final, &payload); err != nil {
+		t.Fatalf("decode final: %v", err)
+	}
+	if _, ok := payload["response_format"]; ok {
+		t.Fatal("response_format leaked past finalize")
+	}
+	textObj, ok = payload["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text dropped by finalize: %#v", payload)
+	}
+	format, ok = textObj["format"].(map[string]any)
+	if !ok || format["type"] != "json_schema" {
+		t.Fatalf("final format=%#v", textObj)
+	}
+}
+
+func TestChatToResponsesPromotesResponseFormat(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"response_format":{"type":"json_object"}
+	}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	format := payload["text"].(map[string]any)["format"].(map[string]any)
+	if format["type"] != "json_object" {
+		t.Fatalf("format=%#v", format)
+	}
+}
+
+func TestExistingTextFormatNotOverwritten(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[{"role":"user","content":"hi"}],
+		"text":{"format":{"type":"json_schema","name":"keep","schema":{"type":"object"}}},
+		"response_format":{"type":"json_object"}
+	}`)
+	out, err := compat.StripUnknownResponsesFields(body)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := payload["response_format"]; ok {
+		t.Fatal("response_format should be dropped")
+	}
+	format := payload["text"].(map[string]any)["format"].(map[string]any)
+	if format["name"] != "keep" {
+		t.Fatalf("existing text.format overwritten: %#v", format)
+	}
+}
+
+func TestFinalizeCompatibilityWarnings(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":[],"external_web_access":true,"store":false,"response_format":{"type":"json_object"}}`)
+	out, warnings, err := compat.FinalizeResponsesUpstreamDetailed(body, compat.ModelHints{})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := payload["external_web_access"]; ok {
+		t.Fatal("external_web_access should be stripped")
+	}
+	if payload["text"] == nil {
+		t.Fatalf("response_format should promote to text: %#v", payload)
+	}
+	joined := strings.Join(warnings, ",")
+	for _, code := range []string{"web_search_controls_downgraded", "response_format_promoted", "unsupported_field_stripped"} {
+		if !strings.Contains(joined, code) {
+			t.Fatalf("missing warning %s in %v", code, warnings)
+		}
+	}
+}

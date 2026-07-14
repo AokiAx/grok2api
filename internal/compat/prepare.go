@@ -90,6 +90,7 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 			input["backend_search"] = true
 		}
 	}
+	_ = promoteResponseFormat(input)
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("encode responses request: %w", err)
@@ -131,11 +132,16 @@ func PrepareResponsesFromAnthropicWithOptions(payload []byte, opts AnthropicToRe
 //  4. force stream:true so the gateway can always read SSE (non-stream clients
 //     are aggregated after the fact)
 func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error) {
-	// Strip first so client extras (external_web_access, store, …) never reach
-	// EnsureBackendSearch / upstream. Map external_web_access → backend_search inside strip.
-	body, err := StripUnknownResponsesFields(payload)
+	body, _, err := FinalizeResponsesUpstreamDetailed(payload, hints)
+	return body, err
+}
+
+// FinalizeResponsesUpstreamDetailed is FinalizeResponsesUpstream plus compatibility
+// warning codes for the X-Grok2API-Compatibility-Warnings response header.
+func FinalizeResponsesUpstreamDetailed(payload []byte, hints ModelHints) ([]byte, []string, error) {
+	body, warnings, err := SanitizeResponsesWithWarnings(payload)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if ensured, ensureErr := EnsureBackendSearch(body, hints.SupportsBackendSearch); ensureErr == nil {
 		body = ensured
@@ -143,15 +149,35 @@ func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error)
 	if withTools, toolErr := EnsureDefaultSearchTools(body, hints.SupportsBackendSearch); toolErr == nil {
 		body = withTools
 	}
-	// Second pass in case Ensure* reintroduced nothing unexpected / re-sanitize tools.
-	if stripped, stripErr := StripUnknownResponsesFields(body); stripErr == nil {
+	if stripped, more, stripErr := SanitizeResponsesWithWarnings(body); stripErr == nil {
 		body = stripped
+		warnings = mergeWarningCodes(warnings, more)
 	}
 	forced, err := SetJSONStreamFlag(body, true)
 	if err != nil {
-		return nil, err
+		return nil, warnings, err
 	}
-	return forced, nil
+	return forced, warnings, nil
+}
+
+func mergeWarningCodes(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	out := append([]string(nil), a...)
+	for _, code := range b {
+		found := false
+		for _, existing := range out {
+			if existing == code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, code)
+		}
+	}
+	return out
 }
 
 // ExtractCompletedResponse pulls the final Responses object from an SSE stream

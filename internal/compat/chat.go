@@ -90,6 +90,14 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 	if effort := extractReasoningEffort(input); effort != "" {
 		output["reasoning_effort"] = effort
 	}
+	// Structured output: Chat response_format → Responses text.format.
+	if value, ok := input["text"]; ok {
+		output["text"] = value
+	}
+	if value, ok := input["response_format"]; ok {
+		output["response_format"] = value
+	}
+	_ = promoteResponseFormat(output)
 
 	encoded, err := json.Marshal(output)
 	if err != nil {

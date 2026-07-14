@@ -39,6 +39,19 @@ func StickyKeyFromRequest(request *http.Request) string {
 	return ""
 }
 
+// PromptCacheKeyFromPayload extracts the official OpenAI/Grok prompt_cache_key
+// used for account sticky and upstream x-grok-conv-id continuity.
+func PromptCacheKeyFromPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(asString(body["prompt_cache_key"]))
+}
+
 // PayloadAffinityKey fingerprints stable request prefix fields (model,
 // instructions, tool names) so continuous sessions with the same tools/system
 // stick to one Grok account even when many users share one API key.
@@ -118,16 +131,40 @@ func PayloadAffinityKey(payload []byte) string {
 
 // ComposeStickyKey merges client identity and payload affinity.
 func ComposeStickyKey(clientKey, affinityKey string) string {
+	return ComposeStickyKeyParts(clientKey, "", affinityKey)
+}
+
+// ComposeStickyKeyParts merges client identity, official prompt_cache_key, and
+// payload affinity. Session segment priority:
+//
+//	prompt_cache_key > client headers/auth > payload affinity
+//
+// When both a non-auth client key and prompt_cache_key exist they are joined so
+// multi-tenant deployments behind one API key still isolate tenants.
+func ComposeStickyKeyParts(clientKey, promptCacheKey, affinityKey string) string {
 	clientKey = strings.TrimSpace(clientKey)
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
 	affinityKey = strings.TrimSpace(affinityKey)
+
+	session := ""
 	switch {
-	case clientKey != "" && affinityKey != "":
-		return clientKey + "|" + affinityKey
+	case promptCacheKey != "":
+		session = "cache:" + promptCacheKey
 	case clientKey != "":
-		return clientKey
+		session = clientKey
+	case affinityKey != "":
+		session = affinityKey
 	default:
-		return affinityKey
+		return ""
 	}
+
+	if promptCacheKey != "" && clientKey != "" && !strings.HasPrefix(clientKey, "auth:") {
+		return clientKey + "|" + session
+	}
+	if promptCacheKey == "" && clientKey != "" && affinityKey != "" && session == clientKey {
+		return clientKey + "|" + affinityKey
+	}
+	return session
 }
 
 func asString(value any) string {

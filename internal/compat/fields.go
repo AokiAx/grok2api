@@ -55,19 +55,26 @@ var codexRejectedFields = []string{
 
 // StripUnknownResponsesFields removes fields not in the Responses whitelist.
 func StripUnknownResponsesFields(payload []byte) ([]byte, error) {
+	body, _, err := SanitizeResponsesWithWarnings(payload)
+	return body, err
+}
+
+// SanitizeResponsesWithWarnings strips unknown fields and returns stable
+// compatibility warning codes for intentional protocol downgrades.
+func SanitizeResponsesWithWarnings(payload []byte) ([]byte, []string, error) {
 	var input map[string]any
 	if err := json.Unmarshal(payload, &input); err != nil {
-		return nil, fmt.Errorf("decode responses request: %w", err)
+		return nil, nil, fmt.Errorf("decode responses request: %w", err)
 	}
-	changed := sanitizeResponsesMap(input)
+	changed, warnings := sanitizeResponsesMap(input)
 	if !changed {
-		return payload, nil
+		return payload, warnings, nil
 	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("encode responses request: %w", err)
+		return nil, nil, fmt.Errorf("encode responses request: %w", err)
 	}
-	return encoded, nil
+	return encoded, warnings, nil
 }
 
 // sanitizeResponsesMap mutates input in place: maps client web-access flags onto
@@ -75,14 +82,24 @@ func StripUnknownResponsesFields(payload []byte) ([]byte, error) {
 //
 // Also re-sanitizes tools[] so nested Codex extras (web_search.external_web_access,
 // search_context_size, local_shell, …) never reach Grok even if prepare was skipped.
-func sanitizeResponsesMap(input map[string]any) bool {
+func sanitizeResponsesMap(input map[string]any) (bool, []string) {
 	changed := false
+	var warnings []string
+	warn := func(code string) {
+		for _, existing := range warnings {
+			if existing == code {
+				return
+			}
+		}
+		warnings = append(warnings, code)
+	}
 
 	// Codex / OpenAI clients send external_web_access; Grok uses backend_search.
 	if raw, ok := input["external_web_access"]; ok {
 		if _, exists := input["backend_search"]; !exists {
 			input["backend_search"] = truthy(raw)
 			changed = true
+			warn("web_search_controls_downgraded")
 		}
 		delete(input, "external_web_access")
 		changed = true
@@ -123,10 +140,17 @@ func sanitizeResponsesMap(input map[string]any) bool {
 		changed = true
 	}
 
+	// Chat Completions / legacy Responses clients send response_format; Grok wants text.format.
+	if promoted := promoteResponseFormat(input); promoted {
+		changed = true
+		warn("response_format_promoted")
+	}
+
 	for _, key := range codexRejectedFields {
 		if _, ok := input[key]; ok {
 			delete(input, key)
 			changed = true
+			warn("unsupported_field_stripped")
 		}
 	}
 
@@ -136,7 +160,7 @@ func sanitizeResponsesMap(input map[string]any) bool {
 			changed = true
 		}
 	}
-	return changed
+	return changed, warnings
 }
 
 // stripUnsupportedReasoningNone removes reasoning_effort/reasoning.effort when
@@ -159,6 +183,162 @@ func stripUnsupportedReasoningNone(input map[string]any) bool {
 		}
 	}
 	return changed
+}
+
+// promoteResponseFormat maps OpenAI Chat Completions response_format onto
+// Responses text.format and unwraps nested json_schema wrappers.
+// Returns true when the request map was modified.
+func promoteResponseFormat(input map[string]any) bool {
+	if input == nil {
+		return false
+	}
+	raw, hasFormat := input["response_format"]
+	if !hasFormat {
+		// Still normalize an existing text.format.json_schema wrapper if present.
+		return normalizeTextFormatInPlace(input)
+	}
+	delete(input, "response_format")
+	changed := true
+
+	// Prefer existing text.format when client already sent Responses shape.
+	if textObj, ok := input["text"].(map[string]any); ok {
+		if format := textObj["format"]; format != nil && !isEmptyJSONValue(format) {
+			_ = normalizeTextFormatInPlace(input)
+			return true
+		}
+	}
+
+	formatted, err := normalizeResponseFormatValue(raw)
+	if err != nil || formatted == nil {
+		// Drop unusable response_format rather than 422 upstream.
+		return true
+	}
+	textObj, _ := input["text"].(map[string]any)
+	if textObj == nil {
+		textObj = map[string]any{}
+	}
+	textObj["format"] = formatted
+	input["text"] = textObj
+	_ = normalizeTextFormatInPlace(input)
+	return changed
+}
+
+func normalizeTextFormatInPlace(input map[string]any) bool {
+	textObj, ok := input["text"].(map[string]any)
+	if !ok {
+		return false
+	}
+	format, ok := textObj["format"].(map[string]any)
+	if !ok {
+		return false
+	}
+	normalized, err := normalizeResponseFormatValue(format)
+	if err != nil || normalized == nil {
+		return false
+	}
+	// Compare shallowly via JSON.
+	before, _ := json.Marshal(format)
+	after, _ := json.Marshal(normalized)
+	if string(before) == string(after) {
+		return false
+	}
+	textObj["format"] = normalized
+	input["text"] = textObj
+	return true
+}
+
+// normalizeResponseFormatValue converts Chat-style response_format (or a
+// Responses text.format object) into a flat Grok text.format value.
+func normalizeResponseFormatValue(raw any) (map[string]any, error) {
+	format, ok := raw.(map[string]any)
+	if !ok {
+		// Allow json.RawMessage-like []byte / string JSON.
+		switch typed := raw.(type) {
+		case json.RawMessage:
+			if err := json.Unmarshal(typed, &format); err != nil {
+				return nil, err
+			}
+		case []byte:
+			if err := json.Unmarshal(typed, &format); err != nil {
+				return nil, err
+			}
+		case string:
+			if err := json.Unmarshal([]byte(typed), &format); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("response_format must be an object")
+		}
+	}
+	if format == nil {
+		return nil, fmt.Errorf("empty response_format")
+	}
+
+	// Clone so we do not mutate caller maps unexpectedly.
+	out := make(map[string]any, len(format)+4)
+	for key, value := range format {
+		out[key] = value
+	}
+
+	typ := strings.ToLower(strings.TrimSpace(stringValue(out["type"])))
+	if typ == "" {
+		// Bare schema object without type — treat as json_schema if schema present.
+		if out["schema"] != nil || out["json_schema"] != nil {
+			typ = "json_schema"
+			out["type"] = "json_schema"
+		}
+	}
+
+	if typ == "json_schema" {
+		// Chat Completions wraps fields under response_format.json_schema.
+		if nested, ok := out["json_schema"].(map[string]any); ok {
+			flat := map[string]any{"type": "json_schema"}
+			for key, value := range nested {
+				flat[key] = value
+			}
+			// Preserve top-level name/strict/schema if nested omitted them.
+			for _, key := range []string{"name", "schema", "strict", "description"} {
+				if flat[key] == nil && out[key] != nil {
+					flat[key] = out[key]
+				}
+			}
+			out = flat
+		}
+		// Ensure type after flatten.
+		out["type"] = "json_schema"
+		if name := strings.TrimSpace(stringValue(out["name"])); name == "" {
+			out["name"] = "response"
+		}
+		if _, ok := out["strict"]; !ok {
+			out["strict"] = true
+		}
+	}
+
+	if typ == "json_object" || typ == "text" {
+		out = map[string]any{"type": typ}
+	}
+	return out, nil
+}
+
+func isEmptyJSONValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) == ""
+	case map[string]any:
+		return len(typed) == 0
+	case []any:
+		return len(typed) == 0
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return false
+		}
+		trimmed := strings.TrimSpace(string(encoded))
+		return trimmed == "" || trimmed == "null" || trimmed == `""`
+	}
 }
 
 // EnsureBackendSearch sets backend_search when the model supports native search

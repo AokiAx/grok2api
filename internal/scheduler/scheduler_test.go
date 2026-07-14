@@ -2,6 +2,7 @@ package scheduler_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -446,5 +447,49 @@ func TestActiveByIDReturnsLiveLeaseCounts(t *testing.T) {
 	lease.Release()
 	if len(s.ActiveByID()) != 0 {
 		t.Fatalf("active after release = %#v", s.ActiveByID())
+	}
+}
+
+func TestSelectionErrorReasons(t *testing.T) {
+	// Empty pool → no_ready (or quota if only unavailable quota accounts).
+	s := scheduler.New(nil)
+	_, err := s.Acquire(context.Background())
+	sel, ok := scheduler.AsSelectionError(err)
+	if !ok {
+		t.Fatalf("err=%v want SelectionError", err)
+	}
+	if sel.Reason != scheduler.SelectionNoReady {
+		t.Fatalf("reason=%q", sel.Reason)
+	}
+	if !errors.Is(err, scheduler.ErrNoReadyAccount) {
+		t.Fatal("expected errors.Is ErrNoReadyAccount")
+	}
+
+	s = scheduler.New([]account.Account{{
+		ID: "q", Pool: account.PoolUnavailable, UnavailableReason: account.ReasonQuota,
+		RetryAt: time.Now().Add(time.Hour), MaxActive: 1,
+	}})
+	_, err = s.Acquire(context.Background())
+	sel, ok = scheduler.AsSelectionError(err)
+	if !ok || sel.Reason != scheduler.SelectionQuota {
+		t.Fatalf("quota reason: ok=%v err=%v sel=%#v", ok, err, sel)
+	}
+	if sel.RetryAfter < time.Second {
+		t.Fatalf("retry after %s", sel.RetryAfter)
+	}
+
+	// Saturated: ready accounts exist but all busy / hot set full.
+	s = scheduler.New([]account.Account{readyAccount("a")}).ApplyActiveSize(1)
+	lease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer lease.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err = s.Acquire(ctx)
+	sel, ok = scheduler.AsSelectionError(err)
+	if !ok || sel.Reason != scheduler.SelectionSaturated {
+		t.Fatalf("saturated: ok=%v err=%v sel=%#v", ok, err, sel)
 	}
 }

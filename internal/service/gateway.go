@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,9 +41,12 @@ type Gateway struct {
 	// maxAttempts caps how many accounts one request may park while rotating.
 	// Default 3 — never equal to ReadyCount() (that burns the whole pool).
 	maxAttempts int
-	now         func() time.Time
-	circuitMu   sync.Mutex
-	circuit     CircuitStatus
+	// acquireTimeout bounds how long AcquireSticky may wait for capacity.
+	// Zero means no extra timeout (use request context only).
+	acquireTimeout time.Duration
+	now            func() time.Time
+	circuitMu      sync.Mutex
+	circuit        CircuitStatus
 }
 
 type CircuitStatus struct {
@@ -76,6 +80,13 @@ func WithValidatingRetry(duration time.Duration) Option {
 func WithMaxAttempts(n int) Option {
 	return func(gateway *Gateway) {
 		gateway.maxAttempts = n
+	}
+}
+
+// WithAcquireTimeout bounds waiting for a free account lease.
+func WithAcquireTimeout(duration time.Duration) Option {
+	return func(gateway *Gateway) {
+		gateway.acquireTimeout = duration
 	}
 }
 
@@ -134,12 +145,35 @@ func (g *Gateway) Request(
 
 	attempted := 0
 	quotaFailures := 0
-	stickyKey := ComposeStickyKey(requestctx.StickyKey(ctx), PayloadAffinityKey(payload))
+	promptCacheKey := PromptCacheKeyFromPayload(payload)
+	stickyKey := ComposeStickyKeyParts(
+		requestctx.StickyKey(ctx),
+		promptCacheKey,
+		PayloadAffinityKey(payload),
+	)
+	// Prefer official prompt_cache_key for upstream x-grok-conv-id continuity.
+	if promptCacheKey != "" && strings.TrimSpace(upstream.ConvIDFrom(ctx)) == "" {
+		ctx = upstream.WithConvID(ctx, promptCacheKey)
+	}
 	for range attempts {
-		lease, err := g.scheduler.AcquireSticky(ctx, stickyKey)
+		acquireCtx := ctx
+		var cancel context.CancelFunc
+		if g.acquireTimeout > 0 {
+			acquireCtx, cancel = context.WithTimeout(ctx, g.acquireTimeout)
+		}
+		lease, err := g.scheduler.AcquireSticky(acquireCtx, stickyKey)
+		if cancel != nil {
+			cancel()
+		}
 		if err != nil {
 			if errors.Is(err, scheduler.ErrNoReadyAccount) {
-				return ChatResult{}, g.poolUnavailable()
+				return ChatResult{}, g.poolUnavailableFrom(err)
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return ChatResult{}, g.poolUnavailableFrom(&scheduler.SelectionError{
+					Reason:     scheduler.SelectionSaturated,
+					RetryAfter: time.Second,
+				})
 			}
 			return ChatResult{}, fmt.Errorf("acquire account: %w", err)
 		}
@@ -238,6 +272,9 @@ func (g *Gateway) Request(
 	}
 	if attempted > 0 && quotaFailures == attempted {
 		g.openQuotaCircuit()
+		if err := g.quotaCircuitError(); err != nil {
+			return ChatResult{}, err
+		}
 	}
 
 	return ChatResult{}, g.poolUnavailable()
@@ -295,7 +332,12 @@ func (g *Gateway) quotaCircuitError() *PoolUnavailableError {
 	if retryAfter < time.Second {
 		retryAfter = time.Second
 	}
-	return &PoolUnavailableError{Status: http.StatusTooManyRequests, RetryAfter: retryAfter}
+	return &PoolUnavailableError{
+		Status:     http.StatusTooManyRequests,
+		RetryAfter: retryAfter,
+		Reason:     PoolReasonCircuit,
+		Message:    "quota circuit open; retry later",
+	}
 }
 
 func (g *Gateway) openQuotaCircuit() {
@@ -384,13 +426,50 @@ func (r *leaseReadCloser) Close() error {
 	return closeErr
 }
 
+// PoolUnavailableReason is a client-facing selection failure code.
+type PoolUnavailableReason string
+
+const (
+	PoolReasonEmpty      PoolUnavailableReason = "no_ready"
+	PoolReasonSaturated  PoolUnavailableReason = "saturated"
+	PoolReasonQuota      PoolUnavailableReason = "quota"
+	PoolReasonCooling    PoolUnavailableReason = "cooling"
+	PoolReasonAuth       PoolUnavailableReason = "auth"
+	PoolReasonValidating PoolUnavailableReason = "validating"
+	PoolReasonCircuit    PoolUnavailableReason = "quota_circuit"
+)
+
+// PoolUnavailableError is returned when the gateway cannot lease a usable account.
 type PoolUnavailableError struct {
 	Status     int
 	RetryAfter time.Duration
+	Reason     PoolUnavailableReason
+	Message    string
 }
 
 func (e *PoolUnavailableError) Error() string {
-	return "ready account pool is empty"
+	if e == nil {
+		return "ready account pool is empty"
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	switch e.Reason {
+	case PoolReasonSaturated:
+		return "ready accounts are at concurrency capacity"
+	case PoolReasonQuota:
+		return "no ready accounts (quota exhausted)"
+	case PoolReasonCooling:
+		return "no ready accounts (cooling down)"
+	case PoolReasonAuth:
+		return "no ready accounts (auth failures)"
+	case PoolReasonValidating:
+		return "no ready accounts (validating)"
+	case PoolReasonCircuit:
+		return "quota circuit open; retry later"
+	default:
+		return "ready account pool is empty"
+	}
 }
 
 func AsPoolUnavailable(err error) (*PoolUnavailableError, bool) {
@@ -400,6 +479,13 @@ func AsPoolUnavailable(err error) (*PoolUnavailableError, bool) {
 }
 
 func (g *Gateway) poolUnavailable() *PoolUnavailableError {
+	return g.poolUnavailableFrom(nil)
+}
+
+func (g *Gateway) poolUnavailableFrom(err error) *PoolUnavailableError {
+	if sel, ok := scheduler.AsSelectionError(err); ok && sel != nil {
+		return mapSelectionError(sel)
+	}
 	retryAfter := g.quotaRetry
 	if earliest := g.scheduler.EarliestRetry(); !earliest.IsZero() {
 		retryAfter = earliest.Sub(g.now())
@@ -407,8 +493,61 @@ func (g *Gateway) poolUnavailable() *PoolUnavailableError {
 			retryAfter = time.Second
 		}
 	}
-	return &PoolUnavailableError{
-		Status:     http.StatusTooManyRequests,
-		RetryAfter: retryAfter,
+	// Infer reason from pool status when acquire did not return a SelectionError.
+	_, _, reasons := g.scheduler.Status()
+	reason := PoolReasonEmpty
+	switch {
+	case reasons[account.ReasonQuota] > 0:
+		reason = PoolReasonQuota
+	case reasons[account.ReasonCooldown] > 0:
+		reason = PoolReasonCooling
+	case reasons[account.ReasonAuth] > 0:
+		reason = PoolReasonAuth
+	case reasons[account.ReasonValidating] > 0:
+		reason = PoolReasonValidating
 	}
+	status := http.StatusServiceUnavailable
+	if reason == PoolReasonQuota {
+		status = http.StatusTooManyRequests
+	}
+	return &PoolUnavailableError{
+		Status:     status,
+		RetryAfter: retryAfter,
+		Reason:     reason,
+	}
+}
+
+func mapSelectionError(sel *scheduler.SelectionError) *PoolUnavailableError {
+	retryAfter := sel.RetryAfter
+	if retryAfter < time.Second {
+		retryAfter = time.Second
+	}
+	out := &PoolUnavailableError{
+		RetryAfter: retryAfter,
+		Message:    sel.Error(),
+	}
+	switch sel.Reason {
+	case scheduler.SelectionSaturated:
+		out.Reason = PoolReasonSaturated
+		out.Status = http.StatusServiceUnavailable
+		if retryAfter < 5*time.Second {
+			out.RetryAfter = time.Second
+		}
+	case scheduler.SelectionQuota:
+		out.Reason = PoolReasonQuota
+		out.Status = http.StatusTooManyRequests
+	case scheduler.SelectionCooling:
+		out.Reason = PoolReasonCooling
+		out.Status = http.StatusServiceUnavailable
+	case scheduler.SelectionAuth:
+		out.Reason = PoolReasonAuth
+		out.Status = http.StatusServiceUnavailable
+	case scheduler.SelectionValidating:
+		out.Reason = PoolReasonValidating
+		out.Status = http.StatusServiceUnavailable
+	default:
+		out.Reason = PoolReasonEmpty
+		out.Status = http.StatusServiceUnavailable
+	}
+	return out
 }

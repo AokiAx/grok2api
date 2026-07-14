@@ -3,6 +3,8 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,23 +19,60 @@ import (
 	"github.com/AokiAx/grok2api/internal/account"
 )
 
+// ClientOptions configures CLI fingerprint headers that mirror the official
+// Grok Build / CLI client surface.
+type ClientOptions struct {
+	// TokenAuth is X-XAI-Token-Auth (default xai-grok-cli).
+	TokenAuth string
+	// ClientIdentifier is x-grok-client-identifier / x-grok-client-name.
+	ClientIdentifier string
+	// UserAgent overrides User-Agent; empty uses xai-grok-build/<version>.
+	UserAgent string
+}
+
+type clientIdentity struct {
+	agentID   string
+	sessionID string
+}
+
 type Client struct {
-	baseURL        string
-	clientVersion  string
-	httpClient     *http.Client
-	discoveryMu    sync.Mutex
-	tokenEndpoints map[string]string
+	baseURL          string
+	clientVersion    string
+	tokenAuth        string
+	clientIdentifier string
+	userAgent        string
+	httpClient       *http.Client
+	discoveryMu      sync.Mutex
+	tokenEndpoints   map[string]string
+	identityMu       sync.Mutex
+	identities       map[string]clientIdentity
 }
 
 func NewClient(baseURL, clientVersion string, httpClient *http.Client) *Client {
+	return NewClientWithOptions(baseURL, clientVersion, httpClient, ClientOptions{})
+}
+
+func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client, opts ClientOptions) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	tokenAuth := strings.TrimSpace(opts.TokenAuth)
+	if tokenAuth == "" {
+		tokenAuth = "xai-grok-cli"
+	}
+	identifier := strings.TrimSpace(opts.ClientIdentifier)
+	if identifier == "" {
+		identifier = "grok-cli"
+	}
 	return &Client{
-		baseURL:        strings.TrimRight(baseURL, "/"),
-		clientVersion:  clientVersion,
-		httpClient:     httpClient,
-		tokenEndpoints: make(map[string]string),
+		baseURL:          strings.TrimRight(baseURL, "/"),
+		clientVersion:    clientVersion,
+		tokenAuth:        tokenAuth,
+		clientIdentifier: identifier,
+		userAgent:        strings.TrimSpace(opts.UserAgent),
+		httpClient:       httpClient,
+		tokenEndpoints:   make(map[string]string),
+		identities:       make(map[string]clientIdentity),
 	}
 }
 
@@ -130,19 +169,16 @@ func (c *Client) Request(
 	if err != nil {
 		return nil, fmt.Errorf("create upstream %s request: %w", path, err)
 	}
-	request.Header.Set("Authorization", "Bearer "+item.AccessToken)
-	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
-	request.Header.Set("x-grok-client-version", c.clientVersion)
-	request.Header.Set("x-grok-model-override", model)
-	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
-	if convID := ConvIDFrom(ctx); convID != "" {
-		request.Header.Set("x-grok-conv-id", convID)
+	if err := c.applyCLIHeaders(request, item, model, ConvIDFrom(ctx), true); err != nil {
+		return nil, err
 	}
 	if len(payload) > 0 {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if stream {
+		// Match official CLI streaming: avoid opaque gzip on SSE bodies.
 		request.Header.Set("Accept", "text/event-stream")
+		request.Header.Set("Accept-Encoding", "identity")
 	} else {
 		request.Header.Set("Accept", "application/json")
 	}
@@ -283,13 +319,147 @@ func (c *Client) validateResponsesProbeOnce(
 }
 
 func (c *Client) setAuthHeaders(request *http.Request, item account.Account, model string) {
+	// Probes use the same CLI fingerprint as live traffic (minus per-request trace).
+	_ = c.applyCLIHeaders(request, item, model, "", false)
+}
+
+// applyCLIHeaders writes the Grok Build CLI header surface used by
+// cli-chat-proxy .
+func (c *Client) applyCLIHeaders(
+	request *http.Request,
+	item account.Account,
+	model string,
+	conversationID string,
+	trace bool,
+) error {
+	if request == nil {
+		return nil
+	}
+	identity, err := c.clientIdentity(item.ID)
+	if err != nil {
+		return err
+	}
+	requestID, err := randomHex(16)
+	if err != nil {
+		return err
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		conversationID, err = randomHex(16)
+		if err != nil {
+			return err
+		}
+	}
+
 	request.Header.Set("Authorization", "Bearer "+item.AccessToken)
-	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	request.Header.Set("X-XAI-Token-Auth", c.tokenAuthValue())
 	request.Header.Set("x-grok-client-version", c.clientVersion)
-	request.Header.Set("User-Agent", "xai-grok-build/"+c.clientVersion)
+	request.Header.Set("x-grok-client-identifier", c.clientIdentifierValue())
+	request.Header.Set("x-grok-client-surface", "tui")
+	request.Header.Set("x-grok-client-name", c.clientIdentifierValue())
+	request.Header.Set("x-grok-agent-id", identity.agentID)
+	request.Header.Set("x-grok-session-id", identity.sessionID)
+	request.Header.Set("x-grok-session-id-legacy", identity.sessionID)
+	request.Header.Set("x-grok-conv-id", conversationID)
+	request.Header.Set("x-grok-conversation-id", conversationID)
+	request.Header.Set("x-grok-req-id", requestID)
+	request.Header.Set("x-grok-request-id", requestID)
+	if userID := strings.TrimSpace(item.UserID); userID != "" {
+		request.Header.Set("x-userid", userID)
+	}
+	request.Header.Set("User-Agent", c.userAgentValue())
 	if model != "" {
 		request.Header.Set("x-grok-model-override", model)
 	}
+	if trace {
+		traceID, err := randomHex(16)
+		if err != nil {
+			return err
+		}
+		spanID, err := randomHex(8)
+		if err != nil {
+			return err
+		}
+		request.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+		request.Header.Set("tracestate", "")
+	}
+	return nil
+}
+
+func (c *Client) clientIdentity(accountID string) (clientIdentity, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		// Ephemeral identity for probes without a stable account id.
+		agentID, err := randomHex(16)
+		if err != nil {
+			return clientIdentity{}, err
+		}
+		sessionID, err := randomUUID()
+		if err != nil {
+			return clientIdentity{}, err
+		}
+		return clientIdentity{agentID: agentID, sessionID: sessionID}, nil
+	}
+	c.identityMu.Lock()
+	defer c.identityMu.Unlock()
+	if value, ok := c.identities[accountID]; ok {
+		return value, nil
+	}
+	agentID, err := randomHex(16)
+	if err != nil {
+		return clientIdentity{}, err
+	}
+	sessionID, err := randomUUID()
+	if err != nil {
+		return clientIdentity{}, err
+	}
+	value := clientIdentity{agentID: agentID, sessionID: sessionID}
+	c.identities[accountID] = value
+	return value, nil
+}
+
+func (c *Client) tokenAuthValue() string {
+	if c != nil && strings.TrimSpace(c.tokenAuth) != "" {
+		return c.tokenAuth
+	}
+	return "xai-grok-cli"
+}
+
+func (c *Client) clientIdentifierValue() string {
+	if c != nil && strings.TrimSpace(c.clientIdentifier) != "" {
+		return c.clientIdentifier
+	}
+	return "grok-cli"
+}
+
+func (c *Client) userAgentValue() string {
+	if c != nil && strings.TrimSpace(c.userAgent) != "" {
+		return c.userAgent
+	}
+	version := "0.0.0"
+	if c != nil && strings.TrimSpace(c.clientVersion) != "" {
+		version = c.clientVersion
+	}
+	return "xai-grok-build/" + version
+}
+
+func randomHex(bytesLength int) (string, error) {
+	value := make([]byte, bytesLength)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func randomUUID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	hexValue := hex.EncodeToString(value)
+	return hexValue[0:8] + "-" + hexValue[8:12] + "-" + hexValue[12:16] + "-" + hexValue[16:20] + "-" + hexValue[20:], nil
 }
 
 // PermanentRefreshError means the refresh token is dead and should not be retried.

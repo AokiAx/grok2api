@@ -1,7 +1,10 @@
 package bridge
 
 import (
+	"strings"
+
 	"github.com/AokiAx/grok2api/internal/compat"
+	"github.com/AokiAx/grok2api/internal/service"
 	"github.com/AokiAx/grok2api/internal/upstream"
 )
 
@@ -53,6 +56,10 @@ func (p *Pipeline) prepareChat(body []byte) (prepared, error) {
 	if err != nil {
 		return prepared{}, invalidRequest("Invalid JSON body", err)
 	}
+	convID := service.PromptCacheKeyFromPayload(responsesBody)
+	if convID == "" {
+		convID = service.PromptCacheKeyFromPayload(body)
+	}
 	return prepared{
 		Model:         model,
 		UpstreamModel: model,
@@ -60,16 +67,23 @@ func (p *Pipeline) prepareChat(body []byte) (prepared, error) {
 		ClientStream:  stream,
 		Format:        FormatChat,
 		ChatBody:      chatBody,
+		ConvID:        convID,
 	}, nil
 }
 
 func (p *Pipeline) prepareAnthropic(body []byte, convID string) (prepared, error) {
+	if strings.TrimSpace(convID) == "" {
+		convID = service.PromptCacheKeyFromPayload(body)
+	}
 	responsesBody, model, stream, err := compat.PrepareResponsesFromAnthropicWithOptions(body, compat.AnthropicToResponsesOptions{
 		DefaultModel: p.defaultModel(),
 		ConvID:       convID,
 	})
 	if err != nil {
 		return prepared{}, invalidRequest("Invalid Anthropic request", err)
+	}
+	if strings.TrimSpace(convID) == "" {
+		convID = service.PromptCacheKeyFromPayload(responsesBody)
 	}
 	thinkingEnabled, thinkingDisplay := compat.AnthropicThinkingBridge(body)
 	return prepared{
@@ -89,11 +103,17 @@ func (p *Pipeline) prepareResponses(body []byte) (prepared, error) {
 	if err != nil {
 		return prepared{}, invalidRequest("Invalid JSON body", err)
 	}
+	// Official prompt_cache_key becomes x-grok-conv-id + pool sticky.
+	convID := service.PromptCacheKeyFromPayload(responsesBody)
+	if convID == "" {
+		convID = service.PromptCacheKeyFromPayload(body)
+	}
 	return prepared{
 		Model:         model,
 		UpstreamModel: model,
 		Body:          responsesBody,
 		ClientStream:  stream,
 		Format:        FormatResponses,
+		ConvID:        convID,
 	}, nil
 }
