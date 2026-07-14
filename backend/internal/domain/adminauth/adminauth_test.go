@@ -56,7 +56,7 @@ func TestAdminSessionLifecycleAndLoginAttemptValidation(t *testing.T) {
 		t.Fatalf("unexpected session activity at expiry boundary: %+v", session)
 	}
 	session.Revoke(now.Add(time.Minute))
-	if session.Active(now.Add(2 * time.Minute)) || session.RevokedAt.IsZero() {
+	if session.Active(now.Add(2*time.Minute)) || session.RevokedAt.IsZero() {
 		t.Fatalf("revoked session remained active: %+v", session)
 	}
 

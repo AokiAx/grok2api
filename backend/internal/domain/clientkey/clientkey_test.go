@@ -71,7 +71,7 @@ func TestClientKeyRejectsInvalidScopesLimitsAndLifecycle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			item := base
 			if tt.mutate != nil {
-				t.mutate(&item)
+				tt.mutate(&item)
 			}
 			if _, err := item.NormalizeAndValidate(tt.scopes); err == nil {
 				t.Fatal("expected validation error")
