@@ -11,6 +11,14 @@ function envelope(data: unknown, status = 200): Response {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 async function loadClient() {
   vi.resetModules();
   return import("@/api/client");
@@ -149,5 +157,40 @@ describe("admin authentication transport", () => {
 
     expect(calls.find((call) => call.path.endsWith("/auth/logout"))?.authorization).toBe("Bearer active");
     expect(calls.at(-1)).toEqual({ path: "/api/admin/v1/auth/me", authorization: null });
+  });
+
+  it("does not let an in-flight refresh restore authentication after logout completes", async () => {
+    const refreshResponse = deferred<Response>();
+    const refreshStarted = deferred<void>();
+    const calls: Array<{ path: string; authorization: string | null }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const authorization = new Headers(init?.headers).get("Authorization");
+      calls.push({ path, authorization });
+      if (path.endsWith("/auth/login")) return envelope({ tokens: { accessToken: "active" } });
+      if (path.endsWith("/auth/refresh")) {
+        refreshStarted.resolve();
+        return refreshResponse.promise;
+      }
+      if (path.endsWith("/auth/logout")) return envelope({ loggedOut: true });
+      if (path.endsWith("/auth/me") && authorization === "Bearer active") return envelope(null, 401);
+      if (path.endsWith("/auth/me")) return envelope({ id: "admin-1", username: "admin" });
+      return envelope({ version: "1", api_version: "v1", default_model: "grok", auth_required: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { adminApi } = await loadClient();
+    await adminApi.login("secret", true);
+    const pendingRequest = adminApi.me();
+    const rejectedRequest = expect(pendingRequest).rejects.toMatchObject({ status: 401 });
+    await refreshStarted.promise;
+
+    await adminApi.logout();
+    refreshResponse.resolve(envelope({ tokens: { accessToken: "stale-refresh-result" } }));
+
+    await rejectedRequest;
+    await adminApi.system();
+    expect(calls.filter((call) => call.path.endsWith("/auth/me"))).toHaveLength(1);
+    expect(calls.at(-1)).toEqual({ path: "/api/admin/v1/system", authorization: null });
   });
 });
