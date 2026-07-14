@@ -215,6 +215,72 @@ func TestRefreshAndValidationFailuresAreAtomic(t *testing.T) {
 	})
 }
 
+func TestAdministrativeAccountControls(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 30, 0, 0, time.UTC)
+
+	t.Run("disable records an explicit administrative transition", func(t *testing.T) {
+		item := Account{
+			Pool:          PoolReady,
+			QuotaActual:   25,
+			QuotaLimit:    100,
+			RequestCount:  12,
+			Priority:      7,
+			MaxActive:     3,
+			LastErrorCode: "old-error",
+		}
+
+		item.DisableByAdmin(now)
+
+		if item.Pool != PoolUnavailable || item.UnavailableReason != ReasonDisabled {
+			t.Fatalf("disabled state = %+v", item)
+		}
+		if item.LastErrorCode != "admin-disabled" || item.RetryAt.IsZero() {
+			t.Fatalf("disabled metadata = %+v", item)
+		}
+		if item.QuotaActual != 25 || item.RequestCount != 12 || item.Priority != 7 || item.MaxActive != 3 {
+			t.Fatalf("disable changed operational counters/config: %+v", item)
+		}
+	})
+
+	t.Run("enable only clears an administrative disable", func(t *testing.T) {
+		item := Account{
+			Pool:              PoolUnavailable,
+			UnavailableReason: ReasonDisabled,
+			RetryAt:           now.Add(365 * 24 * time.Hour),
+			LastErrorCode:     "admin-disabled",
+		}
+		if !item.EnableByAdmin(now) {
+			t.Fatal("expected administratively disabled account to be enabled")
+		}
+		assertReady(t, item, now)
+
+		authFailed := Account{Pool: PoolUnavailable, UnavailableReason: ReasonAuth}
+		before := authFailed
+		if authFailed.EnableByAdmin(now) {
+			t.Fatal("auth failure must not be bypassed by enable")
+		}
+		if authFailed != before {
+			t.Fatalf("ineligible account changed: before=%+v after=%+v", before, authFailed)
+		}
+	})
+
+	t.Run("runtime configuration validates priority and concurrency", func(t *testing.T) {
+		item := Account{Priority: 1, MaxActive: 1}
+		if err := item.ConfigureRuntime(25, 4, now); err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		if item.Priority != 25 || item.MaxActive != 4 || !item.UpdatedAt.Equal(now) {
+			t.Fatalf("configured account = %+v", item)
+		}
+		if err := item.ConfigureRuntime(-1, 4, now); err == nil {
+			t.Fatal("negative priority should fail")
+		}
+		if err := item.ConfigureRuntime(1, 0, now); err == nil {
+			t.Fatal("zero max_active should fail")
+		}
+	})
+}
+
 func assertReady(t *testing.T, item Account, at time.Time) {
 	t.Helper()
 	if item.Pool != PoolReady || item.UnavailableReason != "" || !item.RetryAt.IsZero() || item.LastErrorCode != "" {
