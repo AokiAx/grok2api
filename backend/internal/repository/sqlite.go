@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	_ "modernc.org/sqlite"
 )

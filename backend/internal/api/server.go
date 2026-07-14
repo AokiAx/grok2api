@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/bridge"
 	"github.com/AokiAx/grok2api/backend/internal/compat"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 	"github.com/AokiAx/grok2api/backend/internal/service"

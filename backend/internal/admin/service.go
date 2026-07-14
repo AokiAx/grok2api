@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
@@ -276,15 +276,9 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 			return ImportResult{}, fmt.Errorf("validate account %s: %w", id, err)
 		}
 		if reason == "" {
-			item.Pool = account.PoolReady
-			item.UnavailableReason = ""
-			item.LastErrorCode = ""
-			item.RetryAt = time.Time{}
+			item.MarkReady(now)
 		} else {
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = reason
-			item.LastErrorCode = errorCode
-			item.RetryAt = s.retryAt(reason, item.RetryAt, now)
+			item.MarkUnavailable(reason, s.retryAt(reason, item.RetryAt, now), errorCode, now)
 		}
 		if err := s.repository.SaveAccount(ctx, item); err != nil {
 			return ImportResult{}, fmt.Errorf("save imported account %s: %w", id, err)
@@ -349,17 +343,10 @@ func (s *Service) Recover(ctx context.Context, id string) (account.Account, erro
 		return account.Account{}, fmt.Errorf("validate account %s: %w", id, err)
 	}
 	now := s.now().UTC()
-	item.UpdatedAt = now
-	item.LastErrorCode = errorCode
 	if reason == "" {
-		item.Pool = account.PoolReady
-		item.UnavailableReason = ""
-		item.RetryAt = time.Time{}
-		item.LastErrorCode = ""
+		item.MarkReady(now)
 	} else {
-		item.Pool = account.PoolUnavailable
-		item.UnavailableReason = reason
-		item.RetryAt = s.retryAt(reason, item.RetryAt, now)
+		item.MarkUnavailable(reason, s.retryAt(reason, item.RetryAt, now), errorCode, now)
 	}
 	if err := s.repository.SaveAccount(ctx, item); err != nil {
 		return account.Account{}, fmt.Errorf("save recovered account %s: %w", id, err)

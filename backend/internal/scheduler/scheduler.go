@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 )
 
 var ErrNoReadyAccount = errors.New("no ready account")
@@ -290,16 +290,7 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 		}
 		// Known-empty free quotas must leave ready immediately so Status() and
 		// acquire waiters do not treat them as capacity.
-		if item.Pool == account.PoolReady && item.QuotaExhausted() {
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = account.ReasonQuota
-			if item.LastErrorCode == "" {
-				item.LastErrorCode = "local:quota-exhausted"
-			}
-			if item.RetryAt.IsZero() || item.RetryAt.Before(now) {
-				item.RetryAt = now.Add(24 * time.Hour)
-			}
-			item.UpdatedAt = now.UTC()
+		if item.ParkKnownExhausted(now, 24*time.Hour) {
 			s.removeReadyLocked(id)
 			s.revision++
 			continue
@@ -519,20 +510,9 @@ func (s *Scheduler) PromoteDue(now time.Time) []account.Account {
 	s.mu.Lock()
 	var promoted []account.Account
 	for _, item := range s.accounts {
-		if item.Pool != account.PoolUnavailable {
+		if !item.RecoverCooldown(now) {
 			continue
 		}
-		if item.UnavailableReason != account.ReasonCooldown {
-			continue
-		}
-		if item.RetryAt.IsZero() || item.RetryAt.After(now) {
-			continue
-		}
-		item.Pool = account.PoolReady
-		item.UnavailableReason = ""
-		item.RetryAt = time.Time{}
-		item.LastErrorCode = ""
-		item.UpdatedAt = now.UTC()
 		s.ready = append(s.ready, item.ID)
 		promoted = append(promoted, *item)
 	}
@@ -630,11 +610,7 @@ func (l *Lease) MoveUnavailable(reason account.UnavailableReason, retryAt time.T
 		item.UnavailableReason != reason ||
 		!item.RetryAt.Equal(retryAt) ||
 		item.LastErrorCode != errorCode
-	item.Pool = account.PoolUnavailable
-	item.UnavailableReason = reason
-	item.RetryAt = retryAt
-	item.LastErrorCode = errorCode
-	item.UpdatedAt = time.Now().UTC()
+	item.MarkUnavailable(reason, retryAt, errorCode, time.Now())
 	l.scheduler.removeReadyLocked(l.accountID)
 	if changed {
 		l.scheduler.revision++
@@ -649,15 +625,7 @@ func (l *Lease) RecordUsage(actual, limit int64, at time.Time) {
 	if item == nil {
 		return
 	}
-	if at.IsZero() {
-		at = time.Now().UTC()
-	} else {
-		at = at.UTC()
-	}
-	item.QuotaActual = actual
-	item.QuotaLimit = limit
-	item.LastSuccessAt = at
-	item.UpdatedAt = at
+	item.RecordUsage(actual, limit, at)
 }
 
 func (l *Lease) Release() {

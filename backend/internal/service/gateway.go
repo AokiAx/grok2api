@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
 	"github.com/AokiAx/grok2api/backend/internal/upstream"
@@ -252,8 +252,7 @@ func (g *Gateway) Request(
 			lease.MoveUnavailable(reason, retryAt, failure.Code)
 			updated := lease.Account()
 			if failure.QuotaLimit > 0 || failure.QuotaActual > 0 {
-				updated.QuotaActual = failure.QuotaActual
-				updated.QuotaLimit = failure.QuotaLimit
+				updated.SetQuota(failure.QuotaActual, failure.QuotaLimit)
 			}
 			if err := g.store.SaveAccount(ctx, updated); err != nil {
 				lease.Release()
@@ -307,9 +306,8 @@ func (g *Gateway) persistSuccessUsage(
 	if item.ID == "" {
 		return nil
 	}
-	item.LastSuccessAt = now
-	item.UpdatedAt = now
 	lease.RecordUsage(item.QuotaActual, item.QuotaLimit, now)
+	item = lease.Account()
 	if err := g.store.SaveAccount(ctx, item); err != nil {
 		return fmt.Errorf("save account success timestamp: %w", err)
 	}

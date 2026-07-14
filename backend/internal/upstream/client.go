@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 )
 
 // ClientOptions configures CLI fingerprint headers that mirror the official

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
 )
 
@@ -119,13 +119,7 @@ func IsolateExhaustedReady(
 			result.Skipped++
 			continue
 		}
-		item.Pool = account.PoolUnavailable
-		item.UnavailableReason = account.ReasonQuota
-		if item.LastErrorCode == "" {
-			item.LastErrorCode = "local:quota-exhausted"
-		}
-		item.RetryAt = now.Add(quotaRetry)
-		item.UpdatedAt = now.UTC()
+		item.ParkKnownExhausted(now, quotaRetry)
 		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
 			result.Failed++
 			continue
@@ -181,14 +175,11 @@ func IsolateUnrecoverableAuth(
 }
 
 func isolateRevokedAccount(item *account.Account, now time.Time) {
-	item.Pool = account.PoolUnavailable
-	item.UnavailableReason = account.ReasonDisabled
-	if !isUnrecoverableAuthCode(item.LastErrorCode) {
-		item.LastErrorCode = "refresh-revoked"
+	permanentCode := ""
+	if isUnrecoverableAuthCode(item.LastErrorCode) {
+		permanentCode = item.LastErrorCode
 	}
-	// Far-future: never auto-retry; operator must re-import.
-	item.RetryAt = now.Add(365 * 24 * time.Hour)
-	item.UpdatedAt = now.UTC()
+	item.DisableRevoked(now, permanentCode)
 }
 
 func RecoverCredentials(
@@ -311,32 +302,28 @@ func RecoverCredentials(
 		}
 		refreshed := outcome.refreshed
 		if outcome.validateErr != nil {
-			refreshed.Pool = account.PoolUnavailable
-			refreshed.UnavailableReason = account.ReasonAuth
-			refreshed.RetryAt = now.Add(authValidationBackoff)
-			refreshed.LastErrorCode = "validation-failed"
+			refreshed.MarkUnavailable(
+				account.ReasonAuth,
+				now.Add(authValidationBackoff),
+				"validation-failed",
+				now,
+			)
 			result.Failed++
 		} else if outcome.reason == "" {
-			refreshed.Pool = account.PoolReady
-			refreshed.UnavailableReason = ""
-			refreshed.RetryAt = time.Time{}
-			refreshed.LastErrorCode = ""
-			refreshed.AuthenticationFails = 0
+			refreshed.RecoverValidated(now)
 			result.Recovered++
 		} else if isUnrecoverableAuthCode(outcome.errorCode) {
-			refreshed.Pool = account.PoolUnavailable
-			refreshed.UnavailableReason = account.ReasonDisabled
-			refreshed.LastErrorCode = outcome.errorCode
-			refreshed.RetryAt = now.Add(365 * 24 * time.Hour)
+			refreshed.DisableRevoked(now, outcome.errorCode)
 			result.Revoked++
 		} else {
-			refreshed.Pool = account.PoolUnavailable
-			refreshed.UnavailableReason = outcome.reason
-			refreshed.LastErrorCode = outcome.errorCode
-			refreshed.RetryAt = credentialRetryAt(outcome.reason, now)
+			refreshed.MarkUnavailable(
+				outcome.reason,
+				credentialRetryAt(outcome.reason, now),
+				outcome.errorCode,
+				now,
+			)
 			result.Failed++
 		}
-		refreshed.UpdatedAt = now.UTC()
 		if err := saveAccountBestEffort(ctx, store, pool, refreshed); err != nil {
 			result.Failed++
 			continue
@@ -442,11 +429,7 @@ func RefreshExpiring(
 		}
 		// Keep ready; only rotate credentials.
 		refreshed := outcome.refreshed
-		refreshed.Pool = account.PoolReady
-		refreshed.UnavailableReason = ""
-		refreshed.RetryAt = time.Time{}
-		refreshed.LastErrorCode = ""
-		refreshed.UpdatedAt = now.UTC()
+		refreshed.MarkReady(now)
 		if err := saveAccountBestEffort(ctx, store, pool, refreshed); err != nil {
 			result.Failed++
 			continue
@@ -457,19 +440,7 @@ func RefreshExpiring(
 }
 
 func applyRefreshFailure(item *account.Account, refreshErr error, now time.Time) {
-	item.Pool = account.PoolUnavailable
-	item.UpdatedAt = now.UTC()
-	item.AuthenticationFails++
-	if isPermanentRefresh(refreshErr) {
-		// Quarantine permanently — do not keep them in the auth retry queue.
-		item.UnavailableReason = account.ReasonDisabled
-		item.LastErrorCode = "refresh-revoked"
-		item.RetryAt = now.Add(365 * 24 * time.Hour)
-		return
-	}
-	item.UnavailableReason = account.ReasonAuth
-	item.LastErrorCode = "refresh-failed"
-	item.RetryAt = now.Add(authTransientBackoff)
+	item.ApplyRefreshFailure(isPermanentRefresh(refreshErr), now, authTransientBackoff)
 }
 
 func isPermanentRefresh(err error) bool {
@@ -595,50 +566,39 @@ func RecoverValidating(
 
 	for _, outcome := range outcomes {
 		item := outcome.item
-		item.UpdatedAt = now.UTC()
 		if outcome.err != nil {
-			item.RetryAt = now.Add(validatingBackoff)
-			item.LastErrorCode = "validation-failed"
-			item.AuthenticationFails++
+			item.RecordValidationFailure(
+				"validation-failed",
+				now.Add(validatingBackoff),
+				now,
+			)
 			result.Failed++
 			_ = saveAccountBestEffort(ctx, store, pool, item)
 			continue
 		}
 		if outcome.reason == "" {
-			item.Pool = account.PoolReady
-			item.UnavailableReason = ""
-			item.RetryAt = time.Time{}
-			item.LastErrorCode = ""
-			item.AuthenticationFails = 0
+			item.RecoverValidated(now)
 			result.Recovered++
 			_ = saveAccountBestEffort(ctx, store, pool, item)
 			continue
 		}
 		// Still bad.
-		item.AuthenticationFails++
-		item.LastErrorCode = firstNonEmpty(outcome.errorCode, string(outcome.reason))
+		errorCode := firstNonEmpty(outcome.errorCode, string(outcome.reason))
+		failures := item.RecordValidationFailure(errorCode, item.RetryAt, now)
 		switch {
 		case outcome.reason == account.ReasonQuota:
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = account.ReasonQuota
-			item.RetryAt = nextQuotaRetry(now, 24*time.Hour)
+			item.MarkUnavailable(account.ReasonQuota, nextQuotaRetry(now, 24*time.Hour), errorCode, now)
 			result.Failed++
 		case outcome.reason == account.ReasonCooldown:
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = account.ReasonCooldown
-			item.RetryAt = now.Add(45 * time.Second)
+			item.MarkUnavailable(account.ReasonCooldown, now.Add(45*time.Second), errorCode, now)
 			result.Failed++
-		case outcome.reason == account.ReasonAuth || item.AuthenticationFails >= maxValidatingFails:
+		case outcome.reason == account.ReasonAuth || failures >= maxValidatingFails:
 			// Hard auth, or too many validating failures → park as auth for
 			// refresh-based recovery / operator attention.
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = account.ReasonAuth
-			item.RetryAt = now.Add(authTransientBackoff)
+			item.MarkUnavailable(account.ReasonAuth, now.Add(authTransientBackoff), errorCode, now)
 			result.Failed++
 		default:
-			item.Pool = account.PoolUnavailable
-			item.UnavailableReason = account.ReasonValidating
-			item.RetryAt = now.Add(validatingBackoff)
+			item.MarkUnavailable(account.ReasonValidating, now.Add(validatingBackoff), errorCode, now)
 			result.Failed++
 		}
 		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
@@ -744,13 +704,7 @@ func RecoverQuota(
 		candidates = candidates[:maxQuotaProbesPerTick]
 	}
 	for _, item := range candidates {
-		item.Pool = account.PoolReady
-		item.UnavailableReason = ""
-		item.RetryAt = time.Time{}
-		item.LastErrorCode = ""
-		// Sliding window has elapsed; clear local counters for the new window.
-		item.QuotaActual = 0
-		item.UpdatedAt = now.UTC()
+		item.RecoverQuotaWindow(now)
 		if err := saveAccountBestEffort(ctx, store, pool, item); err != nil {
 			result.Failed++
 			continue

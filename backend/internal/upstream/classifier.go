@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 )
 
 type FailureKind string
