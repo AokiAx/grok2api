@@ -12,6 +12,8 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
+const adminAuthHistoryRetention = 30 * 24 * time.Hour
+
 func (r *SQLite) CountAdminUsers(ctx context.Context) (int, error) {
 	var count int
 	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_users`).Scan(&count); err != nil {
@@ -118,6 +120,12 @@ func (r *SQLite) CreateAdminSessionWithLoginSuccess(ctx context.Context, session
 	if err := insertAdminLoginAttempt(ctx, tx, attempt); err != nil {
 		return err
 	}
+	if _, err := deleteAdminLoginAttemptsBefore(ctx, tx, attempt.CreatedAt.Add(-adminAuthHistoryRetention)); err != nil {
+		return err
+	}
+	if _, err := deleteInactiveAdminSessionsBefore(ctx, tx, session.CreatedAt.Add(-adminAuthHistoryRetention)); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit admin login success: %w", err)
 	}
@@ -186,6 +194,9 @@ func (r *SQLite) RotateAdminSession(
 	if err := insertAdminSession(ctx, tx, replacement); err != nil {
 		return false, fmt.Errorf("create replacement admin session %s: %w", replacement.ID, err)
 	}
+	if _, err := deleteInactiveAdminSessionsBefore(ctx, tx, at.Add(-adminAuthHistoryRetention)); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit admin session rotation: %w", err)
 	}
@@ -240,7 +251,21 @@ func (r *SQLite) RecordAdminLoginAttempt(ctx context.Context, item adminauth.Log
 	if err := item.Validate(); err != nil {
 		return fmt.Errorf("validate admin login attempt: %w", err)
 	}
-	return insertAdminLoginAttempt(ctx, r.db, item)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin admin login attempt write: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertAdminLoginAttempt(ctx, tx, item); err != nil {
+		return err
+	}
+	if _, err := deleteAdminLoginAttemptsBefore(ctx, tx, item.CreatedAt.Add(-adminAuthHistoryRetention)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit admin login attempt write: %w", err)
+	}
+	return nil
 }
 
 func insertAdminLoginAttempt(ctx context.Context, execer contextExecer, item adminauth.LoginAttempt) error {
@@ -345,29 +370,44 @@ func (r *SQLite) PruneAdminAuthHistory(ctx context.Context, cutoffs repository.A
 		return repository.AdminAuthPruneResult{}, fmt.Errorf("begin admin auth history prune: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	attemptResult, err := tx.ExecContext(ctx, `DELETE FROM admin_login_attempts WHERE created_at < ?`, formatTime(cutoffs.LoginAttemptsBefore))
+	attemptsDeleted, err := deleteAdminLoginAttemptsBefore(ctx, tx, cutoffs.LoginAttemptsBefore)
 	if err != nil {
-		return repository.AdminAuthPruneResult{}, fmt.Errorf("prune admin login attempts: %w", err)
+		return repository.AdminAuthPruneResult{}, err
 	}
-	sessionResult, err := tx.ExecContext(ctx, `DELETE FROM admin_sessions
-		WHERE (expires_at != '' AND expires_at < ?)
-		OR (revoked_at != '' AND revoked_at < ?)`,
-		formatTime(cutoffs.InactiveSessionsBefore), formatTime(cutoffs.InactiveSessionsBefore))
+	sessionsDeleted, err := deleteInactiveAdminSessionsBefore(ctx, tx, cutoffs.InactiveSessionsBefore)
 	if err != nil {
-		return repository.AdminAuthPruneResult{}, fmt.Errorf("prune inactive admin sessions: %w", err)
-	}
-	attemptsDeleted, err := attemptResult.RowsAffected()
-	if err != nil {
-		return repository.AdminAuthPruneResult{}, fmt.Errorf("inspect pruned admin login attempts: %w", err)
-	}
-	sessionsDeleted, err := sessionResult.RowsAffected()
-	if err != nil {
-		return repository.AdminAuthPruneResult{}, fmt.Errorf("inspect pruned admin sessions: %w", err)
+		return repository.AdminAuthPruneResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return repository.AdminAuthPruneResult{}, fmt.Errorf("commit admin auth history prune: %w", err)
 	}
 	return repository.AdminAuthPruneResult{LoginAttemptsDeleted: attemptsDeleted, SessionsDeleted: sessionsDeleted}, nil
+}
+
+func deleteAdminLoginAttemptsBefore(ctx context.Context, execer contextExecer, cutoff time.Time) (int64, error) {
+	result, err := execer.ExecContext(ctx, `DELETE FROM admin_login_attempts WHERE created_at < ?`, formatTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("prune admin login attempts: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("inspect pruned admin login attempts: %w", err)
+	}
+	return deleted, nil
+}
+
+func deleteInactiveAdminSessionsBefore(ctx context.Context, execer contextExecer, cutoff time.Time) (int64, error) {
+	result, err := execer.ExecContext(ctx, `DELETE FROM admin_sessions
+		WHERE (expires_at != '' AND expires_at < ?)
+		OR (revoked_at != '' AND revoked_at < ?)`, formatTime(cutoff), formatTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("prune inactive admin sessions: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("inspect pruned admin sessions: %w", err)
+	}
+	return deleted, nil
 }
 
 const sessionSelect = `SELECT
