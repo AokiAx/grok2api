@@ -32,6 +32,7 @@ func (r *SQLite) ensureRequestAuditSchema(ctx context.Context) error {
 			error_type TEXT NOT NULL DEFAULT '',
 			error_code TEXT NOT NULL DEFAULT '',
 			input_tokens INTEGER NOT NULL DEFAULT 0,
+			cached_input_tokens INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
 			attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -63,6 +64,40 @@ func (r *SQLite) ensureRequestAuditSchema(ctx context.Context) error {
 			return fmt.Errorf("ensure request audit schema: %w", err)
 		}
 	}
+	if err := r.ensureRequestAuditColumns(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *SQLite) ensureRequestAuditColumns(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(request_audits)`)
+	if err != nil {
+		return fmt.Errorf("inspect request_audits columns: %w", err)
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan request_audits column: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close request_audits columns: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !columns["cached_input_tokens"] {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE request_audits ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add cached_input_tokens column: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -92,8 +127,8 @@ func (r *SQLite) RecordRequestAudit(ctx context.Context, item audit.Request, att
 		`INSERT INTO request_audits (
 			id, request_id, started_at, finished_at, duration_ms, method, path, operation,
 			model, client_key_id, account_id, status_code, success, error_type, error_code,
-			input_tokens, output_tokens, total_tokens, attempt_count, stream
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			input_tokens, cached_input_tokens, output_tokens, total_tokens, attempt_count, stream
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			request_id=excluded.request_id,
 			started_at=excluded.started_at,
@@ -110,6 +145,7 @@ func (r *SQLite) RecordRequestAudit(ctx context.Context, item audit.Request, att
 			error_type=excluded.error_type,
 			error_code=excluded.error_code,
 			input_tokens=excluded.input_tokens,
+			cached_input_tokens=excluded.cached_input_tokens,
 			output_tokens=excluded.output_tokens,
 			total_tokens=excluded.total_tokens,
 			attempt_count=excluded.attempt_count,
@@ -130,6 +166,7 @@ func (r *SQLite) RecordRequestAudit(ctx context.Context, item audit.Request, att
 		item.ErrorType,
 		item.ErrorCode,
 		item.InputTokens,
+		item.CachedInputTokens,
 		item.OutputTokens,
 		item.TotalTokens,
 		item.AttemptCount,
@@ -182,6 +219,7 @@ func (r *SQLite) AuditUsageSummary(ctx context.Context, from, to time.Time) (aud
 			COALESCE(SUM(CASE WHEN success=1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(cached_input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(total_tokens), 0)
 		FROM request_audits
@@ -193,6 +231,7 @@ func (r *SQLite) AuditUsageSummary(ctx context.Context, from, to time.Time) (aud
 		&out.SuccessfulRequests,
 		&out.FailedRequests,
 		&out.InputTokens,
+		&out.CachedInputTokens,
 		&out.OutputTokens,
 		&out.TotalTokens,
 	)

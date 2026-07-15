@@ -16,7 +16,7 @@ func TestModelRegistrySeedsDefaultsAndSupportsAliasLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
-	if got := repo.SchemaVersion(ctx); got != 9 {
+	if got := repo.SchemaVersion(ctx); got != 10 {
 		t.Fatalf("schema=%d", got)
 	}
 	items, err := repo.ListModels(ctx, false)

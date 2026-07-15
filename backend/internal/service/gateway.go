@@ -32,9 +32,10 @@ type ChatResult struct {
 	Body   []byte
 	Stream io.ReadCloser
 	// Optional per-request token usage extracted from upstream bodies when available.
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
+	TotalTokens       int64
 }
 
 // AuditSink records gateway request outcomes without storing payloads/secrets.
@@ -190,32 +191,37 @@ func (g *Gateway) Request(
 		reqID := requestctx.RequestID(ctx)
 		id := newAuditID()
 		item := audit.Request{
-			ID:           id,
-			RequestID:    reqID,
-			StartedAt:    started,
-			FinishedAt:   finished,
-			DurationMS:   finished.Sub(started).Milliseconds(),
-			Method:       method,
-			Path:         path,
-			Operation:    op,
-			Model:        model,
-			ClientKeyID:  clientKeyID,
-			AccountID:    lastAccountID,
-			StatusCode:   statusCode,
-			Success:      success,
-			ErrorType:    errorType,
-			ErrorCode:    errorCode,
-			InputTokens:  result.InputTokens,
-			OutputTokens: result.OutputTokens,
-			TotalTokens:  result.TotalTokens,
-			AttemptCount: len(attempts),
-			Stream:       stream,
+			ID:                id,
+			RequestID:         reqID,
+			StartedAt:         started,
+			FinishedAt:        finished,
+			DurationMS:        finished.Sub(started).Milliseconds(),
+			Method:            method,
+			Path:              path,
+			Operation:         op,
+			Model:             model,
+			ClientKeyID:       clientKeyID,
+			AccountID:         lastAccountID,
+			StatusCode:        statusCode,
+			Success:           success,
+			ErrorType:         errorType,
+			ErrorCode:         errorCode,
+			InputTokens:       result.InputTokens,
+			CachedInputTokens: result.CachedInputTokens,
+			OutputTokens:      result.OutputTokens,
+			TotalTokens:       result.TotalTokens,
+			AttemptCount:      len(attempts),
+			Stream:            stream,
 		}
 		// Prefer body-derived usage. If missing, leave zeros rather than inventing
 		// deltas from free-tier cumulative rate-limit headers.
-		if item.TotalTokens == 0 && item.InputTokens == 0 && item.OutputTokens == 0 && len(result.Body) > 0 {
-			inT, outT, totT := extractBodyUsage(result.Body)
-			item.InputTokens, item.OutputTokens, item.TotalTokens = inT, outT, totT
+		if item.TotalTokens == 0 && item.InputTokens == 0 && item.OutputTokens == 0 && item.CachedInputTokens == 0 && len(result.Body) > 0 {
+			inT, cachedT, outT, totT := extractBodyUsage(result.Body)
+			item.InputTokens, item.CachedInputTokens, item.OutputTokens, item.TotalTokens = inT, cachedT, outT, totT
+		}
+		// Streaming successes are audited when the stream closes (usage sits in the tail).
+		if stream && success && result.Stream != nil {
+			return
 		}
 		_ = g.auditor.RecordRequestAudit(context.WithoutCancel(ctx), item, attempts)
 	}()
@@ -322,12 +328,30 @@ func (g *Gateway) Request(
 			})
 			statusCode = response.StatusCode
 			success = true
+			auditItem := audit.Request{
+				ID:           newAuditID(),
+				RequestID:    requestctx.RequestID(ctx),
+				StartedAt:    started,
+				Method:       method,
+				Path:         path,
+				Operation:    operationFromPath(method, path),
+				Model:        model,
+				ClientKeyID:  clientKeyID,
+				AccountID:    accountID,
+				StatusCode:   response.StatusCode,
+				Success:      true,
+				AttemptCount: len(attempts),
+				Stream:       true,
+			}
 			return ChatResult{
 				Status: response.StatusCode,
 				Header: response.Header.Clone(),
 				Stream: &leaseReadCloser{
-					body:  response.Body,
-					lease: lease,
+					body:     response.Body,
+					lease:    lease,
+					auditor:  g.auditor,
+					audit:    auditItem,
+					attempts: append([]audit.Attempt(nil), attempts...),
 				},
 			}, nil
 		}
@@ -361,14 +385,15 @@ func (g *Gateway) Request(
 			})
 			statusCode = response.StatusCode
 			success = true
-			inT, outT, totT := extractBodyUsage(body)
+			inT, cachedT, outT, totT := extractBodyUsage(body)
 			return ChatResult{
-				Status:       response.StatusCode,
-				Header:       response.Header.Clone(),
-				Body:         body,
-				InputTokens:  inT,
-				OutputTokens: outT,
-				TotalTokens:  totT,
+				Status:            response.StatusCode,
+				Header:            response.Header.Clone(),
+				Body:              body,
+				InputTokens:       inT,
+				CachedInputTokens: cachedT,
+				OutputTokens:      outT,
+				TotalTokens:       totT,
 			}, nil
 		}
 
@@ -646,14 +671,26 @@ func (g *Gateway) refreshCircuitLocked() {
 	}
 }
 
+const streamUsageTailWindow = 96 << 10
+
 type leaseReadCloser struct {
-	body  io.ReadCloser
-	lease *scheduler.Lease
-	once  sync.Once
+	body     io.ReadCloser
+	lease    *scheduler.Lease
+	once     sync.Once
+	auditor  AuditSink
+	audit    audit.Request
+	attempts []audit.Attempt
+	tail     []byte
 }
 
 func (r *leaseReadCloser) Read(buffer []byte) (int, error) {
 	count, err := r.body.Read(buffer)
+	if count > 0 {
+		r.tail = append(r.tail, buffer[:count]...)
+		if len(r.tail) > streamUsageTailWindow {
+			r.tail = append([]byte(nil), r.tail[len(r.tail)-streamUsageTailWindow:]...)
+		}
+	}
 	if errors.Is(err, io.EOF) {
 		_ = r.Close()
 	}
@@ -664,7 +701,24 @@ func (r *leaseReadCloser) Close() error {
 	var closeErr error
 	r.once.Do(func() {
 		closeErr = r.body.Close()
-		r.lease.Release()
+		if r.lease != nil {
+			r.lease.Release()
+		}
+		if r.auditor == nil || strings.TrimSpace(r.audit.ID) == "" {
+			return
+		}
+		item := r.audit
+		finished := time.Now().UTC()
+		item.FinishedAt = finished
+		if !item.StartedAt.IsZero() {
+			item.DurationMS = finished.Sub(item.StartedAt).Milliseconds()
+		}
+		inT, cachedT, outT, totT := extractBodyUsage(r.tail)
+		item.InputTokens = inT
+		item.CachedInputTokens = cachedT
+		item.OutputTokens = outT
+		item.TotalTokens = totT
+		_ = r.auditor.RecordRequestAudit(context.Background(), item, r.attempts)
 	})
 	return closeErr
 }
@@ -825,9 +879,9 @@ func (g *Gateway) runtimeSnapshot() (quotaRetry, rateRetry, acquireTimeout time.
 	return g.quotaRetry, g.rateRetry, g.acquireTimeout, g.maxAttempts
 }
 
-func extractBodyUsage(raw []byte) (input, output, total int64) {
+func extractBodyUsage(raw []byte) (input, cached, output, total int64) {
 	if len(raw) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 	// Lightweight scans for OpenAI/Anthropic/Responses style usage fields.
 	// Prefer last match (completed event often near the end).
@@ -843,7 +897,7 @@ func extractBodyUsage(raw []byte) (input, output, total int64) {
 			return 0
 		}
 		// skip : and spaces
-		for idx < len(raw) && (raw[idx] == ':' || raw[idx] == ' ' || raw[idx] == '	') {
+		for idx < len(raw) && (raw[idx] == ':' || raw[idx] == ' ' || raw[idx] == '\t') {
 			idx++
 		}
 		start := idx
@@ -860,6 +914,15 @@ func extractBodyUsage(raw []byte) (input, output, total int64) {
 	if input == 0 {
 		input = lastInt("prompt_tokens")
 	}
+	// OpenAI/Grok: input_tokens_details.cached_tokens or top-level cached_tokens.
+	// Anthropic: cache_read_input_tokens.
+	cached = lastInt("cached_tokens")
+	if cached == 0 {
+		cached = lastInt("cache_read_input_tokens")
+	}
+	if cached == 0 {
+		cached = lastInt("cached_input_tokens")
+	}
 	output = lastInt("output_tokens")
 	if output == 0 {
 		output = lastInt("completion_tokens")
@@ -868,5 +931,5 @@ func extractBodyUsage(raw []byte) (input, output, total int64) {
 	if total == 0 && (input > 0 || output > 0) {
 		total = input + output
 	}
-	return input, output, total
+	return input, cached, output, total
 }

@@ -19,13 +19,14 @@ type Request struct {
 	AccountID    string
 	StatusCode   int
 	Success      bool
-	ErrorType    string
-	ErrorCode    string
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
-	AttemptCount int
-	Stream       bool
+	ErrorType          string
+	ErrorCode          string
+	InputTokens        int64
+	CachedInputTokens  int64
+	OutputTokens       int64
+	TotalTokens        int64
+	AttemptCount       int
+	Stream             bool
 }
 
 // Attempt is one account try within a request (rotation/retry).
@@ -49,6 +50,7 @@ type UsageSummary struct {
 	SuccessfulRequests int64
 	FailedRequests     int64
 	InputTokens        int64
+	CachedInputTokens  int64
 	OutputTokens       int64
 	TotalTokens        int64
 	// P95DurationMS is approximate from stored durations (percentile sample).

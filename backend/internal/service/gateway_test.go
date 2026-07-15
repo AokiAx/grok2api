@@ -5,10 +5,12 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/audit"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
@@ -492,5 +494,91 @@ func TestPoolUnavailableReasons(t *testing.T) {
 	poolErr, ok = service.AsPoolUnavailable(err)
 	if !ok || poolErr.Reason != service.PoolReasonEmpty {
 		t.Fatalf("empty: ok=%v err=%v reason=%q", ok, err, poolErr)
+	}
+}
+
+
+type memoryAuditor struct {
+	mu    sync.Mutex
+	items []audit.Request
+}
+
+func (m *memoryAuditor) RecordRequestAudit(_ context.Context, item audit.Request, _ []audit.Attempt) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items = append(m.items, item)
+	return nil
+}
+
+func TestStreamAuditRecordsCachedUsageOnClose(t *testing.T) {
+	store := &fakeStore{}
+	auditor := &memoryAuditor{}
+	payload := `data: {"type":"response.completed","response":{"usage":{"input_tokens":200,"input_tokens_details":{"cached_tokens":150},"output_tokens":10,"total_tokens":210}}}
+
+data: [DONE]
+`
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(200, payload)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		upstream,
+		service.WithAuditSink(auditor),
+	)
+	got, err := gateway.Request(context.Background(), http.MethodPost, "/responses", []byte(`{"model":"grok-4.5"}`), true)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if got.Stream == nil {
+		t.Fatal("expected stream")
+	}
+	if _, err := io.Copy(io.Discard, got.Stream); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if err := got.Stream.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	auditor.mu.Lock()
+	defer auditor.mu.Unlock()
+	if len(auditor.items) != 1 {
+		t.Fatalf("audits=%d items=%+v", len(auditor.items), auditor.items)
+	}
+	item := auditor.items[0]
+	if item.InputTokens != 200 || item.CachedInputTokens != 150 || item.OutputTokens != 10 || item.TotalTokens != 210 {
+		t.Fatalf("tokens=%+v", item)
+	}
+	if !item.Stream || !item.Success {
+		t.Fatalf("flags=%+v", item)
+	}
+}
+
+func TestNonStreamAuditRecordsCachedUsage(t *testing.T) {
+	store := &fakeStore{}
+	auditor := &memoryAuditor{}
+	body := `{"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":80},"output_tokens":15,"total_tokens":135},"output":[]}`
+	upstream := &fakeUpstream{responses: map[string][]*http.Response{
+		"a": {response(200, body)},
+	}}
+	gateway := service.NewGateway(
+		scheduler.New([]account.Account{ready("a")}),
+		store,
+		upstream,
+		service.WithAuditSink(auditor),
+	)
+	got, err := gateway.Request(context.Background(), http.MethodPost, "/responses", []byte(`{"model":"grok-4.5"}`), false)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if got.CachedInputTokens != 80 || got.InputTokens != 120 || got.OutputTokens != 15 || got.TotalTokens != 135 {
+		t.Fatalf("result tokens=%+v", got)
+	}
+	// allow async? non-stream records in defer immediately
+	if len(auditor.items) != 1 {
+		t.Fatalf("audits=%d", len(auditor.items))
+	}
+	item := auditor.items[0]
+	if item.CachedInputTokens != 80 || item.InputTokens != 120 {
+		t.Fatalf("audit=%+v", item)
 	}
 }

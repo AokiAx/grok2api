@@ -23,7 +23,7 @@ func TestRequestAuditRoundTripAndDashboardQueries(t *testing.T) {
 		ID: "aud_1", RequestID: "req_1", StartedAt: now.Add(-2 * time.Minute), FinishedAt: now.Add(-2*time.Minute + 40*time.Millisecond),
 		DurationMS: 40, Method: "POST", Path: "/v1/chat/completions", Operation: "chat",
 		Model: "grok-4.5", ClientKeyID: "key-1", AccountID: "acc-1", StatusCode: 200, Success: true,
-		TotalTokens: 12, AttemptCount: 1,
+		InputTokens: 100, CachedInputTokens: 40, OutputTokens: 12, TotalTokens: 112, AttemptCount: 1,
 	}
 	attempts := []audit.Attempt{{
 		Ordinal: 1, AccountID: "acc-1", StartedAt: item.StartedAt, FinishedAt: item.FinishedAt,
@@ -44,6 +44,10 @@ func TestRequestAuditRoundTripAndDashboardQueries(t *testing.T) {
 	fail.ErrorCode = "quota_exhausted"
 	fail.AccountID = "acc-2"
 	fail.Model = "grok-code-fast-1"
+	fail.InputTokens = 0
+	fail.CachedInputTokens = 0
+	fail.OutputTokens = 0
+	fail.TotalTokens = 0
 	if err := repo.RecordRequestAudit(ctx, fail, []audit.Attempt{{
 		Ordinal: 1, AccountID: "acc-2", StartedAt: fail.StartedAt, FinishedAt: fail.FinishedAt,
 		DurationMS: 100, StatusCode: 429, Success: false, ErrorType: "quota", ErrorCode: "quota_exhausted", Rotated: true,
@@ -59,6 +63,9 @@ func TestRequestAuditRoundTripAndDashboardQueries(t *testing.T) {
 	}
 	if usage.Requests != 2 || usage.SuccessfulRequests != 1 || usage.FailedRequests != 1 {
 		t.Fatalf("usage=%+v", usage)
+	}
+	if usage.InputTokens != 100 || usage.CachedInputTokens != 40 || usage.OutputTokens != 12 || usage.TotalTokens != 112 {
+		t.Fatalf("token usage=%+v", usage)
 	}
 	if usage.P95DurationMS < 40 {
 		t.Fatalf("p95=%d", usage.P95DurationMS)

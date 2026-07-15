@@ -336,6 +336,9 @@ export type Dashboard = {
     requests?: number;
     successfulRequests?: number;
     failedRequests?: number;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
     tokens?: number;
     p95DurationMs?: number;
     successRate?: number;

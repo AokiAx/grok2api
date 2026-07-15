@@ -302,7 +302,7 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 				"successfulRequests": u.SuccessfulRequests,
 				"failedRequests":     u.FailedRequests,
 				"inputTokens":        u.InputTokens,
-				"cachedInputTokens":  0,
+				"cachedInputTokens":  u.CachedInputTokens,
 				"outputTokens":       u.OutputTokens,
 				"reasoningTokens":    0,
 				"tokens":             u.TotalTokens,

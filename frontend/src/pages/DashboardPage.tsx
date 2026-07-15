@@ -104,6 +104,12 @@ export function DashboardPage() {
   const recentFailures = data?.recentFailures || [];
   const periodLabel =
     period === "24h" ? "近 24 小时" : period === "7d" ? "近 7 天" : "近 30 天";
+  const inputTokens = usage?.inputTokens ?? 0;
+  const cachedInputTokens = usage?.cachedInputTokens ?? 0;
+  const cacheHitRate =
+    inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : 0;
+  const cacheHitDisplay =
+    inputTokens > 0 ? `${cacheHitRate.toFixed(1)}%` : "—";
 
   return (
     <div className="space-y-6">
@@ -229,7 +235,43 @@ export function DashboardPage() {
             {
               label: "Tokens",
               value: n(usage?.tokens),
-              hint: "累计 token",
+              hint:
+                inputTokens > 0 || (usage?.outputTokens ?? 0) > 0
+                  ? `入 ${n(usage?.inputTokens)} / 出 ${n(usage?.outputTokens)}`
+                  : "累计 token",
+            },
+          ]}
+        />
+      </section>
+
+      <section aria-label="Token 明细" className="grid gap-3 xl:grid-cols-3">
+        <MetricGroup
+          title="Token 明细"
+          description={`${periodLabel} · 来自上游 usage`}
+          metrics={[
+            {
+              label: "输入",
+              value: n(usage?.inputTokens),
+              hint: "input / prompt tokens",
+            },
+            {
+              label: "缓存命中",
+              value: n(usage?.cachedInputTokens),
+              hint: `命中率 ${cacheHitDisplay}`,
+              title:
+                inputTokens > 0
+                  ? `${cachedInputTokens} / ${inputTokens} cached input tokens`
+                  : undefined,
+            },
+            {
+              label: "输出",
+              value: n(usage?.outputTokens),
+              hint: "output / completion tokens",
+            },
+            {
+              label: "命中率",
+              value: cacheHitDisplay,
+              hint: "cached / input",
             },
           ]}
         />
