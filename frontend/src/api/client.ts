@@ -583,7 +583,10 @@ export const adminApi = {
     );
   },
   me: () => request<AdminIdentity>("/api/admin/v1/auth/me"),
-  dashboard: () => request<Dashboard>("/api/admin/v1/dashboard"),
+  dashboard: (period?: "24h" | "7d" | "30d") =>
+    request<Dashboard>(
+      `/api/admin/v1/dashboard${period ? `?period=${encodeURIComponent(period)}` : ""}`,
+    ),
   pool: () =>
     request<{
       ready: number;

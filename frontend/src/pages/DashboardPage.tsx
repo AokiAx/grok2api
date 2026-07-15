@@ -13,6 +13,7 @@ import { adminApi, AdminApiError, type Dashboard } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { UsageTrendChart } from "@/components/UsageTrendChart";
 import { formatAdaptiveNumber, formatAdaptiveRatio } from "@/lib/formatNumber";
 import { statusCodeLabel } from "@/lib/statusLabels";
 
@@ -60,6 +61,7 @@ function Stat({
 }
 
 export function DashboardPage() {
+  const [period, setPeriod] = useState<"24h" | "7d" | "30d">("24h");
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -68,13 +70,13 @@ export function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await adminApi.dashboard());
+      setData(await adminApi.dashboard(period));
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [period]);
 
   useEffect(() => {
     void load();
@@ -95,6 +97,13 @@ export function DashboardPage() {
   const circuit = data?.quota_circuit as { open?: boolean; retry_at?: string } | null | undefined;
   const quotaRemaining = compact(s?.quota_remaining);
   const quotaUsage = formatAdaptiveRatio(s?.quota_actual, s?.quota_limit);
+  const usage = data?.usage;
+  const trendSeries = data?.series || [];
+  const topModels = data?.topModels || [];
+  const topAccounts = data?.topAccounts || [];
+  const recentFailures = data?.recentFailures || [];
+  const periodLabel =
+    period === "24h" ? "近 24 小时" : period === "7d" ? "近 7 天" : "近 30 天";
 
   return (
     <div className="space-y-6">
@@ -106,10 +115,32 @@ export function DashboardPage() {
             {data?.generated_at ? ` · 更新于 ${new Date(data.generated_at).toLocaleString()}` : ""}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          {loading ? "刷新中" : "刷新"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 rounded-full bg-secondary/60 p-0.5" aria-label="统计窗口">
+            {([
+              ["24h", "24h"],
+              ["7d", "7天"],
+              ["30d", "30天"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={`h-7 rounded-full px-3 text-[11px] font-medium transition-colors ${
+                  period === value
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => setPeriod(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            {loading ? "刷新中" : "刷新"}
+          </Button>
+        </div>
       </header>
 
       {error ? (
@@ -182,36 +213,75 @@ export function DashboardPage() {
         </div>
       </section>
 
-      {(data as any)?.usage || (data as any)?.recentFailures?.length ? (
-        <section aria-label="请求审计" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Stat
-            label="窗口请求"
-            value={n((data as any)?.usage?.requests)}
-            hint={`成功率 ${((data as any)?.usage?.successRate ?? 0).toFixed?.(1) ?? (data as any)?.usage?.successRate ?? "—"}%`}
-            icon={<Zap className="h-4 w-4" />}
-          />
-          <Stat
-            label="失败请求"
-            value={n((data as any)?.usage?.failedRequests)}
-            hint="审计窗口内"
-            icon={<CircleAlert className="h-4 w-4" />}
-          />
-          <Stat
-            label="P95 延迟"
-            value={(data as any)?.usage?.p95DurationMs != null ? `${n((data as any).usage.p95DurationMs)} ms` : "—"}
-            hint="请求耗时"
-            icon={<Gauge className="h-4 w-4" />}
-          />
-          <Stat
-            label="窗口 Tokens"
-            value={n((data as any)?.usage?.tokens)}
-            hint="累计 token（若可观测）"
-            icon={<Activity className="h-4 w-4" />}
-          />
+      {(usage || recentFailures.length || trendSeries.length) ? (
+        <section aria-label="请求审计" className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Stat
+              label="窗口请求"
+              value={n(usage?.requests)}
+              hint={`成功率 ${usage?.successRate != null ? Number(usage.successRate).toFixed(1) : "—"}% · ${periodLabel}`}
+              icon={<Zap className="h-4 w-4" />}
+            />
+            <Stat
+              label="失败请求"
+              value={n(usage?.failedRequests)}
+              hint={periodLabel}
+              icon={<CircleAlert className="h-4 w-4" />}
+            />
+            <Stat
+              label="P95 延迟"
+              value={usage?.p95DurationMs != null ? `${n(usage.p95DurationMs)} ms` : "—"}
+              hint="请求耗时"
+              icon={<Gauge className="h-4 w-4" />}
+            />
+            <Stat
+              label="窗口 Tokens"
+              value={n(usage?.tokens)}
+              hint="累计 token（若可观测）"
+              icon={<Activity className="h-4 w-4" />}
+            />
+          </div>
+
+          <Card>
+            <CardHeader className="flex-row items-start justify-between space-y-0">
+              <div>
+                <CardTitle>用量趋势</CardTitle>
+                <CardDescription>
+                  {periodLabel} · 按小时聚合请求 / 失败 / tokens
+                </CardDescription>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <UsageTrendChart series={trendSeries} />
+            </CardContent>
+          </Card>
+
+          {(topModels.length > 0 || topAccounts.length > 0) ? (
+            <div className="grid gap-3 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle>热门模型</CardTitle>
+                  <CardDescription>{periodLabel} 请求量 Top</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <TopList items={topModels} empty="暂无模型用量" />
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>热门账号</CardTitle>
+                  <CardDescription>{periodLabel} 请求量 Top</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <TopList items={topAccounts} empty="暂无账号用量" />
+                </CardContent>
+              </Card>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
-      {(data as any)?.recentFailures?.length ? (
+      {recentFailures.length ? (
         <Card>
           <CardHeader>
             <CardTitle>最近失败</CardTitle>
@@ -219,7 +289,7 @@ export function DashboardPage() {
           </CardHeader>
           <CardContent>
             <ul className="divide-y divide-border/70">
-              {((data as any).recentFailures as Array<any>).slice(0, 8).map((item, idx) => (
+              {recentFailures.slice(0, 8).map((item, idx) => (
                 <li key={`${item.requestId || idx}`} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                   <div className="min-w-0">
                     <p className="truncate text-xs font-medium">{item.model || "(no model)"} · {item.errorCode || item.errorType || item.statusCode}</p>
@@ -290,6 +360,38 @@ function ReasonMap({ map, empty = "无" }: { map: Record<string, number>; empty?
               {label === "—" ? "(空)" : label}
             </span>
             <strong className="shrink-0 text-xs font-medium tabular-nums">{n(v)}</strong>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function TopList({
+  items,
+  empty,
+}: {
+  items: Array<{ name?: string; count?: number }>;
+  empty: string;
+}) {
+  if (!items.length) {
+    return <p className="py-5 text-center text-xs text-muted-foreground">{empty}</p>;
+  }
+  const max = Math.max(1, ...items.map((item) => Number(item.count) || 0));
+  return (
+    <ul className="space-y-2.5">
+      {items.slice(0, 8).map((item, index) => {
+        const count = Number(item.count) || 0;
+        const width = `${Math.max(6, (count / max) * 100)}%`;
+        return (
+          <li key={`${item.name || "item"}-${index}`} className="space-y-1">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="min-w-0 truncate font-mono text-[11px]">{item.name || "—"}</span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">{n(count)}</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
+              <div className="h-full rounded-full bg-foreground/70" style={{ width }} />
+            </div>
           </li>
         );
       })}

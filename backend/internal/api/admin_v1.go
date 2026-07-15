@@ -311,7 +311,14 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 				"successRate":        u.SuccessRate,
 			}
 		}
-		if points, err := s.audits.AuditSeries(request.Context(), from, now, time.Hour); err == nil {
+		bucket := time.Hour
+		if window >= 7*24*time.Hour {
+			bucket = 6 * time.Hour
+		}
+		if window >= 30*24*time.Hour {
+			bucket = 24 * time.Hour
+		}
+		if points, err := s.audits.AuditSeries(request.Context(), from, now, bucket); err == nil {
 			series = make([]any, 0, len(points))
 			for _, p := range points {
 				series = append(series, map[string]any{
