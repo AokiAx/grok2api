@@ -19,6 +19,7 @@ type fakeClientKeyLifecycle struct {
 	updated clientkeys.UpdateRequest
 	id      string
 	revoked bool
+	expires time.Time
 }
 
 func (f *fakeClientKeyLifecycle) Create(_ context.Context, request clientkeys.CreateRequest) (clientkeys.Result, error) {
@@ -38,7 +39,7 @@ func (f *fakeClientKeyLifecycle) Get(_ context.Context, id string) (clientkeys.R
 	f.id = id
 	return clientkeys.Result{Key: clientkey.ClientKey{
 		ID: id, Name: "production", Origin: clientkey.OriginManaged, KeyPrefix: "g2a_preview",
-		ModelPolicy: clientkey.ModelPolicyAll, CreatedAt: apiTestTime, UpdatedAt: apiTestTime,
+		ModelPolicy: clientkey.ModelPolicyAll, ExpiresAt: f.expires, CreatedAt: apiTestTime, UpdatedAt: apiTestTime,
 	}}, nil
 }
 
@@ -154,6 +155,27 @@ func TestClientKeyAdminLifecycleRoutesAndEnvelope(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil || !envelope.OK || envelope.Data.ID != "ck_1" {
 		t.Fatalf("envelope=%+v err=%v body=%s", envelope, err, rec.Body.String())
+	}
+}
+
+func TestClientKeyAdminPatchDistinguishesOmittedAndNullExpiry(t *testing.T) {
+	service := &fakeClientKeyLifecycle{expires: apiTestTime.Add(24 * time.Hour)}
+	handler := NewClientKeyAdminHandler(service, func(*http.Request) bool { return true })
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/admin/v1/client-keys/ck_1", strings.NewReader(`{"name":"kept"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !service.updated.ExpiresAt.Equal(service.expires) {
+		t.Fatalf("omitted expiry status=%d updated=%v want=%v body=%s", rec.Code, service.updated.ExpiresAt, service.expires, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/admin/v1/client-keys/ck_1", strings.NewReader(`{"expires_at":null}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !service.updated.ExpiresAt.IsZero() {
+		t.Fatalf("null expiry status=%d updated=%v body=%s", rec.Code, service.updated.ExpiresAt, rec.Body.String())
 	}
 }
 
