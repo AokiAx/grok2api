@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { adminApi, AdminApiError } from "@/api/client";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+const linkClass =
+  "inline-flex h-8 items-center gap-1.5 rounded-full border border-input bg-background px-3 text-xs font-medium transition-colors hover:bg-secondary";
 
 export function SystemPage() {
   const [info, setInfo] = useState<Record<string, string> | null>(null);
@@ -55,22 +57,16 @@ export function SystemPage() {
             <CardDescription>OpenAPI 契约与 Swagger UI（同域）</CardDescription>
           </CardHeader>
           <CardContent className="mt-3 flex flex-wrap gap-2">
-            <Button asChild variant="outline" size="sm">
-              <a href="/docs" target="_blank" rel="noreferrer">
-                打开 /docs
-                <ExternalLink className="ml-1.5 h-3.5 w-3.5" />
-              </a>
-            </Button>
-            <Button asChild variant="outline" size="sm">
-              <a href="/openapi.json" target="_blank" rel="noreferrer">
-                openapi.json
-              </a>
-            </Button>
-            <Button asChild variant="outline" size="sm">
-              <a href="/openapi.yaml" target="_blank" rel="noreferrer">
-                openapi.yaml
-              </a>
-            </Button>
+            <a className={linkClass} href="/docs" target="_blank" rel="noreferrer">
+              打开 /docs
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+            <a className={linkClass} href="/openapi.json" target="_blank" rel="noreferrer">
+              openapi.json
+            </a>
+            <a className={linkClass} href="/openapi.yaml" target="_blank" rel="noreferrer">
+              openapi.yaml
+            </a>
           </CardContent>
         </Card>
       </div>

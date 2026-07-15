@@ -20,6 +20,7 @@ import {
   normalizeImportAccounts,
   summarizeAccounts,
 } from "@/lib/importNormalize";
+import { DeviceAuthPanel } from "@/pages/DeviceAuthPanel";
 
 export function ImportPage() {
   const [raw, setRaw] = useState("");
@@ -87,26 +88,38 @@ export function ImportPage() {
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <h1 className="text-xl font-medium tracking-tight">导入账号</h1>
-          <p className="mt-1.5 text-xs text-muted-foreground">校验凭证内容，预览变更后再写入账号池。</p>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            JSON 批量导入，或使用 Build Device OAuth 单账号授权入库。
+          </p>
         </div>
         <Badge>{fileMeta}</Badge>
       </div>
+
+      <DeviceAuthPanel />
+
       <Card className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary"><FileJson className="h-4 w-4" /></div>
-            <div><CardTitle>凭证文件</CardTitle><CardDescription className="mt-1">支持数组、accounts 对象及 auth.json map</CardDescription></div>
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary">
+              <FileJson className="h-4 w-4" />
+            </div>
+            <div>
+              <CardTitle>凭证文件</CardTitle>
+              <CardDescription className="mt-1">支持数组、accounts 对象及 auth.json map</CardDescription>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-input bg-background px-3 text-xs font-medium hover:bg-secondary">
-              <Upload className="h-3.5 w-3.5" />选择文件
-              <input type="file" accept=".json,.txt,application/json" className="sr-only" onChange={(e) => void onFile(e)} />
+              <Upload className="h-3.5 w-3.5" />
+              选择文件
+              <input
+                type="file"
+                accept=".json,.txt,application/json"
+                className="sr-only"
+                onChange={(e) => void onFile(e)}
+              />
             </label>
-            <Button
-              variant="outline"
-              disabled={!!busy || !raw.trim()}
-              onClick={() => void run(true)}
-            >
+            <Button variant="outline" disabled={!!busy || !raw.trim()} onClick={() => void run(true)}>
               {busy === "preview" ? "预览中…" : "预览"}
             </Button>
             <Button
@@ -118,7 +131,8 @@ export function ImportPage() {
             >
               {busy === "import" ? "导入中…" : "导入"}
             </Button>
-            <Button variant="ghost"
+            <Button
+              variant="ghost"
               onClick={() => {
                 setRaw("");
                 setOutput("等待操作");
@@ -126,13 +140,18 @@ export function ImportPage() {
                 setError(null);
               }}
             >
-              <RotateCcw className="h-3.5 w-3.5" />清空
+              <RotateCcw className="h-3.5 w-3.5" />
+              清空
             </Button>
           </div>
         </div>
-          {parsed?.summary ? <p className="mt-4 text-xs text-muted-foreground">已解析 {parsed.summary.total} 条，其中 {parsed.summary.withRefresh} 条包含 refresh token</p> : null}
-          {parsed?.error ? <p className="text-sm text-destructive">{parsed.error}</p> : null}
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        {parsed?.summary ? (
+          <p className="mt-4 text-xs text-muted-foreground">
+            已解析 {parsed.summary.total} 条，其中 {parsed.summary.withRefresh} 条包含 refresh token
+          </p>
+        ) : null}
+        {parsed?.error ? <p className="text-sm text-destructive">{parsed.error}</p> : null}
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
       </Card>
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="p-4 sm:p-5">

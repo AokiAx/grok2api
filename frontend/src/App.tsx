@@ -6,6 +6,8 @@ import { ClientKeysPage } from "@/pages/ClientKeysPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { ImportPage } from "@/pages/ImportPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { ModelsPage } from "@/pages/ModelsPage";
+import { SettingsPage } from "@/pages/SettingsPage";
 import { SystemPage } from "@/pages/SystemPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -38,6 +40,8 @@ export function App() {
         <Route path="accounts" element={<AccountsPage />} />
         <Route path="client-keys" element={<ClientKeysPage />} />
         <Route path="import" element={<ImportPage />} />
+        <Route path="models" element={<ModelsPage />} />
+        <Route path="settings" element={<SettingsPage />} />
         <Route path="system" element={<SystemPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
