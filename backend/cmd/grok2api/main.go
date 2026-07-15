@@ -42,6 +42,7 @@ type runtimeRepository interface {
 	repository.AdminAuthRepository
 	repository.ClientKeyRepository
 	repository.LegacySecurityBootstrapRepository
+	repository.AuditRepository
 }
 
 type serveCommand func(context.Context, config.Config, runtimeRepository) error
@@ -293,6 +294,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		service.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 		service.WithMaxAttempts(maxAttempts),
 		service.WithAcquireTimeout(time.Duration(settings.AcquireTimeoutSec)*time.Second),
+		service.WithAuditSink(repo),
 	)
 	// Optional temporary interceptor: logs client + upstream stages for protocol debugging.
 	var apiGateway api.Gateway = gateway
@@ -328,6 +330,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		frontendFS,
 		tracer,
 		readiness,
+		repo,
 	)
 	// Accept traffic once accounts are loaded into the scheduler. Recovery
 	// continues in the background and may still move accounts between pools.
@@ -342,6 +345,31 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 	recoveryCtx, cancelRecovery := context.WithCancel(ctx)
 	defer cancelRecovery()
 	recoveryDone := make(chan struct{})
+	go func() {
+		// Retain request audits for 30 days by default.
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		prune := func() {
+			cut := time.Now().UTC().Add(-30 * 24 * time.Hour)
+			n, err := repo.PruneRequestAudits(context.Background(), cut)
+			if err != nil {
+				slog.Warn("prune request audits failed", "error", err)
+				return
+			}
+			if n > 0 {
+				slog.Info("pruned request audits", "deleted", n, "older_than", cut.Format(time.RFC3339))
+			}
+		}
+		prune()
+		for {
+			select {
+			case <-recoveryCtx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
 	go func() {
 		defer close(recoveryDone)
 		// RunRecovery only exits on context cancel; per-account errors are logged.
@@ -392,6 +420,7 @@ func newAPIHandler(
 	frontendFS fs.FS,
 	tracer *intercept.Tracer,
 	readiness api.Readiness,
+	audits api.AuditReader,
 ) http.Handler {
 	adminAuthService := adminauth.NewService(repo)
 	clientAccess := service.NewClientAccess(repo)
@@ -403,6 +432,7 @@ func newAPIHandler(
 		api.WithClientAccess(clientAccess),
 		api.WithClientKeys(clientKeyService),
 		api.WithReadiness(readiness),
+		api.WithAuditReader(audits),
 	}
 	if frontendFS != nil {
 		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))

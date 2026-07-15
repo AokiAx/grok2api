@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/audit"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
@@ -28,10 +31,16 @@ type ChatResult struct {
 	Stream io.ReadCloser
 }
 
+// AuditSink records gateway request outcomes without storing payloads/secrets.
+type AuditSink interface {
+	RecordRequestAudit(context.Context, audit.Request, []audit.Attempt) error
+}
+
 type Gateway struct {
 	scheduler       *scheduler.Scheduler
 	store           repository.AccountSaver
 	upstream        Upstream
+	auditor         AuditSink
 	quotaRetry      time.Duration
 	rateRetry       time.Duration
 	validatingRetry time.Duration
@@ -87,6 +96,13 @@ func WithAcquireTimeout(duration time.Duration) Option {
 	}
 }
 
+// WithAuditSink enables request audit recording.
+func WithAuditSink(sink AuditSink) Option {
+	return func(gateway *Gateway) {
+		gateway.auditor = sink
+	}
+}
+
 func NewGateway(
 	scheduler *scheduler.Scheduler,
 	store repository.AccountSaver,
@@ -122,7 +138,82 @@ func (g *Gateway) Request(
 	path string,
 	payload []byte,
 	stream bool,
-) (ChatResult, error) {
+) (result ChatResult, err error) {
+	started := g.now().UTC()
+	model := modelFromPayload(payload)
+	if effective, ok := EffectiveModelFromContext(ctx); ok && effective != "" {
+		model = effective
+	}
+	clientKeyID := ""
+	if grant, ok := ClientGrantFromContext(ctx); ok {
+		clientKeyID = grant.KeyID
+	}
+	var attempts []audit.Attempt
+	var lastAccountID string
+	var statusCode int
+	var errorType, errorCode string
+	success := false
+
+	defer func() {
+		finished := g.now().UTC()
+		if g == nil || g.auditor == nil {
+			return
+		}
+		// Never fail the user request because audit persistence failed.
+		op := operationFromPath(method, path)
+		if statusCode == 0 && err != nil {
+			if poolErr, ok := AsPoolUnavailable(err); ok {
+				statusCode = poolErr.Status
+				errorType = "pool"
+				errorCode = string(poolErr.Reason)
+			} else {
+				statusCode = http.StatusBadGateway
+				errorType = "provider"
+				errorCode = "upstream_error"
+			}
+		}
+		if result.Status > 0 {
+			statusCode = result.Status
+		}
+		if statusCode > 0 && statusCode < 400 {
+			success = true
+			errorType = ""
+			errorCode = ""
+		}
+		reqID := requestctx.RequestID(ctx)
+		id := newAuditID()
+		item := audit.Request{
+			ID:           id,
+			RequestID:    reqID,
+			StartedAt:    started,
+			FinishedAt:   finished,
+			DurationMS:   finished.Sub(started).Milliseconds(),
+			Method:       method,
+			Path:         path,
+			Operation:    op,
+			Model:        model,
+			ClientKeyID:  clientKeyID,
+			AccountID:    lastAccountID,
+			StatusCode:   statusCode,
+			Success:      success,
+			ErrorType:    errorType,
+			ErrorCode:    errorCode,
+			InputTokens:  0,
+			OutputTokens: 0,
+			TotalTokens:  0,
+			AttemptCount: len(attempts),
+			Stream:       stream,
+		}
+		// Best-effort token estimates from rate-limit headers on success.
+		if success && result.Header != nil {
+			if usage := upstream.ParseRateLimitHeaders(result.Header); usage.Present() {
+				// Free-tier counters are cumulative actual/limit, not per-request.
+				// Keep token fields zero rather than inventing deltas.
+			}
+		}
+		_ = g.auditor.RecordRequestAudit(context.WithoutCancel(ctx), item, attempts)
+	}()
+
 	if circuitError := g.quotaCircuitError(); circuitError != nil {
 		return ChatResult{}, circuitError
 	}
@@ -132,12 +223,12 @@ func (g *Gateway) Request(
 	}
 	// Critical: never rotate through the entire ready pool. One exhausted or
 	// permission-denied response would otherwise park every credential.
-	attempts := g.maxAttempts
-	if attempts <= 0 {
-		attempts = 3
+	attemptBudget := g.maxAttempts
+	if attemptBudget <= 0 {
+		attemptBudget = 3
 	}
-	if ready < attempts {
-		attempts = ready
+	if ready < attemptBudget {
+		attemptBudget = ready
 	}
 
 	attempted := 0
@@ -152,30 +243,33 @@ func (g *Gateway) Request(
 	if promptCacheKey != "" && strings.TrimSpace(upstream.ConvIDFrom(ctx)) == "" {
 		ctx = upstream.WithConvID(ctx, promptCacheKey)
 	}
-	for range attempts {
+	for range attemptBudget {
 		acquireCtx := ctx
 		var cancel context.CancelFunc
 		if g.acquireTimeout > 0 {
 			acquireCtx, cancel = context.WithTimeout(ctx, g.acquireTimeout)
 		}
-		lease, err := g.scheduler.AcquireSticky(acquireCtx, stickyKey)
+		lease, acquireErr := g.scheduler.AcquireSticky(acquireCtx, stickyKey)
 		if cancel != nil {
 			cancel()
 		}
-		if err != nil {
-			if errors.Is(err, scheduler.ErrNoReadyAccount) {
-				return ChatResult{}, g.poolUnavailableFrom(err)
+		if acquireErr != nil {
+			if errors.Is(acquireErr, scheduler.ErrNoReadyAccount) {
+				return ChatResult{}, g.poolUnavailableFrom(acquireErr)
 			}
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			if errors.Is(acquireErr, context.DeadlineExceeded) || errors.Is(acquireErr, context.Canceled) {
 				return ChatResult{}, g.poolUnavailableFrom(&scheduler.SelectionError{
 					Reason:     scheduler.SelectionSaturated,
 					RetryAfter: time.Second,
 				})
 			}
-			return ChatResult{}, fmt.Errorf("acquire account: %w", err)
+			return ChatResult{}, fmt.Errorf("acquire account: %w", acquireErr)
 		}
 		attempted++
-		response, err := g.upstream.Request(
+		attemptStart := g.now().UTC()
+		accountID := lease.Account().ID
+		lastAccountID = accountID
+		response, upErr := g.upstream.Request(
 			ctx,
 			lease.Account(),
 			method,
@@ -183,10 +277,23 @@ func (g *Gateway) Request(
 			payload,
 			stream,
 		)
-		if err != nil {
+		if upErr != nil {
+			attemptEnd := g.now().UTC()
+			attempts = append(attempts, audit.Attempt{
+				Ordinal:    attempted,
+				AccountID:  accountID,
+				StartedAt:  attemptStart,
+				FinishedAt: attemptEnd,
+				DurationMS: attemptEnd.Sub(attemptStart).Milliseconds(),
+				StatusCode: 0,
+				Success:    false,
+				ErrorType:  "provider",
+				ErrorCode:  "upstream_transport",
+				Rotated:    false,
+			})
 			lease.Release()
 			g.resetCircuit()
-			return ChatResult{}, err
+			return ChatResult{}, upErr
 		}
 		if stream && response.StatusCode < 400 {
 			// Best-effort: never fail a successful upstream response because SQLite is busy.
@@ -194,6 +301,19 @@ func (g *Gateway) Request(
 			// Keep returning this successful stream even if remaining hit 0;
 			// the account is already marked unavailable for subsequent traffic.
 			g.resetCircuit()
+			attemptEnd := g.now().UTC()
+			attempts = append(attempts, audit.Attempt{
+				Ordinal:    attempted,
+				AccountID:  accountID,
+				StartedAt:  attemptStart,
+				FinishedAt: attemptEnd,
+				DurationMS: attemptEnd.Sub(attemptStart).Milliseconds(),
+				StatusCode: response.StatusCode,
+				Success:    true,
+				Rotated:    false,
+			})
+			statusCode = response.StatusCode
+			success = true
 			return ChatResult{
 				Status: response.StatusCode,
 				Header: response.Header.Clone(),
@@ -219,6 +339,19 @@ func (g *Gateway) Request(
 			// Return the successful body even if this response exhausted free quota.
 			lease.Release()
 			g.resetCircuit()
+			attemptEnd := g.now().UTC()
+			attempts = append(attempts, audit.Attempt{
+				Ordinal:    attempted,
+				AccountID:  accountID,
+				StartedAt:  attemptStart,
+				FinishedAt: attemptEnd,
+				DurationMS: attemptEnd.Sub(attemptStart).Milliseconds(),
+				StatusCode: response.StatusCode,
+				Success:    true,
+				Rotated:    false,
+			})
+			statusCode = response.StatusCode
+			success = true
 			return ChatResult{
 				Status: response.StatusCode,
 				Header: response.Header.Clone(),
@@ -251,15 +384,47 @@ func (g *Gateway) Request(
 			if failure.QuotaLimit > 0 || failure.QuotaActual > 0 {
 				updated.SetQuota(failure.QuotaActual, failure.QuotaLimit)
 			}
-			if err := g.store.SaveAccount(ctx, updated); err != nil {
+			if saveErr := g.store.SaveAccount(ctx, updated); saveErr != nil {
 				lease.Release()
-				return ChatResult{}, fmt.Errorf("save account transition: %w", err)
+				return ChatResult{}, fmt.Errorf("save account transition: %w", saveErr)
 			}
 			lease.Release()
+			attemptEnd := g.now().UTC()
+			attempts = append(attempts, audit.Attempt{
+				Ordinal:    attempted,
+				AccountID:  accountID,
+				StartedAt:  attemptStart,
+				FinishedAt: attemptEnd,
+				DurationMS: attemptEnd.Sub(attemptStart).Milliseconds(),
+				StatusCode: response.StatusCode,
+				Success:    false,
+				ErrorType:  string(failure.Kind),
+				ErrorCode:  failure.Code,
+				Rotated:    true,
+			})
+			errorType = string(failure.Kind)
+			errorCode = failure.Code
+			statusCode = response.StatusCode
 			continue
 		}
 		lease.Release()
 		g.resetCircuit()
+		attemptEnd := g.now().UTC()
+		attempts = append(attempts, audit.Attempt{
+			Ordinal:    attempted,
+			AccountID:  accountID,
+			StartedAt:  attemptStart,
+			FinishedAt: attemptEnd,
+			DurationMS: attemptEnd.Sub(attemptStart).Milliseconds(),
+			StatusCode: response.StatusCode,
+			Success:    false,
+			ErrorType:  string(failure.Kind),
+			ErrorCode:  failure.Code,
+			Rotated:    false,
+		})
+		statusCode = response.StatusCode
+		errorType = string(failure.Kind)
+		errorCode = failure.Code
 		return ChatResult{
 			Status: response.StatusCode,
 			Header: response.Header.Clone(),
@@ -268,12 +433,66 @@ func (g *Gateway) Request(
 	}
 	if attempted > 0 && quotaFailures == attempted {
 		g.openQuotaCircuit()
-		if err := g.quotaCircuitError(); err != nil {
-			return ChatResult{}, err
+		if circuitErr := g.quotaCircuitError(); circuitErr != nil {
+			return ChatResult{}, circuitErr
 		}
 	}
 
 	return ChatResult{}, g.poolUnavailable()
+}
+
+func modelFromPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	// Tiny scan without full JSON dependency cycles.
+	// Prefer "model":"..." pattern.
+	const key = `"model"`
+	idx := strings.Index(string(payload), key)
+	if idx < 0 {
+		return ""
+	}
+	rest := string(payload[idx+len(key):])
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, ":") {
+		return ""
+	}
+	rest = strings.TrimSpace(rest[1:])
+	if !strings.HasPrefix(rest, `"`) {
+		return ""
+	}
+	rest = rest[1:]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
+func operationFromPath(method, path string) string {
+	path = strings.ToLower(strings.TrimSpace(path))
+	switch {
+	case strings.Contains(path, "chat/completions"):
+		return "chat"
+	case strings.Contains(path, "/responses"):
+		return "responses"
+	case strings.Contains(path, "/messages"):
+		return "messages"
+	case strings.Contains(path, "/models"):
+		return "models"
+	case strings.Contains(path, "/billing"):
+		return "billing"
+	default:
+		return strings.ToLower(method) + " " + path
+	}
+}
+
+func newAuditID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("aud_%d", time.Now().UnixNano())
+	}
+	return "aud_" + hex.EncodeToString(raw[:])
 }
 
 func (g *Gateway) persistSuccessUsage(

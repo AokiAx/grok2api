@@ -18,6 +18,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/compat"
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/audit"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
@@ -63,6 +64,7 @@ type Server struct {
 	clientKeys       ClientKeyLifecycle
 	frontend         fs.FS
 	readiness        Readiness
+	audits           AuditReader
 	maxBodyBytes     int64
 	handler          http.Handler
 }
@@ -158,6 +160,22 @@ func WithReadiness(readiness Readiness) Option {
 func WithMaxBodyBytes(max int64) Option {
 	return func(server *Server) {
 		server.maxBodyBytes = max
+	}
+}
+
+// AuditReader powers dashboard request analytics.
+type AuditReader interface {
+	AuditUsageSummary(context.Context, time.Time, time.Time) (audit.UsageSummary, error)
+	AuditSeries(context.Context, time.Time, time.Time, time.Duration) ([]audit.SeriesPoint, error)
+	AuditTopModels(context.Context, time.Time, time.Time, int) ([]audit.NamedCount, error)
+	AuditTopAccounts(context.Context, time.Time, time.Time, int) ([]audit.NamedCount, error)
+	AuditRecentFailures(context.Context, time.Time, time.Time, int) ([]audit.RecentFailure, error)
+}
+
+// WithAuditReader installs request audit analytics for the admin dashboard.
+func WithAuditReader(reader AuditReader) Option {
+	return func(server *Server) {
+		server.audits = reader
 	}
 }
 

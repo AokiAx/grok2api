@@ -33,8 +33,8 @@ func TestSQLiteMigrationCreatesTwoPoolSchema(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	if got := repo.SchemaVersion(ctx); got != 5 {
-		t.Fatalf("schema version = %d; want 5", got)
+	if got := repo.SchemaVersion(ctx); got != 6 {
+		t.Fatalf("schema version = %d; want 6", got)
 	}
 }
 
@@ -415,7 +415,7 @@ func TestOpenSQLiteMigratesPythonV1AccountTable(t *testing.T) {
 	if byID["cooldown"].UnavailableReason != account.ReasonCooldown || byID["cooldown"].RetryAt.IsZero() {
 		t.Fatalf("cooldown = %#v", byID["cooldown"])
 	}
-	if repo.SchemaVersion(ctx) != 5 {
+	if repo.SchemaVersion(ctx) != 6 {
 		t.Fatalf("schema version = %d", repo.SchemaVersion(ctx))
 	}
 }

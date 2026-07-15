@@ -181,6 +181,59 @@ export function DashboardPage() {
         </div>
       </section>
 
+      {(data as any)?.usage || (data as any)?.recentFailures?.length ? (
+        <section aria-label="请求审计" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Stat
+            label="窗口请求"
+            value={n((data as any)?.usage?.requests)}
+            hint={`成功率 ${((data as any)?.usage?.successRate ?? 0).toFixed?.(1) ?? (data as any)?.usage?.successRate ?? "—"}%`}
+            icon={<Zap className="h-4 w-4" />}
+          />
+          <Stat
+            label="失败请求"
+            value={n((data as any)?.usage?.failedRequests)}
+            hint="审计窗口内"
+            icon={<CircleAlert className="h-4 w-4" />}
+          />
+          <Stat
+            label="P95 延迟"
+            value={(data as any)?.usage?.p95DurationMs != null ? `${n((data as any).usage.p95DurationMs)} ms` : "—"}
+            hint="请求耗时"
+            icon={<Gauge className="h-4 w-4" />}
+          />
+          <Stat
+            label="窗口 Tokens"
+            value={n((data as any)?.usage?.tokens)}
+            hint="累计 token（若可观测）"
+            icon={<Activity className="h-4 w-4" />}
+          />
+        </section>
+      ) : null}
+
+      {(data as any)?.recentFailures?.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>最近失败</CardTitle>
+            <CardDescription>审计窗口内最近失败请求（不含 prompt/响应正文）</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ul className="divide-y divide-border/70">
+              {((data as any).recentFailures as Array<any>).slice(0, 8).map((item, idx) => (
+                <li key={`${item.requestId || idx}`} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-medium">{item.model || "(no model)"} · {item.errorCode || item.errorType || item.statusCode}</p>
+                    <p className="truncate text-[11px] text-muted-foreground">{item.path || ""} {item.accountId ? `· ${item.accountId}` : ""}</p>
+                  </div>
+                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                    {item.startedAt ? new Date(item.startedAt).toLocaleString() : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <section aria-label="异常分布" className="grid gap-3 lg:grid-cols-[1fr_1fr_0.75fr]">
         <Card>
           <CardHeader>

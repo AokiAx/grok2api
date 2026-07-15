@@ -265,14 +265,105 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 	}
 	now := time.Now().UTC()
 	period := strings.TrimSpace(request.URL.Query().Get("period"))
-	if period == "" {
+	window := 30 * 24 * time.Hour
+	switch period {
+	case "24h":
+		window = 24 * time.Hour
+	case "7d":
+		window = 7 * 24 * time.Hour
+	case "30d", "":
 		period = "30d"
+		window = 30 * 24 * time.Hour
+	default:
+		period = "30d"
+	}
+	from := now.Add(-window)
+	usage := map[string]any{
+		"requests":           summary.TotalRequests,
+		"successfulRequests": summary.TotalRequests,
+		"failedRequests":     0,
+		"inputTokens":        0,
+		"cachedInputTokens":  0,
+		"outputTokens":       0,
+		"reasoningTokens":    0,
+		"tokens":             0,
+		"p95DurationMs":      0,
+		"billedCostUsdTicks": 0,
+		"successRate":        100.0,
+	}
+	series := []any{}
+	topModels := []any{}
+	topAccounts := []any{}
+	recentFailures := []any{}
+	if s.audits != nil {
+		if u, err := s.audits.AuditUsageSummary(request.Context(), from, now); err == nil {
+			usage = map[string]any{
+				"requests":           u.Requests,
+				"successfulRequests": u.SuccessfulRequests,
+				"failedRequests":     u.FailedRequests,
+				"inputTokens":        u.InputTokens,
+				"cachedInputTokens":  0,
+				"outputTokens":       u.OutputTokens,
+				"reasoningTokens":    0,
+				"tokens":             u.TotalTokens,
+				"p95DurationMs":      u.P95DurationMS,
+				"billedCostUsdTicks": 0,
+				"successRate":        u.SuccessRate,
+			}
+		}
+		if points, err := s.audits.AuditSeries(request.Context(), from, now, time.Hour); err == nil {
+			series = make([]any, 0, len(points))
+			for _, p := range points {
+				series = append(series, map[string]any{
+					"bucketStart": p.BucketStart.Format(time.RFC3339),
+					"requests":    p.Requests,
+					"failures":    p.Failures,
+					"tokens":      p.Tokens,
+				})
+			}
+		}
+		if rows, err := s.audits.AuditTopModels(request.Context(), from, now, 10); err == nil {
+			topModels = make([]any, 0, len(rows))
+			for _, row := range rows {
+				topModels = append(topModels, map[string]any{"name": row.Name, "count": row.Count})
+			}
+		}
+		if rows, err := s.audits.AuditTopAccounts(request.Context(), from, now, 10); err == nil {
+			topAccounts = make([]any, 0, len(rows))
+			for _, row := range rows {
+				topAccounts = append(topAccounts, map[string]any{"name": row.Name, "count": row.Count})
+			}
+		}
+		if rows, err := s.audits.AuditRecentFailures(request.Context(), from, now, 20); err == nil {
+			recentFailures = make([]any, 0, len(rows))
+			for _, row := range rows {
+				recentFailures = append(recentFailures, map[string]any{
+					"requestId":  row.RequestID,
+					"startedAt":  row.StartedAt.Format(time.RFC3339),
+					"model":      row.Model,
+					"accountId":  row.AccountID,
+					"statusCode": row.StatusCode,
+					"errorType":  row.ErrorType,
+					"errorCode":  row.ErrorCode,
+					"path":       row.Path,
+					"durationMs": row.DurationMS,
+				})
+			}
+		}
+	}
+	activeKeys, totalKeys := 0, 0
+	if s.clientKeys != nil {
+		// Best-effort; ignore list errors and keep zeros.
+		if listed, err := s.clientKeys.List(request.Context(), repository.ListClientKeysQuery{Page: 1, PageSize: 1}); err == nil {
+			totalKeys = listed.Total
+			activeKeys = listed.Total
+		}
 	}
 	writeAdminOK(writer, http.StatusOK, map[string]any{
 		"period":      period,
 		"generatedAt": now.Format(time.RFC3339),
 		"range": map[string]any{
-			"start": now.Add(-30 * 24 * time.Hour).Format(time.RFC3339),
+			"start": from.Format(time.RFC3339),
 			"end":   now.Format(time.RFC3339),
 		},
 		"resources": map[string]any{
@@ -280,27 +371,18 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 			"totalAccounts":    summary.TotalAccounts,
 			"enabledModels":    1,
 			"totalModels":      1,
-			"activeClientKeys": 0,
-			"totalClientKeys":  0,
+			"activeClientKeys": activeKeys,
+			"totalClientKeys":  totalKeys,
 			"allTimeRequests":  summary.TotalRequests,
 		},
-		"usage": map[string]any{
-			"requests":           summary.TotalRequests,
-			"successfulRequests": summary.TotalRequests,
-			"failedRequests":     0,
-			"inputTokens":        0,
-			"cachedInputTokens":  0,
-			"outputTokens":       0,
-			"reasoningTokens":    0,
-			"tokens":             0,
-			"billedCostUsdTicks": 0,
-			"successRate":        100,
-		},
-		"series":       []any{},
-		"topModels":    []any{},
-		"summary":      summary,
-		"account_pool": s.status.PoolStatus(),
-		"generated_at": now.Format(time.RFC3339),
+		"usage":          usage,
+		"series":         series,
+		"topModels":      topModels,
+		"topAccounts":    topAccounts,
+		"recentFailures": recentFailures,
+		"summary":        summary,
+		"account_pool":   s.status.PoolStatus(),
+		"generated_at":   now.Format(time.RFC3339),
 	})
 }
 

@@ -309,6 +309,29 @@ export type Dashboard = {
   account_pool: PoolStatus;
   quota_circuit?: { open?: boolean; retry_at?: string; revision?: number } | null;
   generated_at: string;
+  period?: string;
+  usage?: {
+    requests?: number;
+    successfulRequests?: number;
+    failedRequests?: number;
+    tokens?: number;
+    p95DurationMs?: number;
+    successRate?: number;
+  };
+  series?: Array<{ bucketStart?: string; requests?: number; failures?: number; tokens?: number }>;
+  topModels?: Array<{ name?: string; count?: number }>;
+  topAccounts?: Array<{ name?: string; count?: number }>;
+  recentFailures?: Array<{
+    requestId?: string;
+    startedAt?: string;
+    model?: string;
+    accountId?: string;
+    statusCode?: number;
+    errorType?: string;
+    errorCode?: string;
+    path?: string;
+    durationMs?: number;
+  }>;
 };
 
 export type PublicAccount = {
