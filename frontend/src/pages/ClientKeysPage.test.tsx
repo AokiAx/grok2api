@@ -123,4 +123,30 @@ describe("ClientKeysPage", () => {
     await user.click(screen.getByRole("button", { name: "撤销密钥" }));
     expect(apiMocks.revokeClientKey).toHaveBeenCalledWith("ck_1");
   });
+
+  it("requires explicit unlimited confirmation when editing zero limits", async () => {
+    const user = userEvent.setup();
+    render(<ClientKeysPage />);
+
+    await user.click(await screen.findByRole("button", { name: "查看 automation" }));
+    await screen.findByRole("heading", { name: "密钥详情" });
+
+    await user.clear(screen.getByLabelText("每分钟请求数"));
+    await user.type(screen.getByLabelText("每分钟请求数"), "0");
+    await user.clear(screen.getByLabelText("最大并发"));
+    await user.type(screen.getByLabelText("最大并发"), "0");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("RPM 不限");
+    expect(apiMocks.updateClientKey).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("checkbox", { name: "RPM 不限" }));
+    await user.click(screen.getByRole("checkbox", { name: "并发不限" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(apiMocks.updateClientKey).toHaveBeenCalledWith("ck_1", expect.objectContaining({
+      rpm_limit: 0,
+      max_concurrent: 0,
+    }));
+  });
 });
