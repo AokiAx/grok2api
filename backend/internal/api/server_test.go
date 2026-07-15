@@ -676,6 +676,61 @@ func TestUnexpectedGatewayErrorsDoNotLeakInternalDetails(t *testing.T) {
 	}
 }
 
+func TestUpstreamServerErrorResponsesDoNotLeakInternalDetails(t *testing.T) {
+	leakedBody := []byte(`upstream proxy failed at http://10.0.0.8:9000 C:\data\grok2api.db secret-stack`)
+	upstreamFailure := service.ChatResult{
+		Status: http.StatusBadGateway,
+		Header: http.Header{
+			"Content-Type":      []string{"text/plain"},
+			"Retry-After":       []string{"12"},
+			"X-Grok-Request-Id": []string{"req_failure"},
+		},
+		Body: leakedBody,
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "billing", method: http.MethodGet, path: "/v1/billing"},
+		{name: "chat canonical", method: http.MethodPost, path: "/v1/chat/completions", body: `{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "chat alias", method: http.MethodPost, path: "/chat/completions", body: `{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "responses", method: http.MethodPost, path: "/v1/responses", body: `{"model":"grok-4.5","input":"hi"}`},
+		{name: "messages", method: http.MethodPost, path: "/v1/messages", body: `{"model":"grok-4.5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gateway := &fakeGateway{result: upstreamFailure, requestResult: upstreamFailure}
+			server := api.NewServer(gateway, fakeStatus{}, "")
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+
+			server.Handler().ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			for _, leaked := range []string{"10.0.0.8", "grok2api.db", "secret-stack"} {
+				if strings.Contains(recorder.Body.String(), leaked) {
+					t.Fatalf("response leaked %q: %s", leaked, recorder.Body.String())
+				}
+			}
+			if !strings.Contains(recorder.Body.String(), `"message":"Upstream request failed"`) {
+				t.Fatalf("missing stable public error: %s", recorder.Body.String())
+			}
+			if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+				t.Fatalf("content-type=%q", got)
+			}
+			if recorder.Header().Get("Retry-After") != "12" || recorder.Header().Get("X-Grok-Request-Id") != "req_failure" {
+				t.Fatalf("safe failure headers missing: %v", recorder.Header())
+			}
+		})
+	}
+}
+
 func TestUpstreamResponseHeadersUseCompatibilityAllowlist(t *testing.T) {
 	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
