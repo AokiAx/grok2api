@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"unicode/utf8"
 )
 
 var ErrInvalidPasswordInput = errors.New("invalid admin password input")
@@ -18,18 +19,21 @@ func ReadPasswordStdin(input io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if bytes.IndexByte(data, 0) >= 0 {
+	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
 		return "", ErrInvalidPasswordInput
 	}
 	newline := bytes.IndexByte(data, '\n')
 	if newline >= 0 {
-		if newline != len(data)-1 || bytes.IndexByte(data[newline+1:], '\n') >= 0 {
+		if newline != len(data)-1 {
 			return "", ErrInvalidPasswordInput
 		}
 		data = data[:newline]
 		if len(data) > 0 && data[len(data)-1] == '\r' {
 			data = data[:len(data)-1]
 		}
+	}
+	if bytes.IndexByte(data, '\r') >= 0 {
+		return "", ErrInvalidPasswordInput
 	}
 	if len(data) > maximumAdminPasswordBytes {
 		return "", ErrInvalidPasswordInput
