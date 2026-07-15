@@ -11,9 +11,19 @@ vi.mock("@/auth/AuthContext", () => ({
 }));
 
 describe("AppShell", () => {
-  it("exposes client-key administration in the primary navigation", () => {
-    render(<MemoryRouter><AppShell /></MemoryRouter>);
+  it("exposes the primary five-item navigation", () => {
+    render(
+      <MemoryRouter>
+        <AppShell />
+      </MemoryRouter>,
+    );
 
-    expect(screen.getByRole("link", { name: "客户端密钥" })).toHaveAttribute("href", "/client-keys");
+    expect(screen.getByRole("link", { name: "总览" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("link", { name: "账号" })).toHaveAttribute("href", "/accounts");
+    expect(screen.getByRole("link", { name: "密钥" })).toHaveAttribute("href", "/client-keys");
+    expect(screen.getByRole("link", { name: "模型" })).toHaveAttribute("href", "/models");
+    expect(screen.getByRole("link", { name: "设置" })).toHaveAttribute("href", "/settings");
+    expect(screen.queryByRole("link", { name: "导入" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "系统" })).toBeNull();
   });
 });

@@ -63,7 +63,7 @@ describe("ClientKeysPage", () => {
     render(<ClientKeysPage />);
     await screen.findByText("automation");
 
-    await user.click(screen.getByRole("button", { name: "创建客户端密钥" }));
+    await user.click(screen.getByRole("button", { name: "创建密钥" }));
     await user.click(screen.getByRole("button", { name: "生成密钥" }));
     expect(screen.getByRole("alert")).toHaveTextContent("请选择模型权限");
     expect(apiMocks.createClientKey).not.toHaveBeenCalled();

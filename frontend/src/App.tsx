@@ -4,11 +4,9 @@ import { AppShell } from "@/layout/AppShell";
 import { AccountsPage } from "@/pages/AccountsPage";
 import { ClientKeysPage } from "@/pages/ClientKeysPage";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { ImportPage } from "@/pages/ImportPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { ModelsPage } from "@/pages/ModelsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
-import { SystemPage } from "@/pages/SystemPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { ready } = useAuth();
@@ -39,10 +37,10 @@ export function App() {
         <Route index element={<DashboardPage />} />
         <Route path="accounts" element={<AccountsPage />} />
         <Route path="client-keys" element={<ClientKeysPage />} />
-        <Route path="import" element={<ImportPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="system" element={<SystemPage />} />
+        <Route path="import" element={<Navigate to="/accounts" replace />} />
+        <Route path="system" element={<Navigate to="/settings" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

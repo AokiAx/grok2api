@@ -10,6 +10,7 @@ import {
   Search,
   Trash2,
   Undo2,
+  Upload,
   X,
 } from "lucide-react";
 import {
@@ -26,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
 import { formatAdaptiveRatio } from "@/lib/formatNumber";
+import { ImportPage } from "@/pages/ImportPage";
 
 function formatDate(value?: string) {
   if (!value) return "—";
@@ -37,7 +39,10 @@ function quotaText(item: PublicAccount) {
   return item.quota_limit > 0 ? formatAdaptiveRatio(item.quota_actual, item.quota_limit) : { display: "—", exact: "—" };
 }
 
+type AccountsTab = "list" | "import";
+
 export function AccountsPage() {
+  const [tab, setTab] = useState<AccountsTab>("list");
   const [pool, setPool] = useState("all");
   const [qDraft, setQDraft] = useState("");
   const [q, setQ] = useState("");
@@ -198,16 +203,53 @@ export function AccountsPage() {
         <div>
           <h1 className="text-xl font-medium tracking-tight">账号</h1>
           <p className="mt-1 text-xs text-muted-foreground">
-            共 <span className="tabular-nums">{data?.total ?? "—"}</span> 条
-            {q ? ` · 正在搜索“${q}”` : " · 管理账号状态、额度与并发"}
+            {tab === "import"
+              ? "JSON 批量导入与 Build Device OAuth 入库"
+              : (
+                <>
+                  共 <span className="tabular-nums">{data?.total ?? "—"}</span> 条
+                  {q ? ` · 正在搜索“${q}”` : " · 管理账号状态、额度与并发"}
+                </>
+              )}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-          <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-          {loading ? "刷新中" : "刷新"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 rounded-full bg-secondary/60 p-0.5" aria-label="账号分区">
+            <button
+              type="button"
+              className={cn(
+                "h-7 rounded-full px-3 text-[11px] font-medium text-muted-foreground transition-colors",
+                tab === "list" && "bg-primary text-primary-foreground",
+              )}
+              onClick={() => setTab("list")}
+            >
+              列表
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "inline-flex h-7 items-center gap-1 rounded-full px-3 text-[11px] font-medium text-muted-foreground transition-colors",
+                tab === "import" && "bg-primary text-primary-foreground",
+              )}
+              onClick={() => setTab("import")}
+            >
+              <Upload className="h-3 w-3" />
+              导入
+            </button>
+          </div>
+          {tab === "list" ? (
+            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+              {loading ? "刷新中" : "刷新"}
+            </Button>
+          ) : null}
+        </div>
       </header>
 
+      {tab === "import" ? <ImportPage embedded /> : null}
+
+      {tab === "list" ? (
+      <>
       <Card>
         <CardContent className="p-3">
           <form
@@ -595,6 +637,8 @@ export function AccountsPage() {
           </CardContent>
         </Card>
       </div>
+      </>
+      ) : null}
     </div>
   );
 }

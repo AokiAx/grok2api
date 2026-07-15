@@ -4,13 +4,18 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/cn";
+import { SystemPage } from "@/pages/SystemPage";
 
 function num(v: string, fallback: number) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
+type SettingsTab = "runtime" | "system";
+
 export function SettingsPage() {
+  const [tab, setTab] = useState<SettingsTab>("runtime");
   const [doc, setDoc] = useState<SettingsDocument | null>(null);
   const [snapshots, setSnapshots] = useState<SettingsSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -77,35 +82,63 @@ export function SettingsPage() {
     }
   }
 
-  if (!doc) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-xl font-medium">设置</h1>
-        {error ? <p className="text-sm text-destructive">{error}</p> : <p className="text-sm text-muted-foreground">加载中…</p>}
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-8">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-xl font-medium">设置中心</h1>
+          <h1 className="text-xl font-medium">设置</h1>
           <p className="mt-1.5 text-xs text-muted-foreground">
-            版本化运行配置 · revision {doc.revision}
-            {doc.updated_at ? ` · 更新于 ${new Date(doc.updated_at).toLocaleString()}` : ""}
+            {tab === "system"
+              ? "运行信息、公开配置与 API 文档入口"
+              : doc
+                ? `版本化运行配置 · revision ${doc.revision}${doc.updated_at ? ` · 更新于 ${new Date(doc.updated_at).toLocaleString()}` : ""}`
+                : "版本化运行配置"}
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={busy}>
-            刷新
-          </Button>
-          <Button size="sm" onClick={() => void save()} disabled={busy}>
-            {busy ? "保存中…" : "保存"}
-          </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 rounded-full bg-secondary/60 p-0.5" aria-label="设置分区">
+            <button
+              type="button"
+              className={cn(
+                "h-7 rounded-full px-3 text-[11px] font-medium text-muted-foreground transition-colors",
+                tab === "runtime" && "bg-primary text-primary-foreground",
+              )}
+              onClick={() => setTab("runtime")}
+            >
+              运行配置
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "h-7 rounded-full px-3 text-[11px] font-medium text-muted-foreground transition-colors",
+                tab === "system" && "bg-primary text-primary-foreground",
+              )}
+              onClick={() => setTab("system")}
+            >
+              系统
+            </button>
+          </div>
+          {tab === "runtime" ? (
+            <>
+              <Button variant="outline" size="sm" onClick={() => void load()} disabled={busy}>
+                刷新
+              </Button>
+              <Button size="sm" onClick={() => void save()} disabled={busy || !doc}>
+                {busy ? "保存中…" : "保存"}
+              </Button>
+            </>
+          ) : null}
         </div>
       </div>
 
+      {tab === "system" ? <SystemPage embedded /> : null}
+
+      {tab === "runtime" && !doc ? (
+        error ? <p className="text-sm text-destructive">{error}</p> : <p className="text-sm text-muted-foreground">加载中…</p>
+      ) : null}
+
+      {tab === "runtime" && doc ? (
+        <>
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       {message ? <p className="text-sm text-emerald-600 dark:text-emerald-400">{message}</p> : null}
 
@@ -290,6 +323,8 @@ export function SettingsPage() {
           </ul>
         </CardContent>
       </Card>
+        </>
+      ) : null}
     </div>
   );
 }

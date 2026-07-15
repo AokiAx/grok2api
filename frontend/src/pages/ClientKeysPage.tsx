@@ -64,7 +64,7 @@ export function ClientKeysPage() {
     <div className="space-y-5">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-xl font-medium tracking-tight">客户端密钥</h1>
+          <h1 className="text-xl font-medium tracking-tight">密钥</h1>
           <p className="mt-1 text-xs text-muted-foreground">
             为客户端分配模型权限、RPM 和并发边界；secret 仅在创建时展示一次。
           </p>
@@ -76,7 +76,7 @@ export function ClientKeysPage() {
           </Button>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="size-3.5" />
-            创建客户端密钥
+            创建密钥
           </Button>
         </div>
       </header>

@@ -6,7 +6,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 const linkClass =
   "inline-flex h-8 items-center gap-1.5 rounded-full border border-input bg-background px-3 text-xs font-medium transition-colors hover:bg-secondary";
 
-export function SystemPage() {
+type SystemPageProps = {
+  embedded?: boolean;
+};
+
+export function SystemPage({ embedded = false }: SystemPageProps) {
   const [info, setInfo] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,11 +29,13 @@ export function SystemPage() {
   }, []);
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-xl font-medium">系统</h1>
-        <p className="mt-1.5 text-xs text-muted-foreground">当前服务版本、公开配置与 API 文档入口。</p>
-      </div>
+    <div className={embedded ? "space-y-4" : "space-y-8"}>
+      {!embedded ? (
+        <div>
+          <h1 className="text-xl font-medium">系统</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">当前服务版本、公开配置与 API 文档入口。</p>
+        </div>
+      ) : null}
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       <div className="grid gap-4 lg:grid-cols-2">

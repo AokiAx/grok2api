@@ -1,4 +1,4 @@
-import { Boxes, Github, KeyRound, LayoutDashboard, LogOut, Menu, Settings2, SlidersHorizontal, Upload, Users, X } from "lucide-react";
+import { Boxes, Github, KeyRound, LayoutDashboard, LogOut, Menu, SlidersHorizontal, Users, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "@/auth/AuthContext";
@@ -9,11 +9,9 @@ import { cn } from "@/lib/cn";
 const navigation = [
   { to: "/", label: "总览", icon: LayoutDashboard, end: true },
   { to: "/accounts", label: "账号", icon: Users, end: false },
-  { to: "/client-keys", label: "客户端密钥", icon: KeyRound, end: false },
-  { to: "/import", label: "导入", icon: Upload, end: false },
+  { to: "/client-keys", label: "密钥", icon: KeyRound, end: false },
   { to: "/models", label: "模型", icon: Boxes, end: false },
   { to: "/settings", label: "设置", icon: SlidersHorizontal, end: false },
-  { to: "/system", label: "系统", icon: Settings2, end: false },
 ];
 
 export function AppShell() {

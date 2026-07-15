@@ -31,8 +31,10 @@ npm run build
 | 路由 | 说明 |
 |------|------|
 | `/login` | 管理员 session 登录；access token 仅保存在内存，refresh 使用 HttpOnly cookie |
-| `/` | 号池总览 |
-| `/accounts` | 账号列表 / 恢复 / 删除 |
-| `/import` | 导入 preview/commit |
-| `/client-keys` | Client Key 列表、创建、权限编辑与撤销；secret 仅创建后展示一次 |
-| `/system` | 版本信息 |
+| `/` | 号池总览与请求审计 |
+| `/accounts` | 账号列表 / 恢复 / 删除；页内「导入」含 JSON 与 Device OAuth |
+| `/client-keys` | 客户端密钥列表、创建、权限编辑与撤销；secret 仅创建后展示一次 |
+| `/models` | 模型注册表 |
+| `/settings` | 运行配置与版本回滚；页内「系统」含版本信息与 OpenAPI 入口 |
+| `/import` | 兼容跳转 → `/accounts` |
+| `/system` | 兼容跳转 → `/settings` |

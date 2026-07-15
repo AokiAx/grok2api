@@ -22,7 +22,11 @@ import {
 } from "@/lib/importNormalize";
 import { DeviceAuthPanel } from "@/pages/DeviceAuthPanel";
 
-export function ImportPage() {
+type ImportPageProps = {
+  embedded?: boolean;
+};
+
+export function ImportPage({ embedded = false }: ImportPageProps) {
   const [raw, setRaw] = useState("");
   const [fileMeta, setFileMeta] = useState("数组 / {accounts:[]} / auth.json map");
   const [output, setOutput] = useState("等待操作");
@@ -84,16 +88,22 @@ export function ImportPage() {
   }
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <h1 className="text-xl font-medium tracking-tight">导入账号</h1>
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            JSON 批量导入，或使用 Build Device OAuth 单账号授权入库。
-          </p>
+    <div className={embedded ? "space-y-5" : "space-y-8"}>
+      {!embedded ? (
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+          <div>
+            <h1 className="text-xl font-medium tracking-tight">导入账号</h1>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              JSON 批量导入，或使用 Build Device OAuth 单账号授权入库。
+            </p>
+          </div>
+          <Badge>{fileMeta}</Badge>
         </div>
-        <Badge>{fileMeta}</Badge>
-      </div>
+      ) : (
+        <div className="flex justify-end">
+          <Badge>{fileMeta}</Badge>
+        </div>
+      )}
 
       <DeviceAuthPanel />
 
