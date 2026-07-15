@@ -624,6 +624,14 @@ func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
 	a.pool.ApplyActiveSize(a.settings.ActiveSize)
 	stickyTTL := time.Duration(a.settings.StickyTTLMinutes) * time.Minute
 	a.pool.WithSticky(a.settings.StickyPool, stickyTTL)
+	if a.gateway != nil {
+		a.gateway.ConfigureRuntime(
+			time.Duration(a.settings.QuotaRetryMinutes)*time.Minute,
+			time.Duration(a.settings.RateRetrySeconds)*time.Second,
+			time.Duration(a.settings.AcquireTimeoutSec)*time.Second,
+			a.settings.MaxAttempts,
+		)
+	}
 	slog.Info("applied managed settings", "revision", doc.Revision)
 	return nil
 }

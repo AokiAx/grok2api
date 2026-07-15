@@ -765,3 +765,22 @@ func mapSelectionError(sel *scheduler.SelectionError) *PoolUnavailableError {
 	}
 	return out
 }
+
+// ConfigureRuntime updates selected runtime knobs without rebuilding the gateway.
+func (g *Gateway) ConfigureRuntime(quotaRetry, rateRetry, acquireTimeout time.Duration, maxAttempts int) {
+	if g == nil {
+		return
+	}
+	if quotaRetry > 0 {
+		g.quotaRetry = quotaRetry
+	}
+	if rateRetry > 0 {
+		g.rateRetry = rateRetry
+	}
+	if acquireTimeout > 0 {
+		g.acquireTimeout = acquireTimeout
+	}
+	if maxAttempts > 0 {
+		g.maxAttempts = maxAttempts
+	}
+}
