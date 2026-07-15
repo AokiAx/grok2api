@@ -445,15 +445,16 @@ export const adminApi = {
     }
   },
   logout: async () => {
-    try {
-      return await request<{ loggedOut?: boolean; logged_out?: boolean }>(
-        "/api/admin/v1/auth/logout",
-        { method: "POST" },
-      );
-    } finally {
-      sessionGeneration += 1;
-      clearAccessToken();
-    }
+    const token = accessToken;
+    sessionGeneration += 1;
+    clearAccessToken();
+    const headers = new Headers();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    return request<{ loggedOut?: boolean; logged_out?: boolean }>(
+      "/api/admin/v1/auth/logout",
+      { method: "POST", headers },
+      { retryUnauthorized: false },
+    );
   },
   me: () => request<AdminIdentity>("/api/admin/v1/auth/me"),
   dashboard: () => request<Dashboard>("/api/admin/v1/dashboard"),

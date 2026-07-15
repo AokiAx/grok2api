@@ -86,10 +86,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    probeGeneration.current += 1;
+    setAuthenticated(false);
+    setError(null);
     try {
       await adminApi.logout();
-    } finally {
-      setAuthenticated(false);
+    } catch {
+      // Local session invalidation is authoritative; server logout is best effort.
     }
   }, []);
 
