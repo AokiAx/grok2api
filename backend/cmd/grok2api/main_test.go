@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -19,12 +20,142 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/api"
+	"github.com/AokiAx/grok2api/backend/internal/bootstrap"
 	"github.com/AokiAx/grok2api/backend/internal/config"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 	_ "modernc.org/sqlite"
 )
+
+func TestRunBootstrapAdminFromStdinIsExplicitAndIsolatedFromLegacyMigration(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configData, err := json.Marshal(map[string]any{
+		"data_dir":       dir,
+		"panel_password": "legacy-panel-password",
+		"api_key":        "legacy-client-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cli_accounts.json"), []byte(`{"accounts":[{"id":"legacy-account","key":"secret","enabled":true}]}`), 0o600); err != nil {
+		t.Fatalf("write legacy accounts: %v", err)
+	}
+
+	const password = "  explicit-bootstrap-password  "
+	var output bytes.Buffer
+	if err := runWithIO(
+		context.Background(),
+		[]string{"bootstrap-admin", "--config", configPath, "--password-stdin"},
+		strings.NewReader(password+"\r\n"),
+		&output,
+	); err != nil {
+		t.Fatalf("bootstrap admin: %v", err)
+	}
+
+	repo, err := sqlite.OpenSQLite(context.Background(), filepath.Join(dir, "grok2api.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+	user, found, err := repo.GetAdminUserByUsername(context.Background(), "admin")
+	if err != nil || !found || !security.VerifyAdminPassword(user.Password, password) {
+		t.Fatalf("admin found=%v err=%v user=%+v", found, err, user)
+	}
+	if security.VerifyAdminPassword(user.Password, strings.TrimSpace(password)) {
+		t.Fatal("bootstrap password whitespace was trimmed")
+	}
+	if count, err := repo.AccountCount(context.Background()); err != nil || count != 0 {
+		t.Fatalf("legacy account count=%d err=%v", count, err)
+	}
+	legacyHash := sha256.Sum256([]byte("legacy-client-secret"))
+	if _, found, err := repo.FindClientKeyByHash(context.Background(), legacyHash); err != nil || found {
+		t.Fatalf("legacy client key found=%v err=%v", found, err)
+	}
+
+	raw, err := sql.Open("sqlite", filepath.Join(dir, "grok2api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var marker string
+	if err := raw.QueryRow(`SELECT value FROM app_meta WHERE key='admin_bootstrap_v1'`).Scan(&marker); err != nil || marker != "1" {
+		t.Fatalf("admin marker=%q err=%v", marker, err)
+	}
+	if err := raw.QueryRow(`SELECT value FROM app_meta WHERE key='legacy_admin_bootstrap_v1'`).Scan(&marker); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("legacy marker=%q err=%v, want absent", marker, err)
+	}
+
+	stdout := output.String()
+	if !strings.Contains(stdout, `"status":"created"`) || !strings.Contains(stdout, `"username":"admin"`) {
+		t.Fatalf("output=%s", stdout)
+	}
+	for _, secret := range []string{password, "explicit-bootstrap-password", "legacy-panel-password", "legacy-client-secret", user.Password.Hash} {
+		if strings.Contains(stdout, secret) {
+			t.Fatalf("bootstrap output leaked secret %q: %s", secret, stdout)
+		}
+	}
+
+	err = runWithIO(
+		context.Background(),
+		[]string{"bootstrap-admin", "--config", configPath, "--password-stdin"},
+		strings.NewReader("different-bootstrap-password\n"),
+		&bytes.Buffer{},
+	)
+	if !errors.Is(err, bootstrap.ErrBootstrapAlreadyCompleted) {
+		t.Fatalf("second bootstrap err=%v", err)
+	}
+	unchanged, found, err := repo.GetAdminUserByUsername(context.Background(), "admin")
+	if err != nil || !found || unchanged.Password.Hash != user.Password.Hash {
+		t.Fatalf("admin changed found=%v err=%v user=%+v", found, err, unchanged)
+	}
+}
+
+func TestRunBootstrapAdminRequiresPasswordStdinAndRejectsWeakPassword(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		input     string
+		wantError error
+		wantText  string
+	}{
+		{name: "missing flag", arguments: nil, input: "long-enough-password\n", wantText: "--password-stdin"},
+		{name: "weak password", arguments: []string{"--password-stdin"}, input: "short\n", wantError: bootstrap.ErrWeakPassword},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			configData, err := json.Marshal(map[string]any{"data_dir": dir, "panel_password": "must-not-be-used"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			arguments := append([]string{"bootstrap-admin", "--config", configPath}, test.arguments...)
+			err = runWithIO(context.Background(), arguments, strings.NewReader(test.input), &bytes.Buffer{})
+			if test.wantError != nil && !errors.Is(err, test.wantError) {
+				t.Fatalf("err=%v want=%v", err, test.wantError)
+			}
+			if test.wantText != "" && (err == nil || !strings.Contains(err.Error(), test.wantText)) {
+				t.Fatalf("err=%v want text %q", err, test.wantText)
+			}
+
+			repo, openErr := sqlite.OpenSQLite(context.Background(), filepath.Join(dir, "grok2api.db"))
+			if openErr != nil {
+				t.Fatalf("open sqlite: %v", openErr)
+			}
+			defer repo.Close()
+			if count, countErr := repo.CountAdminUsers(context.Background()); countErr != nil || count != 0 {
+				t.Fatalf("admin count=%d err=%v", count, countErr)
+			}
+		})
+	}
+}
 
 func TestRunBootstrapsLegacySecurityBeforeServeAndClearsSecrets(t *testing.T) {
 	tests := []struct {
