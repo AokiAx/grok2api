@@ -50,7 +50,7 @@
 - `/api/admin/v1/*`：`{ok,data,error}` envelope  
 - 旧 `/admin/api/*`：flat JSON，供 `panel.html`  
 - `/healthz` `/readyz` 别名  
-- login 暂返回同一 admin secret 作 Bearer（后续可换 session）
+- 管理认证已切换为短期 opaque access token + HttpOnly refresh cookie rotation；旧配置密钥仅用于一次性迁移
 
 ### Phase C — 前端重写
 
@@ -124,7 +124,7 @@ repository:
 
 - Grok Web / Console Provider  
 - 完整 `/responses/{id}` store ownership（free 池收益低）  
-- 内嵌 Device OAuth 登录 UI（继续外部导入 / grok-register）  
+- Build Device OAuth 单账号自助接入（已进入后续产品计划；不恢复旧批量注册机）
 - 为管理面强行引入 Gin 全家桶  
 
 ---
