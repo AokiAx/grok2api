@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, Plus, RefreshCw } from "lucide-react";
 import {
   adminApi,
@@ -23,21 +23,31 @@ export function ClientKeysPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientKey | null>(null);
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
     setLoading(true);
     setError(null);
     try {
-      setData(await adminApi.clientKeys({ q, origin, page, page_size: 20 }));
+      const result = await adminApi.clientKeys({ q, origin, page, page_size: 20 });
+      if (generation !== loadGeneration.current) return;
+      setData(result);
     } catch (failure) {
-      setError(clientKeyErrorMessage(failure, "加载客户端密钥失败"));
+      if (generation === loadGeneration.current) {
+        setError(clientKeyErrorMessage(failure, "加载客户端密钥失败"));
+      }
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }, [origin, page, q]);
 
   useEffect(() => {
     void load();
+    return () => {
+      loadGeneration.current += 1;
+    };
   }, [load]);
 
   function created(key: ClientKey & { secret: string }) {

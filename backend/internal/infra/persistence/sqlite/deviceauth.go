@@ -46,14 +46,18 @@ func (r *SQLite) CreateDeviceAuthSession(ctx context.Context, item deviceauth.Se
 	if err := item.Normalize(); err != nil {
 		return err
 	}
-	_, err := r.db.ExecContext(
+	deviceCode, err := r.sealToken(item.DeviceCode)
+	if err != nil {
+		return fmt.Errorf("encrypt device auth code: %w", err)
+	}
+	_, err = r.db.ExecContext(
 		ctx,
 		`INSERT INTO device_auth_sessions (
 			id, status, issuer, client_id, scope, user_code, verification_uri, verification_uri_complete,
 			device_code, interval_sec, expires_at, last_error, account_id, created_at, updated_at, completed_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, string(item.Status), item.Issuer, item.ClientID, item.Scope, item.UserCode,
-		item.VerificationURI, item.VerificationURIComplete, item.DeviceCode, item.IntervalSec,
+		item.VerificationURI, item.VerificationURIComplete, deviceCode, item.IntervalSec,
 		formatTime(item.ExpiresAt), item.LastError, item.AccountID,
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt), formatTime(item.CompletedAt),
 	)
@@ -68,7 +72,7 @@ func (r *SQLite) GetDeviceAuthSession(ctx context.Context, id string) (deviceaut
 		 FROM device_auth_sessions WHERE id=?`,
 		strings.TrimSpace(id),
 	)
-	item, err := scanDeviceAuth(row)
+	item, err := r.scanDeviceAuth(row)
 	if err == sql.ErrNoRows {
 		return deviceauth.Session{}, false, nil
 	}
@@ -82,14 +86,18 @@ func (r *SQLite) UpdateDeviceAuthSession(ctx context.Context, item deviceauth.Se
 	if err := item.Normalize(); err != nil {
 		return err
 	}
-	_, err := r.db.ExecContext(
+	deviceCode, err := r.sealToken(item.DeviceCode)
+	if err != nil {
+		return fmt.Errorf("encrypt device auth code: %w", err)
+	}
+	_, err = r.db.ExecContext(
 		ctx,
 		`UPDATE device_auth_sessions SET
 			status=?, issuer=?, client_id=?, scope=?, user_code=?, verification_uri=?, verification_uri_complete=?,
 			device_code=?, interval_sec=?, expires_at=?, last_error=?, account_id=?, updated_at=?, completed_at=?
 		 WHERE id=?`,
 		string(item.Status), item.Issuer, item.ClientID, item.Scope, item.UserCode,
-		item.VerificationURI, item.VerificationURIComplete, item.DeviceCode, item.IntervalSec,
+		item.VerificationURI, item.VerificationURIComplete, deviceCode, item.IntervalSec,
 		formatTime(item.ExpiresAt), item.LastError, item.AccountID, formatTime(item.UpdatedAt),
 		formatTime(item.CompletedAt), item.ID,
 	)
@@ -115,7 +123,7 @@ func (r *SQLite) ListDeviceAuthSessions(ctx context.Context, limit int) ([]devic
 	defer rows.Close()
 	var out []deviceauth.Session
 	for rows.Next() {
-		item, err := scanDeviceAuth(rows)
+		item, err := r.scanDeviceAuth(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +136,7 @@ type deviceScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanDeviceAuth(row deviceScanner) (deviceauth.Session, error) {
+func (r *SQLite) scanDeviceAuth(row deviceScanner) (deviceauth.Session, error) {
 	var item deviceauth.Session
 	var status, expiresAt, createdAt, updatedAt, completedAt string
 	if err := row.Scan(
@@ -143,5 +151,10 @@ func scanDeviceAuth(row deviceScanner) (deviceauth.Session, error) {
 	item.CreatedAt = parseTime(createdAt)
 	item.UpdatedAt = parseTime(updatedAt)
 	item.CompletedAt = parseTime(completedAt)
+	deviceCode, err := r.openToken(item.DeviceCode)
+	if err != nil {
+		return deviceauth.Session{}, fmt.Errorf("decrypt device auth code: %w", err)
+	}
+	item.DeviceCode = deviceCode
 	return item, nil
 }

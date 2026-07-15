@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
@@ -71,6 +72,7 @@ type AccountSink interface {
 }
 
 type Service struct {
+	runtimeMu   sync.RWMutex
 	repository  repository.AccountRepository
 	validator   Validator
 	maintenance Maintenance
@@ -94,7 +96,6 @@ func WithMaintenance(maintenance Maintenance) Option {
 	}
 }
 
-
 func WithQuotaRetry(duration time.Duration) Option {
 	return func(service *Service) {
 		if duration > 0 {
@@ -116,6 +117,8 @@ func (s *Service) ConfigureRuntime(quotaRetry, rateRetry time.Duration) {
 	if s == nil {
 		return
 	}
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
 	if quotaRetry > 0 {
 		s.quotaRetry = quotaRetry
 	}
@@ -704,11 +707,15 @@ func (s *Service) retryAt(
 	if !previous.IsZero() && previous.After(now) {
 		return previous
 	}
+	s.runtimeMu.RLock()
+	quotaRetry := s.quotaRetry
+	rateRetry := s.rateRetry
+	s.runtimeMu.RUnlock()
 	switch reason {
 	case account.ReasonQuota:
-		return now.Add(s.quotaRetry)
+		return now.Add(quotaRetry)
 	case account.ReasonCooldown:
-		return now.Add(s.rateRetry)
+		return now.Add(rateRetry)
 	case account.ReasonValidating:
 		// New-account chat provisioning window; recovery re-probes soon.
 		return now.Add(45 * time.Second)

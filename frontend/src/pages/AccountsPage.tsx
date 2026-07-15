@@ -66,6 +66,7 @@ export function AccountsPage() {
   const [events, setEvents] = useState<AccountEvent[]>([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [maintenanceBusy, setMaintenanceBusy] = useState<Set<string>>(() => new Set());
+  const loadGeneration = useRef(0);
 
   useEffect(() => {
     if (!importMenuOpen) return;
@@ -115,6 +116,8 @@ export function AccountsPage() {
   }
 
   const load = useCallback(async () => {
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
     setLoading(true);
     setError(null);
     try {
@@ -124,18 +127,28 @@ export function AccountsPage() {
         page,
         page_size: 20,
       });
+      if (generation !== loadGeneration.current) return;
       setData(result);
       setSelected((prev) => (prev ? result.accounts.find((a) => a.id === prev.id) || null : null));
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "加载失败");
+      if (generation === loadGeneration.current) {
+        setError(err instanceof AdminApiError ? err.message : "加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }, [pool, q, page]);
 
   useEffect(() => {
     void load();
+    return () => {
+      loadGeneration.current += 1;
+    };
   }, [load]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [page, pool, q]);
 
   useEffect(() => {
     if (!selected) {
@@ -183,7 +196,8 @@ export function AccountsPage() {
   }
 
   async function runBatch(action: "enable" | "disable" | "recover" | "delete") {
-    const ids = Array.from(selectedIds);
+    const visibleIds = new Set((data?.accounts || []).map((account) => account.id));
+    const ids = Array.from(selectedIds).filter((id) => visibleIds.has(id));
     if (!ids.length) return;
     const labels = { enable: "启用", disable: "禁用", recover: "恢复", delete: "删除" } as const;
     if (!window.confirm(`确认批量${labels[action]} ${ids.length} 个账号？`)) return;

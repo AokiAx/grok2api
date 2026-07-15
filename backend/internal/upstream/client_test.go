@@ -173,6 +173,34 @@ func TestStreamingRequestIsNotCancelledByNonStreamingTotalTimeout(t *testing.T) 
 	}
 }
 
+func TestConfigureRequestTimeoutAppliesToNewNonStreamingRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	baseClient := server.Client()
+	baseClient.Timeout = time.Second
+	client := upstream.NewClient(server.URL, "0.2.93", baseClient)
+	client.ConfigureRequestTimeout(10 * time.Millisecond)
+
+	response, err := client.Request(
+		context.Background(),
+		account.Account{ID: "timeout-account", AccessToken: "token"},
+		http.MethodGet,
+		"/models",
+		nil,
+		false,
+	)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected updated non-stream request timeout")
+	}
+}
+
 func TestClientStableIdentityAndStreamEncoding(t *testing.T) {
 	var firstAgent, firstSession, secondAgent, secondSession string
 	var acceptEncoding string

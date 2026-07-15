@@ -28,6 +28,9 @@ func (adminAuthContractRepository) CreateAdminSession(context.Context, adminauth
 func (adminAuthContractRepository) CreateAdminSessionWithLoginSuccess(context.Context, adminauth.Session, adminauth.LoginAttempt) error {
 	return nil
 }
+func (adminAuthContractRepository) CreateAdminSessionWithReservedLoginSuccess(context.Context, int64, adminauth.Session, adminauth.LoginAttempt) error {
+	return nil
+}
 func (adminAuthContractRepository) GetAdminSession(context.Context, string) (adminauth.Session, bool, error) {
 	return adminauth.Session{}, false, nil
 }
@@ -44,6 +47,15 @@ func (adminAuthContractRepository) RevokeAdminSessionFamily(context.Context, str
 	return nil
 }
 func (adminAuthContractRepository) RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error {
+	return nil
+}
+func (adminAuthContractRepository) ReserveAdminLoginAttempt(context.Context, adminauth.LoginAttempt, time.Time, int) (int64, bool, error) {
+	return 0, false, nil
+}
+func (adminAuthContractRepository) CompleteAdminLoginFailure(context.Context, int64, string) error {
+	return nil
+}
+func (adminAuthContractRepository) ReleaseAdminLoginReservation(context.Context, int64) error {
 	return nil
 }
 func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error) {
@@ -77,6 +89,9 @@ func (clientKeyContractRepository) ListClientKeysPage(context.Context, repositor
 	return repository.ListClientKeysResult{}, nil
 }
 func (clientKeyContractRepository) UpdateClientKeyPolicy(context.Context, string, repository.ClientKeyPolicyUpdate) error {
+	return nil
+}
+func (clientKeyContractRepository) UpdateClientKeyLastUsedAt(context.Context, string, time.Time) error {
 	return nil
 }
 func (clientKeyContractRepository) RevokeClientKey(context.Context, string, time.Time) error {

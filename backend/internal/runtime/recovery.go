@@ -600,7 +600,6 @@ func RecoverValidating(
 	return result, nil
 }
 
-
 // RuntimeKnobs is a shared, mutable holder for recovery parking backoffs.
 type RuntimeKnobs struct {
 	mu         sync.RWMutex
@@ -852,6 +851,10 @@ func RunRecovery(
 		option(&config)
 	}
 	runOnce := func(now time.Time) {
+		quotaRetry := config.quotaRetry
+		if config.knobs != nil {
+			quotaRetry = config.knobs.QuotaRetry()
+		}
 		if err := RecoverDue(ctx, pool, store, now); err != nil {
 			slog.Error("recovery promote tick failed", "error", err)
 		}
@@ -862,7 +865,7 @@ func RunRecovery(
 			} else if iso.Isolated > 0 {
 				slog.Info("recovery isolated revoked accounts", "isolated", iso.Isolated, "failed", iso.Failed)
 			}
-			if iso, err := IsolateExhaustedReady(ctx, pool, config.credentialStore, now, config.quotaRetry); err != nil {
+			if iso, err := IsolateExhaustedReady(ctx, pool, config.credentialStore, now, quotaRetry); err != nil {
 				slog.Error("recovery exhausted-ready isolation tick failed", "error", err)
 			} else if iso.Isolated > 0 {
 				slog.Info("recovery parked exhausted ready accounts", "isolated", iso.Isolated, "failed", iso.Failed)
@@ -879,7 +882,7 @@ func RunRecovery(
 				config.quotaProber,
 				config.validator,
 				now,
-				config.quotaRetry,
+				quotaRetry,
 				config.refresher,
 			); err != nil {
 				slog.Error("recovery quota tick failed", "phase", label, "error", err)

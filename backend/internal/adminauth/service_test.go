@@ -59,6 +59,15 @@ func (f *fakeRepo) CreateAdminSessionWithLoginSuccess(_ context.Context, s admin
 	f.attempts = append(f.attempts, a)
 	return nil
 }
+func (f *fakeRepo) CreateAdminSessionWithReservedLoginSuccess(ctx context.Context, reservationID int64, s adminauth.Session, a adminauth.LoginAttempt) error {
+	if f.createWithSuccessErr != nil {
+		return f.createWithSuccessErr
+	}
+	if err := f.ReleaseAdminLoginReservation(ctx, reservationID); err != nil {
+		return err
+	}
+	return f.CreateAdminSessionWithLoginSuccess(ctx, s, a)
+}
 func (f *fakeRepo) GetAdminSession(_ context.Context, id string) (adminauth.Session, bool, error) {
 	if f.getSessionErr != nil {
 		return adminauth.Session{}, false, f.getSessionErr
@@ -110,6 +119,41 @@ func (f *fakeRepo) RecordAdminLoginAttempt(_ context.Context, a adminauth.LoginA
 	f.attempts = append(f.attempts, a)
 	return nil
 }
+func (f *fakeRepo) ReserveAdminLoginAttempt(_ context.Context, a adminauth.LoginAttempt, _ time.Time, limit int) (int64, bool, error) {
+	failures := f.ipFailureCount
+	for _, attempt := range f.attempts {
+		if !attempt.Succeeded {
+			failures++
+		}
+	}
+	if failures >= limit {
+		return 0, false, nil
+	}
+	a.ID = int64(len(f.attempts) + 1)
+	f.attempts = append(f.attempts, a)
+	return a.ID, true, nil
+}
+func (f *fakeRepo) CompleteAdminLoginFailure(_ context.Context, reservationID int64, failureCode string) error {
+	if f.recordAttemptErr != nil {
+		return f.recordAttemptErr
+	}
+	for index := range f.attempts {
+		if f.attempts[index].ID == reservationID {
+			f.attempts[index].FailureCode = failureCode
+			return nil
+		}
+	}
+	return errors.New("reservation not found")
+}
+func (f *fakeRepo) ReleaseAdminLoginReservation(_ context.Context, reservationID int64) error {
+	for index := range f.attempts {
+		if f.attempts[index].ID == reservationID {
+			f.attempts = append(f.attempts[:index], f.attempts[index+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
 func (f *fakeRepo) CountRecentAdminLoginFailures(_ context.Context, _ string, _ string, _ time.Time) (int, error) {
 	return len(f.attempts), nil
 }
@@ -147,11 +191,12 @@ func TestLoginRateLimitCannotBeBypassedByRotatingUsername(t *testing.T) {
 
 func TestConcurrentFailedLoginsCannotExceedAttemptLimit(t *testing.T) {
 	ctx := context.Background()
-	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "admin-auth.db"))
+	database := filepath.Join(t.TempDir(), "admin-auth.db")
+	primary, err := sqlite.OpenSQLite(ctx, database)
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open primary sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = primary.Close() })
 
 	now := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
 	credential, err := security.HashAdminPassword("secret", 10)
@@ -162,25 +207,33 @@ func TestConcurrentFailedLoginsCannotExceedAttemptLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new admin user: %v", err)
 	}
-	if err := repo.CreateAdminUser(ctx, user); err != nil {
+	if err := primary.CreateAdminUser(ctx, user); err != nil {
 		t.Fatalf("create admin user: %v", err)
 	}
+	secondary, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open secondary sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = secondary.Close() })
 
-	service := NewService(repo, WithClock(func() time.Time { return now }))
+	services := []*Service{
+		NewService(primary, WithClock(func() time.Time { return now })),
+		NewService(secondary, WithClock(func() time.Time { return now })),
+	}
 	const requests = 12
 	start := make(chan struct{})
 	results := make(chan error, requests)
 	var workers sync.WaitGroup
 	workers.Add(requests)
 	for index := 0; index < requests; index++ {
-		go func() {
+		go func(service *Service) {
 			defer workers.Done()
 			<-start
 			_, loginErr := service.Login(ctx, LoginInput{
 				Username: "admin", Password: "wrong-password", SourceIP: "10.0.0.1",
 			})
 			results <- loginErr
-		}()
+		}(services[index%len(services)])
 	}
 	close(start)
 	workers.Wait()

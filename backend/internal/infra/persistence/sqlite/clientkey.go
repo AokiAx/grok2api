@@ -174,6 +174,24 @@ func (r *SQLite) RevokeClientKey(ctx context.Context, id string, at time.Time) e
 	return nil
 }
 
+func (r *SQLite) UpdateClientKeyLastUsedAt(ctx context.Context, id string, at time.Time) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("client key id is required")
+	}
+	if at.IsZero() {
+		return errors.New("client key last-used time is required")
+	}
+	formatted := formatTime(at)
+	_, err := r.db.ExecContext(ctx, `UPDATE client_keys SET last_used_at=CASE
+		WHEN last_used_at='' OR last_used_at < ? THEN ? ELSE last_used_at END
+		WHERE id=?`, formatted, formatted, id)
+	if err != nil {
+		return fmt.Errorf("update client key last used %s: %w", id, err)
+	}
+	return nil
+}
+
 func (r *SQLite) ClientAuthRequired(ctx context.Context) (bool, error) {
 	var raw string
 	if err := r.db.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key='client_auth_required'`).Scan(&raw); err != nil {

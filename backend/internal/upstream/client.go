@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
@@ -35,6 +36,26 @@ type clientIdentity struct {
 	sessionID string
 }
 
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (body *cancelReadCloser) Read(buffer []byte) (int, error) {
+	n, err := body.ReadCloser.Read(buffer)
+	if err != nil {
+		body.once.Do(body.cancel)
+	}
+	return n, err
+}
+
+func (body *cancelReadCloser) Close() error {
+	err := body.ReadCloser.Close()
+	body.once.Do(body.cancel)
+	return err
+}
+
 type Client struct {
 	baseURL          string
 	clientVersion    string
@@ -43,6 +64,7 @@ type Client struct {
 	userAgent        string
 	httpClient       *http.Client
 	streamHTTPClient *http.Client
+	requestTimeout   atomic.Int64
 	discoveryMu      sync.Mutex
 	tokenEndpoints   map[string]string
 	deviceEndpoints  map[string]string
@@ -58,6 +80,11 @@ func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	requestTimeout := httpClient.Timeout
+	// Timeouts are applied through request contexts so they can be updated
+	// atomically while requests are in flight. Streaming requests intentionally
+	// remain unbounded for their full response lifetime.
+	httpClient.Timeout = 0
 	streamHTTPClient := *httpClient
 	streamHTTPClient.Timeout = 0
 	tokenAuth := strings.TrimSpace(opts.TokenAuth)
@@ -68,7 +95,7 @@ func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client
 	if identifier == "" {
 		identifier = "grok-cli"
 	}
-	return &Client{
+	client := &Client{
 		baseURL:          strings.TrimRight(baseURL, "/"),
 		clientVersion:    clientVersion,
 		tokenAuth:        tokenAuth,
@@ -80,6 +107,35 @@ func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client
 		deviceEndpoints:  make(map[string]string),
 		identities:       make(map[string]clientIdentity),
 	}
+	client.ConfigureRequestTimeout(requestTimeout)
+	return client
+}
+
+// ConfigureRequestTimeout updates the non-stream request deadline without
+// mutating an http.Client that may already be serving concurrent requests.
+func (c *Client) ConfigureRequestTimeout(timeout time.Duration) {
+	if c == nil || timeout <= 0 {
+		return
+	}
+	c.requestTimeout.Store(int64(timeout))
+}
+
+func (c *Client) do(request *http.Request, stream bool) (*http.Response, error) {
+	if stream {
+		return c.streamHTTPClient.Do(request)
+	}
+	timeout := time.Duration(c.requestTimeout.Load())
+	if timeout <= 0 {
+		return c.httpClient.Do(request)
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
+	response, err := c.httpClient.Do(request.WithContext(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	response.Body = &cancelReadCloser{ReadCloser: response.Body, cancel: cancel}
+	return response, nil
 }
 
 func (c *Client) Chat(
@@ -189,11 +245,7 @@ func (c *Client) Request(
 		request.Header.Set("Accept", "application/json")
 	}
 
-	client := c.httpClient
-	if stream && c.streamHTTPClient != nil {
-		client = c.streamHTTPClient
-	}
-	response, err := client.Do(request)
+	response, err := c.do(request, stream)
 	if err != nil {
 		return nil, fmt.Errorf("send upstream %s request: %w", path, err)
 	}
@@ -235,7 +287,7 @@ func (c *Client) validateModels(
 		return "", "", fmt.Errorf("create validation request: %w", err)
 	}
 	c.setAuthHeaders(request, item, "")
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request, false)
 	if err != nil {
 		return "", "", fmt.Errorf("validate account: %w", err)
 	}
@@ -307,7 +359,7 @@ func (c *Client) validateResponsesProbeOnce(
 	c.setAuthHeaders(request, item, "grok-4.5")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request, false)
 	if err != nil {
 		return "", "", fmt.Errorf("probe account: %w", err)
 	}
@@ -537,7 +589,7 @@ func (c *Client) Refresh(ctx context.Context, item account.Account) (account.Acc
 		return account.Account{}, fmt.Errorf("create OIDC refresh request: %w", err)
 	}
 	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	tokenResponse, err := c.httpClient.Do(tokenRequest)
+	tokenResponse, err := c.do(tokenRequest, false)
 	if err != nil {
 		return account.Account{}, fmt.Errorf("refresh OIDC credential: %w", err)
 	}
@@ -615,7 +667,7 @@ func (c *Client) discoverTokenEndpoint(ctx context.Context, issuer string) (stri
 	if err != nil {
 		return "", fmt.Errorf("create OIDC discovery request: %w", err)
 	}
-	discoveryResponse, err := c.httpClient.Do(discoveryRequest)
+	discoveryResponse, err := c.do(discoveryRequest, false)
 	if err != nil {
 		return "", fmt.Errorf("discover OIDC token endpoint: %w", err)
 	}

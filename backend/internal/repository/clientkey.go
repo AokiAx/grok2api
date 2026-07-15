@@ -13,6 +13,7 @@ type ClientKeyStore interface {
 	FindClientKeyByHash(context.Context, [32]byte) (clientkey.Credential, bool, error)
 	ListClientKeysPage(context.Context, ListClientKeysQuery) (ListClientKeysResult, error)
 	UpdateClientKeyPolicy(context.Context, string, ClientKeyPolicyUpdate) error
+	UpdateClientKeyLastUsedAt(context.Context, string, time.Time) error
 	RevokeClientKey(context.Context, string, time.Time) error
 }
 

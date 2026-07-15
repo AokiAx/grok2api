@@ -34,6 +34,12 @@ type Option func(*Service)
 
 const defaultRefreshReplayGrace = 5 * time.Second
 
+const (
+	adminLoginFailureLimit           = 5
+	adminLoginFailureWindow          = 15 * time.Minute
+	adminLoginReservationFailureCode = "credential_check_pending"
+)
+
 func WithClock(c Clock) Option {
 	return func(s *Service) {
 		if c != nil {
@@ -116,41 +122,39 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	if net.ParseIP(ip) == nil {
 		return LoginOutput{}, ErrInvalidCredentials
 	}
-	windowStart := now.Add(-15 * time.Minute)
-	failures, err := s.repo.CountRecentAdminLoginFailures(ctx, username, ip, windowStart)
+	windowStart := now.Add(-adminLoginFailureWindow)
+	reservation, err := domain.NewLoginAttempt(username, ip, false, adminLoginReservationFailureCode, now)
 	if err != nil {
 		return LoginOutput{}, err
 	}
-	ipFailures, err := s.repo.CountRecentAdminLoginFailuresBySourceIP(ctx, ip, windowStart)
+	reservationID, reserved, err := s.repo.ReserveAdminLoginAttempt(
+		ctx, reservation, windowStart, adminLoginFailureLimit,
+	)
 	if err != nil {
 		return LoginOutput{}, err
 	}
-	retry := time.Duration(0)
-	if failures >= 5 {
-		oldest, found, e := s.repo.OldestRecentAdminLoginFailure(ctx, username, ip, windowStart)
-		if e != nil {
-			return LoginOutput{}, e
+	if !reserved {
+		retry, retryErr := s.loginRetryAfter(ctx, username, ip, windowStart, now)
+		if retryErr != nil {
+			return LoginOutput{}, retryErr
 		}
-		retry = maxDuration(retry, loginRetryAfter(now, oldest, found))
-	}
-	if ipFailures >= 5 {
-		oldest, found, e := s.repo.OldestRecentAdminLoginFailureBySourceIP(ctx, ip, windowStart)
-		if e != nil {
-			return LoginOutput{}, e
-		}
-		retry = maxDuration(retry, loginRetryAfter(now, oldest, found))
-	}
-	if retry > 0 {
 		return LoginOutput{}, &LoginRateLimitError{RetryAfter: retry}
 	}
+	reservationSettled := false
+	defer func() {
+		if !reservationSettled {
+			_ = s.repo.ReleaseAdminLoginReservation(context.WithoutCancel(ctx), reservationID)
+		}
+	}()
 	u, ok, err := s.repo.GetAdminUserByUsername(ctx, username)
 	if err != nil {
 		return LoginOutput{}, err
 	}
 	if !ok || !u.CanAuthenticate() || !security.VerifyAdminPassword(u.Password, in.Password) {
-		if err := s.recordAttempt(ctx, username, ip, false, "invalid_credentials", now); err != nil {
+		if err := s.repo.CompleteAdminLoginFailure(ctx, reservationID, "invalid_credentials"); err != nil {
 			return LoginOutput{}, err
 		}
+		reservationSettled = true
 		return LoginOutput{}, ErrInvalidCredentials
 	}
 	access, err := s.randomToken(32)
@@ -180,10 +184,33 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	if err != nil {
 		return LoginOutput{}, err
 	}
-	if err := s.repo.CreateAdminSessionWithLoginSuccess(ctx, session, success); err != nil {
+	if err := s.repo.CreateAdminSessionWithReservedLoginSuccess(ctx, reservationID, session, success); err != nil {
 		return LoginOutput{}, err
 	}
+	reservationSettled = true
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt, Remember: session.Remember}, nil
+}
+
+func (s *Service) loginRetryAfter(ctx context.Context, username, ip string, windowStart, now time.Time) (time.Duration, error) {
+	retry := time.Duration(0)
+	oldest, found, err := s.repo.OldestRecentAdminLoginFailure(ctx, username, ip, windowStart)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		retry = maxDuration(retry, loginRetryAfter(now, oldest, true))
+	}
+	oldest, found, err = s.repo.OldestRecentAdminLoginFailureBySourceIP(ctx, ip, windowStart)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		retry = maxDuration(retry, loginRetryAfter(now, oldest, true))
+	}
+	if retry == 0 {
+		retry = time.Second
+	}
+	return retry, nil
 }
 
 func loginRetryAfter(now, oldest time.Time, found bool) time.Duration {

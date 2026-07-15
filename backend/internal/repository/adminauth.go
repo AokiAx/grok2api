@@ -17,6 +17,7 @@ type AdminUserStore interface {
 type AdminSessionStore interface {
 	CreateAdminSession(context.Context, adminauth.Session) error
 	CreateAdminSessionWithLoginSuccess(context.Context, adminauth.Session, adminauth.LoginAttempt) error
+	CreateAdminSessionWithReservedLoginSuccess(context.Context, int64, adminauth.Session, adminauth.LoginAttempt) error
 	GetAdminSession(context.Context, string) (adminauth.Session, bool, error)
 	FindAdminSessionByAccessHash(context.Context, [32]byte) (adminauth.Session, bool, error)
 	RotateAdminSession(context.Context, string, [32]byte, adminauth.Session, time.Time) (bool, error)
@@ -26,6 +27,9 @@ type AdminSessionStore interface {
 
 type AdminLoginAttemptStore interface {
 	RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error
+	ReserveAdminLoginAttempt(context.Context, adminauth.LoginAttempt, time.Time, int) (int64, bool, error)
+	CompleteAdminLoginFailure(context.Context, int64, string) error
+	ReleaseAdminLoginReservation(context.Context, int64) error
 	CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error)
 	OldestRecentAdminLoginFailure(context.Context, string, string, time.Time) (time.Time, bool, error)
 	CountRecentAdminLoginFailuresBySourceIP(context.Context, string, time.Time) (int, error)

@@ -132,6 +132,58 @@ func (r *SQLite) CreateAdminSessionWithLoginSuccess(ctx context.Context, session
 	return nil
 }
 
+func (r *SQLite) CreateAdminSessionWithReservedLoginSuccess(
+	ctx context.Context,
+	reservationID int64,
+	session adminauth.Session,
+	attempt adminauth.LoginAttempt,
+) error {
+	if reservationID <= 0 {
+		return errors.New("admin login reservation id is required")
+	}
+	if err := validateSession(session); err != nil {
+		return err
+	}
+	if err := attempt.Validate(); err != nil {
+		return fmt.Errorf("validate admin login success: %w", err)
+	}
+	if !attempt.Succeeded {
+		return errors.New("successful admin login attempt is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin reserved admin login success: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `DELETE FROM admin_login_reservations WHERE id=?`, reservationID)
+	if err != nil {
+		return fmt.Errorf("consume admin login reservation: %w", err)
+	}
+	consumed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect admin login reservation: %w", err)
+	}
+	if consumed != 1 {
+		return errors.New("admin login reservation is no longer active")
+	}
+	if err := insertAdminSession(ctx, tx, session); err != nil {
+		return fmt.Errorf("create admin session %s: %w", session.ID, err)
+	}
+	if err := insertAdminLoginAttempt(ctx, tx, attempt); err != nil {
+		return err
+	}
+	if _, err := deleteAdminLoginAttemptsBefore(ctx, tx, attempt.CreatedAt.Add(-adminAuthHistoryRetention)); err != nil {
+		return err
+	}
+	if _, err := deleteInactiveAdminSessionsBefore(ctx, tx, session.CreatedAt.Add(-adminAuthHistoryRetention)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reserved admin login success: %w", err)
+	}
+	return nil
+}
+
 func (r *SQLite) GetAdminSession(ctx context.Context, id string) (adminauth.Session, bool, error) {
 	return scanAdminSession(r.db.QueryRowContext(ctx, sessionSelect+` WHERE id=?`, strings.TrimSpace(id)))
 }
@@ -264,6 +316,117 @@ func (r *SQLite) RecordAdminLoginAttempt(ctx context.Context, item adminauth.Log
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit admin login attempt write: %w", err)
+	}
+	return nil
+}
+
+func (r *SQLite) ReserveAdminLoginAttempt(
+	ctx context.Context,
+	item adminauth.LoginAttempt,
+	since time.Time,
+	limit int,
+) (int64, bool, error) {
+	if err := item.Validate(); err != nil {
+		return 0, false, fmt.Errorf("validate admin login reservation: %w", err)
+	}
+	if item.Succeeded || item.FailureCode != "credential_check_pending" {
+		return 0, false, errors.New("pending admin login failure reservation is required")
+	}
+	if since.IsZero() {
+		return 0, false, errors.New("login failure window start is required")
+	}
+	if limit <= 0 {
+		return 0, false, errors.New("login failure limit must be positive")
+	}
+	username := strings.ToLower(strings.TrimSpace(item.Username))
+	sourceIP := strings.TrimSpace(item.SourceIP)
+	var reservationID int64
+	err := r.db.QueryRowContext(ctx, `INSERT INTO admin_login_reservations(username, source_ip, created_at)
+	SELECT ?, ?, ?
+	WHERE ((SELECT COUNT(*) FROM admin_login_attempts AS failure
+		WHERE failure.username=? AND failure.source_ip=? AND failure.succeeded=0 AND failure.created_at>=?
+		AND failure.id > COALESCE((SELECT MAX(success.id) FROM admin_login_attempts AS success
+			WHERE success.username=? AND success.source_ip=? AND success.succeeded=1), 0))
+		+ (SELECT COUNT(*) FROM admin_login_reservations AS reservation
+			WHERE reservation.username=? AND reservation.source_ip=? AND reservation.created_at>=?)) < ?
+	AND ((SELECT COUNT(*) FROM admin_login_attempts AS failure
+		WHERE failure.source_ip=? AND failure.succeeded=0 AND failure.created_at>=?
+		AND failure.id > COALESCE((SELECT MAX(success.id) FROM admin_login_attempts AS success
+			WHERE success.source_ip=? AND success.succeeded=1), 0))
+		+ (SELECT COUNT(*) FROM admin_login_reservations AS reservation
+			WHERE reservation.source_ip=? AND reservation.created_at>=?)) < ?
+	RETURNING id`,
+		username,
+		sourceIP,
+		formatTime(item.CreatedAt),
+		username,
+		sourceIP,
+		formatTime(since),
+		username,
+		sourceIP,
+		username,
+		sourceIP,
+		formatTime(since),
+		limit,
+		sourceIP,
+		formatTime(since),
+		sourceIP,
+		sourceIP,
+		formatTime(since),
+		limit,
+	).Scan(&reservationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("reserve admin login attempt: %w", err)
+	}
+	return reservationID, true, nil
+}
+
+func (r *SQLite) CompleteAdminLoginFailure(ctx context.Context, reservationID int64, failureCode string) error {
+	if reservationID <= 0 {
+		return errors.New("admin login reservation id is required")
+	}
+	failureCode = strings.TrimSpace(failureCode)
+	if failureCode == "" || failureCode == "credential_check_pending" {
+		return errors.New("completed admin login failure code is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin completed admin login failure: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `INSERT INTO admin_login_attempts(
+		username, source_ip, succeeded, failure_code, created_at
+	) SELECT username, source_ip, 0, ?, created_at
+	FROM admin_login_reservations WHERE id=?`, failureCode, reservationID)
+	if err != nil {
+		return fmt.Errorf("complete admin login failure: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect completed admin login failure: %w", err)
+	}
+	if updated != 1 {
+		return errors.New("admin login reservation is no longer active")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM admin_login_reservations WHERE id=?`, reservationID); err != nil {
+		return fmt.Errorf("consume failed admin login reservation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit completed admin login failure: %w", err)
+	}
+	return nil
+}
+
+func (r *SQLite) ReleaseAdminLoginReservation(ctx context.Context, reservationID int64) error {
+	if reservationID <= 0 {
+		return errors.New("admin login reservation id is required")
+	}
+	_, err := r.db.ExecContext(ctx, `DELETE FROM admin_login_reservations WHERE id=?`, reservationID)
+	if err != nil {
+		return fmt.Errorf("release admin login reservation: %w", err)
 	}
 	return nil
 }

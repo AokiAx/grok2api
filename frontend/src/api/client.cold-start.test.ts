@@ -49,4 +49,29 @@ describe("admin authentication cold start", () => {
       { path: "/api/admin/v1/auth/me", authorization: "Bearer restored-from-cookie" },
     ]);
   });
+
+  it("does not publish session invalidation when no cold-start cookie exists", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/auth/me") || path.endsWith("/auth/refresh")) {
+        return envelope(null, 401);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.resetModules();
+
+    const { adminApi, subscribeAdminSessionInvalidated } = await import("@/api/client");
+    const invalidated = vi.fn();
+    const unsubscribe = subscribeAdminSessionInvalidated(invalidated);
+
+    await expect(adminApi.me()).rejects.toMatchObject({ status: 401 });
+    unsubscribe();
+
+    expect(fetchMock.mock.calls.map(([path]) => String(path))).toEqual([
+      "/api/admin/v1/auth/me",
+      "/api/admin/v1/auth/refresh",
+    ]);
+    expect(invalidated).not.toHaveBeenCalled();
+  });
 });

@@ -137,11 +137,9 @@ async function refreshAccessToken(generation: number): Promise<boolean> {
         if (generation !== sessionGeneration) return false;
         continue;
       }
-      invalidateSession(generation);
       return false;
     }
   }
-  invalidateSession(generation);
   return false;
 }
 
@@ -168,6 +166,7 @@ async function transport(
 ): Promise<Response> {
   const generation = sessionGeneration;
   const authenticated = options.authenticated ?? true;
+  const hadAccessToken = authenticated && Boolean(accessToken);
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type") && init.body) {
     headers.set("Content-Type", "application/json");
@@ -179,15 +178,13 @@ async function transport(
   }
 
   const response = await fetch(path, { ...init, headers, credentials: "include" });
-  if (
-    response.status === 401 &&
-    authenticated &&
-    (options.retryUnauthorized ?? true) &&
-    await refreshSingleFlight(generation)
-  ) {
-    const retried = await transport(path, init, { authenticated: true, retryUnauthorized: false });
-    if (retried.status === 401) invalidateSession(generation);
-    return retried;
+  if (response.status === 401 && authenticated && (options.retryUnauthorized ?? true)) {
+    if (await refreshSingleFlight(generation)) {
+      const retried = await transport(path, init, { authenticated: true, retryUnauthorized: false });
+      if (retried.status === 401) invalidateSession(generation);
+      return retried;
+    }
+    if (hadAccessToken) invalidateSession(generation);
   }
   return response;
 }
@@ -565,7 +562,9 @@ export const adminApi = {
     return data;
   },
   refresh: async () => {
-    if (!await refreshSingleFlight()) {
+    const generation = sessionGeneration;
+    if (!await refreshSingleFlight(generation)) {
+      invalidateSession(generation);
       throw new AdminApiError(401, "unauthorized", "Session refresh failed");
     }
   },
@@ -581,13 +580,7 @@ export const adminApi = {
       { retryUnauthorized: false },
     );
   },
-  me: () => request<AdminIdentity>(
-    "/api/admin/v1/auth/me",
-    {},
-    // Cold start without an in-memory access token should not fire cookie refresh + invalidation noise.
-    // Once login/refresh has populated accessToken, transport can still refresh on later 401s.
-    { retryUnauthorized: Boolean(accessToken) },
-  ),
+  me: () => request<AdminIdentity>("/api/admin/v1/auth/me"),
   dashboard: () => request<Dashboard>("/api/admin/v1/dashboard"),
   pool: () =>
     request<{

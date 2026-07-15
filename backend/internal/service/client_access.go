@@ -23,6 +23,7 @@ var (
 type ClientAccessRepository interface {
 	ClientAuthRequired(context.Context) (bool, error)
 	FindClientKeyByHash(context.Context, [32]byte) (clientkey.Credential, bool, error)
+	UpdateClientKeyLastUsedAt(context.Context, string, time.Time) error
 	ConsumeClientKeyRPM(context.Context, string, time.Time) (repository.RateLimitDecision, error)
 }
 
@@ -193,6 +194,10 @@ func (a *ClientAccess) Authenticate(ctx context.Context, secret string) (ClientG
 	if !credential.Key.Active(at.UTC()) {
 		return ClientGrant{}, ErrClientUnauthorized
 	}
+	// Last-used is operational telemetry. Update it synchronously so successful
+	// authentications are normally visible immediately, but never reject a valid
+	// credential solely because this best-effort write failed.
+	_ = a.repository.UpdateClientKeyLastUsedAt(ctx, credential.Key.ID, at.UTC())
 	return ClientGrant{
 		Authenticated: true,
 		KeyID:         credential.Key.ID,

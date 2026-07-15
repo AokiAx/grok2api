@@ -4,22 +4,25 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
+	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
 type clientAccessRepository struct {
-	required  bool
-	items     map[[32]byte]clientkey.Credential
-	lookup    [32]byte
-	decision  repository.RateLimitDecision
-	consumed  []string
-	consumeAt []time.Time
-	lastUsed  []string
-	usedAt    []time.Time
+	required    bool
+	items       map[[32]byte]clientkey.Credential
+	lookup      [32]byte
+	decision    repository.RateLimitDecision
+	consumed    []string
+	consumeAt   []time.Time
+	lastUsed    []string
+	usedAt      []time.Time
+	lastUsedErr error
 }
 
 func (r *clientAccessRepository) ClientAuthRequired(context.Context) (bool, error) {
@@ -41,7 +44,7 @@ func (r *clientAccessRepository) ConsumeClientKeyRPM(_ context.Context, id strin
 func (r *clientAccessRepository) UpdateClientKeyLastUsedAt(_ context.Context, id string, at time.Time) error {
 	r.lastUsed = append(r.lastUsed, id)
 	r.usedAt = append(r.usedAt, at)
-	return nil
+	return r.lastUsedErr
 }
 
 func accessCredential(t *testing.T, id, secret string, now time.Time, mutate func(*clientkey.ClientKey)) clientkey.Credential {
@@ -102,6 +105,52 @@ func TestClientAccessSuccessfulAuthenticationUpdatesLastUsedAt(t *testing.T) {
 	}
 	if len(repo.usedAt) != 1 || !repo.usedAt[0].Equal(now) {
 		t.Fatalf("last-used timestamps=%#v; want [%s]", repo.usedAt, now)
+	}
+}
+
+func TestClientAccessLastUsedTelemetryFailureDoesNotRejectValidCredential(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 20, 0, 0, time.UTC)
+	secret := "g2a_super_secret"
+	credential := accessCredential(t, "ck_telemetry", secret, now, nil)
+	repo := &clientAccessRepository{
+		required:    true,
+		items:       map[[32]byte]clientkey.Credential{credential.Key.KeyHash: credential},
+		lastUsedErr: errors.New("telemetry unavailable"),
+	}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+
+	grant, err := access.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("authenticate should ignore last-used telemetry failure: %v", err)
+	}
+	if !grant.Authenticated || grant.KeyID != credential.Key.ID || len(repo.lastUsed) != 1 {
+		t.Fatalf("grant=%+v last-used calls=%#v", grant, repo.lastUsed)
+	}
+}
+
+func TestClientAccessSuccessfulAuthenticationPersistsLastUsedAt(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "client-access.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+	now := time.Date(2026, 7, 15, 5, 25, 0, 0, time.UTC)
+	secret := "g2a_persisted_secret"
+	credential := accessCredential(t, "ck_persisted", secret, now, nil)
+	if err := repo.CreateClientKey(ctx, credential); err != nil {
+		t.Fatalf("create client key: %v", err)
+	}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+	if _, err := access.Authenticate(ctx, secret); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	stored, found, err := repo.GetClientKey(ctx, credential.Key.ID)
+	if err != nil || !found {
+		t.Fatalf("get client key: found=%v err=%v", found, err)
+	}
+	if !stored.Key.LastUsedAt.Equal(now) {
+		t.Fatalf("last_used_at=%s; want %s", stored.Key.LastUsedAt, now)
 	}
 }
 

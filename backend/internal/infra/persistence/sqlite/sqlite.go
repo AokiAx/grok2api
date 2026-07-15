@@ -139,6 +139,45 @@ func (r *SQLite) encryptExistingCredentials(ctx context.Context) error {
 			return fmt.Errorf("write encrypted credentials %s: %w", item.id, err)
 		}
 	}
+	return r.encryptExistingDeviceAuthCodes(ctx)
+}
+
+func (r *SQLite) encryptExistingDeviceAuthCodes(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, device_code FROM device_auth_sessions WHERE device_code != ''`)
+	if err != nil {
+		return fmt.Errorf("list device auth codes for encryption: %w", err)
+	}
+	type deviceCodeRow struct {
+		id, code string
+	}
+	var pending []deviceCodeRow
+	for rows.Next() {
+		var item deviceCodeRow
+		if err := rows.Scan(&item.id, &item.code); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan device auth code: %w", err)
+		}
+		if security.IsEncrypted(item.code) {
+			continue
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate device auth codes: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close device auth codes: %w", err)
+	}
+	for _, item := range pending {
+		sealed, err := r.cipher.Encrypt(item.code)
+		if err != nil {
+			return fmt.Errorf("encrypt device auth code %s: %w", item.id, err)
+		}
+		if _, err := r.db.ExecContext(ctx, `UPDATE device_auth_sessions SET device_code=? WHERE id=?`, sealed, item.id); err != nil {
+			return fmt.Errorf("write encrypted device auth code %s: %w", item.id, err)
+		}
+	}
 	return nil
 }
 
@@ -228,6 +267,14 @@ func (r *SQLite) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_username ON admin_login_attempts(username, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_source ON admin_login_attempts(source_ip, created_at)`,
+		`CREATE TABLE IF NOT EXISTS admin_login_reservations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL COLLATE NOCASE,
+			source_ip TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_login_reservations_username ON admin_login_reservations(username, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_login_reservations_source ON admin_login_reservations(source_ip, created_at)`,
 		`CREATE TABLE IF NOT EXISTS client_keys (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
