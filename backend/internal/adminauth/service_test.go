@@ -3,11 +3,14 @@ package adminauth
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
+	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 )
@@ -139,6 +142,67 @@ func TestLoginRateLimitCannotBeBypassedByRotatingUsername(t *testing.T) {
 	}
 	if len(repo.attempts) != 0 {
 		t.Fatalf("rate-limited request persisted an extra attempt: %d", len(repo.attempts))
+	}
+}
+
+func TestConcurrentFailedLoginsCannotExceedAttemptLimit(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "admin-auth.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	now := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
+	credential, err := security.HashAdminPassword("secret", 10)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	user, err := adminauth.NewAdminUser("admin-1", "admin", credential, now)
+	if err != nil {
+		t.Fatalf("new admin user: %v", err)
+	}
+	if err := repo.CreateAdminUser(ctx, user); err != nil {
+		t.Fatalf("create admin user: %v", err)
+	}
+
+	service := NewService(repo, WithClock(func() time.Time { return now }))
+	const requests = 12
+	start := make(chan struct{})
+	results := make(chan error, requests)
+	var workers sync.WaitGroup
+	workers.Add(requests)
+	for index := 0; index < requests; index++ {
+		go func() {
+			defer workers.Done()
+			<-start
+			_, loginErr := service.Login(ctx, LoginInput{
+				Username: "admin", Password: "wrong-password", SourceIP: "10.0.0.1",
+			})
+			results <- loginErr
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	invalidCredentials := 0
+	rateLimited := 0
+	for loginErr := range results {
+		switch {
+		case errors.Is(loginErr, ErrInvalidCredentials):
+			invalidCredentials++
+		case errors.Is(loginErr, ErrRateLimited):
+			rateLimited++
+		default:
+			t.Fatalf("unexpected concurrent login error: %v", loginErr)
+		}
+	}
+	if invalidCredentials > 5 {
+		t.Fatalf("concurrent invalid credentials accepted as attempts=%d; want at most 5 (rate limited=%d)", invalidCredentials, rateLimited)
+	}
+	if rateLimited != requests-invalidCredentials {
+		t.Fatalf("rate limited=%d; want %d", rateLimited, requests-invalidCredentials)
 	}
 }
 

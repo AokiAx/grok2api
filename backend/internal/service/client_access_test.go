@@ -18,6 +18,8 @@ type clientAccessRepository struct {
 	decision  repository.RateLimitDecision
 	consumed  []string
 	consumeAt []time.Time
+	lastUsed  []string
+	usedAt    []time.Time
 }
 
 func (r *clientAccessRepository) ClientAuthRequired(context.Context) (bool, error) {
@@ -34,6 +36,12 @@ func (r *clientAccessRepository) ConsumeClientKeyRPM(_ context.Context, id strin
 	r.consumed = append(r.consumed, id)
 	r.consumeAt = append(r.consumeAt, at)
 	return r.decision, nil
+}
+
+func (r *clientAccessRepository) UpdateClientKeyLastUsedAt(_ context.Context, id string, at time.Time) error {
+	r.lastUsed = append(r.lastUsed, id)
+	r.usedAt = append(r.usedAt, at)
+	return nil
 }
 
 func accessCredential(t *testing.T, id, secret string, now time.Time, mutate func(*clientkey.ClientKey)) clientkey.Credential {
@@ -74,6 +82,26 @@ func TestClientAccessAuthenticatesByHashAndReturnsOpaquePrincipal(t *testing.T) 
 	}
 	if grant.Principal == secret || grant.Principal == "auth:"+secret {
 		t.Fatal("principal retained plaintext credential")
+	}
+}
+
+func TestClientAccessSuccessfulAuthenticationUpdatesLastUsedAt(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 15, 0, 0, time.UTC)
+	secret := "g2a_super_secret"
+	credential := accessCredential(t, "ck_123", secret, now, nil)
+	repo := &clientAccessRepository{required: true, items: map[[32]byte]clientkey.Credential{
+		credential.Key.KeyHash: credential,
+	}}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+
+	if _, err := access.Authenticate(context.Background(), secret); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if len(repo.lastUsed) != 1 || repo.lastUsed[0] != credential.Key.ID {
+		t.Fatalf("last-used key updates=%#v; want [%q]", repo.lastUsed, credential.Key.ID)
+	}
+	if len(repo.usedAt) != 1 || !repo.usedAt[0].Equal(now) {
+		t.Fatalf("last-used timestamps=%#v; want [%s]", repo.usedAt, now)
 	}
 }
 

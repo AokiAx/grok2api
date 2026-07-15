@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,40 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/runtime"
 	"github.com/AokiAx/grok2api/backend/internal/scheduler"
 )
+
+type observingRecoveryStore struct {
+	mu       sync.Mutex
+	accounts []account.Account
+	saved    chan account.Account
+}
+
+func (s *observingRecoveryStore) SaveAccount(_ context.Context, item account.Account) error {
+	s.mu.Lock()
+	for i := range s.accounts {
+		if s.accounts[i].ID == item.ID {
+			s.accounts[i] = item
+			s.mu.Unlock()
+			s.saved <- item
+			return nil
+		}
+	}
+	s.accounts = append(s.accounts, item)
+	s.mu.Unlock()
+	s.saved <- item
+	return nil
+}
+
+func (s *observingRecoveryStore) ListAccounts(context.Context) ([]account.Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]account.Account(nil), s.accounts...), nil
+}
+
+func (s *observingRecoveryStore) reset(item account.Account) {
+	s.mu.Lock()
+	s.accounts = []account.Account{item}
+	s.mu.Unlock()
+}
 
 type recoveryStore struct {
 	accounts []account.Account
@@ -386,6 +421,50 @@ func TestRunRecoveryOptionsWire(t *testing.T) {
 		runtime.WithQuotaRetry(15*time.Minute),
 	)
 	if err != nil {
+		t.Fatalf("run recovery: %v", err)
+	}
+}
+
+func TestRunRecoveryReadsUpdatedQuotaRetryFromRuntimeKnobs(t *testing.T) {
+	now := time.Now().UTC()
+	readyExhausted := account.Account{
+		ID: "quota", Pool: account.PoolReady, QuotaActual: 100, QuotaLimit: 100, MaxActive: 1,
+	}
+	store := &observingRecoveryStore{
+		accounts: []account.Account{readyExhausted},
+		saved:    make(chan account.Account, 4),
+	}
+	pool := scheduler.New([]account.Account{readyExhausted})
+	knobs := runtime.NewRuntimeKnobs(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.RunRecovery(
+			ctx, pool, store, 20*time.Millisecond,
+			runtime.WithCredentialRecovery(store, nil, nil),
+			runtime.WithRuntimeKnobs(knobs),
+		)
+	}()
+
+	first := <-store.saved
+	if first.RetryAt.Before(now.Add(55 * time.Minute)) {
+		t.Fatalf("initial retry_at=%v; want initial one-hour backoff", first.RetryAt)
+	}
+
+	knobs.ConfigureQuotaRetry(5 * time.Minute)
+	store.reset(readyExhausted)
+	pool.Upsert(readyExhausted)
+	select {
+	case updated := <-store.saved:
+		if updated.RetryAt.After(time.Now().UTC().Add(10 * time.Minute)) {
+			t.Fatalf("updated retry_at=%v; want live five-minute backoff", updated.RetryAt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for recovery tick")
+	}
+	cancel()
+	if err := <-done; err != nil {
 		t.Fatalf("run recovery: %v", err)
 	}
 }

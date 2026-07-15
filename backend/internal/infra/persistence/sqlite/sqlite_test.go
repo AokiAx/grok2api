@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/deviceauth"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/security"
@@ -601,6 +602,177 @@ func TestCredentialEncryptionRoundTrip(t *testing.T) {
 		t.Fatalf("decrypted list = %#v", list)
 	}
 	_ = repo.Close()
+}
+
+func TestDeviceAuthSessionDeviceCodeEncryptionRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "device-auth.db")
+	keyCipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x55}, 32)))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, path, keyCipher)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	now := time.Date(2026, 7, 15, 6, 0, 0, 0, time.UTC)
+	session := deviceauth.Session{
+		ID: "device-1", Status: deviceauth.StatusPending, ClientID: "client-1",
+		DeviceCode: "sensitive-device-code", ExpiresAt: now.Add(15 * time.Minute), CreatedAt: now,
+	}
+	if err := repo.CreateDeviceAuthSession(ctx, session); err != nil {
+		t.Fatalf("create device auth session: %v", err)
+	}
+
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawDB.Close()
+	var stored string
+	if err := rawDB.QueryRowContext(ctx, `SELECT device_code FROM device_auth_sessions WHERE id=?`, session.ID).Scan(&stored); err != nil {
+		t.Fatalf("read raw device code: %v", err)
+	}
+	if stored == session.DeviceCode || !security.IsEncrypted(stored) {
+		t.Fatalf("device code stored without credential envelope: %q", stored)
+	}
+
+	loaded, found, err := repo.GetDeviceAuthSession(ctx, session.ID)
+	if err != nil || !found {
+		t.Fatalf("get device auth session: found=%v err=%v", found, err)
+	}
+	if loaded.DeviceCode != session.DeviceCode {
+		t.Fatalf("decrypted device code=%q; want %q", loaded.DeviceCode, session.DeviceCode)
+	}
+}
+
+func TestDeviceAuthSessionReadsEncryptedDeviceCodes(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "device-auth-read.db")
+	keyCipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x56}, 32)))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, path, keyCipher)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	session := deviceauth.Session{ID: "device-read", ClientID: "client-1", DeviceCode: "plain-device-code"}
+	if err := repo.CreateDeviceAuthSession(ctx, session); err != nil {
+		t.Fatalf("create device auth session: %v", err)
+	}
+	encrypted, err := keyCipher.Encrypt(session.DeviceCode)
+	if err != nil {
+		t.Fatalf("encrypt fixture device code: %v", err)
+	}
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `UPDATE device_auth_sessions SET device_code=? WHERE id=?`, encrypted, session.ID); err != nil {
+		t.Fatalf("seed encrypted device code: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close raw sqlite: %v", err)
+	}
+
+	loaded, found, err := repo.GetDeviceAuthSession(ctx, session.ID)
+	if err != nil || !found {
+		t.Fatalf("get device auth session: found=%v err=%v", found, err)
+	}
+	if loaded.DeviceCode != session.DeviceCode {
+		t.Errorf("get decrypted device code=%q; want %q", loaded.DeviceCode, session.DeviceCode)
+	}
+	listed, err := repo.ListDeviceAuthSessions(ctx, 10)
+	if err != nil {
+		t.Fatalf("list device auth sessions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].DeviceCode != session.DeviceCode {
+		t.Errorf("listed device auth sessions=%#v; want decrypted device code", listed)
+	}
+}
+
+func TestDeviceAuthSessionUpdateEncryptsDeviceCode(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "device-auth-update.db")
+	keyCipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x57}, 32)))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, path, keyCipher)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	session := deviceauth.Session{ID: "device-update", ClientID: "client-1", DeviceCode: "initial-device-code"}
+	if err := repo.CreateDeviceAuthSession(ctx, session); err != nil {
+		t.Fatalf("create device auth session: %v", err)
+	}
+	session.DeviceCode = "rotated-device-code"
+	if err := repo.UpdateDeviceAuthSession(ctx, session); err != nil {
+		t.Fatalf("update device auth session: %v", err)
+	}
+
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawDB.Close()
+	var stored string
+	if err := rawDB.QueryRowContext(ctx, `SELECT device_code FROM device_auth_sessions WHERE id=?`, session.ID).Scan(&stored); err != nil {
+		t.Fatalf("read raw device code: %v", err)
+	}
+	if stored == session.DeviceCode || !security.IsEncrypted(stored) {
+		t.Fatalf("updated device code stored without credential envelope: %q", stored)
+	}
+}
+
+func TestOpeningPlaintextDatabaseWithCredentialKeyEncryptsExistingDeviceCodes(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "device-auth-migration.db")
+	plainRepo, err := sqlite.OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatalf("open plaintext sqlite: %v", err)
+	}
+	session := deviceauth.Session{ID: "device-migrate", ClientID: "client-1", DeviceCode: "legacy-plain-device-code"}
+	if err := plainRepo.CreateDeviceAuthSession(ctx, session); err != nil {
+		t.Fatalf("create plaintext device auth session: %v", err)
+	}
+	if err := plainRepo.Close(); err != nil {
+		t.Fatalf("close plaintext sqlite: %v", err)
+	}
+
+	keyCipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x58}, 32)))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	encryptedRepo, err := sqlite.OpenSQLiteWithCipher(ctx, path, keyCipher)
+	if err != nil {
+		t.Fatalf("open encrypted sqlite: %v", err)
+	}
+	defer encryptedRepo.Close()
+
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawDB.Close()
+	var stored string
+	if err := rawDB.QueryRowContext(ctx, `SELECT device_code FROM device_auth_sessions WHERE id=?`, session.ID).Scan(&stored); err != nil {
+		t.Fatalf("read migrated device code: %v", err)
+	}
+	if stored == session.DeviceCode || !security.IsEncrypted(stored) {
+		t.Fatalf("existing device code was not encrypted on open: %q", stored)
+	}
+	loaded, found, err := encryptedRepo.GetDeviceAuthSession(ctx, session.ID)
+	if err != nil || !found || loaded.DeviceCode != session.DeviceCode {
+		t.Fatalf("migrated device auth session=%#v found=%v err=%v", loaded, found, err)
+	}
 }
 
 func TestBase64RefreshTokenDoesNotRequireCredentialKey(t *testing.T) {
