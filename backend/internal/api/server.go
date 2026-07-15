@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -526,11 +527,7 @@ func (s *Server) writeGatewayError(writer http.ResponseWriter, err error) {
 }
 
 func (s *Server) writeResult(writer http.ResponseWriter, result service.ChatResult) {
-	for name, values := range result.Header {
-		for _, value := range values {
-			writer.Header().Add(name, value)
-		}
-	}
+	copyCompatibleUpstreamHeaders(writer.Header(), result.Header)
 	writer.WriteHeader(result.Status)
 	if result.Stream != nil {
 		defer result.Stream.Close()
@@ -588,6 +585,10 @@ func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message 
 	if code == "" {
 		code = strconv.Itoa(status)
 	}
+	if status >= http.StatusInternalServerError {
+		slog.Error("api request failed", "status", status, "code", code, "error", message)
+		message = publicServerErrorMessage(status)
+	}
 	writeJSON(writer, status, map[string]any{
 		"error": map[string]any{
 			"message": message,
@@ -596,6 +597,38 @@ func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message 
 			"param":   nil,
 		},
 	})
+}
+
+func publicServerErrorMessage(status int) string {
+	switch status {
+	case http.StatusBadGateway:
+		return "Upstream request failed"
+	case http.StatusServiceUnavailable:
+		return "Service temporarily unavailable"
+	default:
+		return "Internal server error"
+	}
+}
+
+func copyCompatibleUpstreamHeaders(destination, source http.Header) {
+	for name, values := range source {
+		if !compatibleUpstreamHeader(name) {
+			continue
+		}
+		for _, value := range values {
+			destination.Add(name, value)
+		}
+	}
+}
+
+func compatibleUpstreamHeader(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "content-type", "cache-control", "retry-after", "x-request-id", "x-grok-request-id":
+		return true
+	default:
+		return strings.HasPrefix(name, "x-ratelimit-")
+	}
 }
 
 func writeJSON(writer http.ResponseWriter, status int, payload any) {

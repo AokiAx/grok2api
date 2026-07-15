@@ -7,6 +7,7 @@ import (
 	"errors"
 	authservice "github.com/AokiAx/grok2api/backend/internal/adminauth"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -109,6 +110,10 @@ func writeAdminError(writer http.ResponseWriter, status int, code, message strin
 	if code == "" {
 		code = "error"
 	}
+	if status >= http.StatusInternalServerError {
+		slog.Error("admin api request failed", "status", status, "code", code, "error", message)
+		message = publicAdminErrorMessage(status)
+	}
 	writeJSON(writer, status, map[string]any{
 		"ok":   false,
 		"data": nil,
@@ -117,6 +122,17 @@ func writeAdminError(writer http.ResponseWriter, status int, code, message strin
 			"message": message,
 		},
 	})
+}
+
+func publicAdminErrorMessage(status int) string {
+	switch status {
+	case http.StatusBadGateway:
+		return "Upstream operation failed"
+	case http.StatusServiceUnavailable:
+		return "Service temporarily unavailable"
+	default:
+		return "Internal server error"
+	}
 }
 
 func (s *Server) requireAdmin(writer http.ResponseWriter, request *http.Request) bool {
