@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,4 +92,3 @@ func TestClientAuthMiddlewareMapsAllCredentialFailuresToSameResponse(t *testing.
 }
 
 var _ ClientAuthenticator = (*fakeRequestAuthenticator)(nil)
-var _ = errors.Is
