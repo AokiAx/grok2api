@@ -205,6 +205,34 @@ type ClientConcurrencyLimiter interface {
 	AcquireConcurrency(service.ClientGrant) (service.ClientPermit, error)
 }
 
+type ClientInferenceAccess interface {
+	ClientAuthenticator
+	ClientRateConsumer
+	ClientConcurrencyLimiter
+}
+
+// ClientInferenceMiddleware fixes the security order for request-bearing
+// inference endpoints: authenticate, authorize the effective model, consume
+// persisted RPM, then hold a per-key concurrency permit through completion.
+func ClientInferenceMiddleware(access ClientInferenceAccess, defaultModel string, next http.Handler) http.Handler {
+	return ClientAuthMiddleware(
+		access,
+		ClientModelAuthorizationMiddleware(
+			defaultModel,
+			ClientRateLimitMiddleware(
+				access,
+				ClientConcurrencyMiddleware(access, next),
+			),
+		),
+	)
+}
+
+// ClientModelsMiddleware authenticates the model-list request and filters the
+// response by scope without charging inference RPM or concurrency.
+func ClientModelsMiddleware(authenticator ClientAuthenticator, next http.Handler) http.Handler {
+	return ClientAuthMiddleware(authenticator, ClientModelsScopeMiddleware(next))
+}
+
 // ClientConcurrencyMiddleware holds the permit until the wrapped handler has
 // fully returned. Since the existing streaming handlers return only after the
 // response stream reaches EOF or disconnects, streaming permits cover the full
