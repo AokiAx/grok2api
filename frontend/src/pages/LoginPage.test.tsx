@@ -54,7 +54,7 @@ describe("LoginPage", () => {
     expect(authMocks.login).toHaveBeenCalledWith("secret", false);
   });
 
-  it("shows the bootstrap-admin command and removes the meaningless login form during setup", () => {
+  it("shows PowerShell and Bash bootstrap commands and removes the login form during setup", () => {
     authMocks.auth.meta = {
       auth_required: true,
       setup_required: true,
@@ -65,7 +65,10 @@ describe("LoginPage", () => {
     renderPage();
 
     expect(screen.getByRole("status")).toHaveTextContent("bootstrap-admin");
-    expect(screen.getByText(/docker compose run --rm -T app bootstrap-admin/)).toBeInTheDocument();
+    expect(screen.getByText("PowerShell")).toBeInTheDocument();
+    expect(screen.getByText("Bash")).toBeInTheDocument();
+    expect(screen.getByText(/^\$env:ADMIN_PASSWORD \| docker compose run --rm -T app bootstrap-admin/)).toBeInTheDocument();
+    expect(screen.getByText(/^printf '%s\\n' "\$ADMIN_PASSWORD" \| docker compose run --rm -T app bootstrap-admin/)).toBeInTheDocument();
     expect(screen.queryByLabelText("管理员密码")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "进入面板" })).not.toBeInTheDocument();
   });
