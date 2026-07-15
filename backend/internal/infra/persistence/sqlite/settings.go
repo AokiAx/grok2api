@@ -15,26 +15,18 @@ import (
 var _ repository.SettingsRepository = (*SQLite)(nil)
 
 func (r *SQLite) ensureSettingsSchema(ctx context.Context) error {
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS app_settings (
-			id INTEGER PRIMARY KEY CHECK(id = 1),
-			revision INTEGER NOT NULL DEFAULT 1,
-			document_json TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			updated_by TEXT NOT NULL DEFAULT ''
-		)`,
-		`CREATE TABLE IF NOT EXISTS app_settings_snapshots (
-			revision INTEGER PRIMARY KEY,
-			created_at TEXT NOT NULL,
-			created_by TEXT NOT NULL DEFAULT '',
-			reason TEXT NOT NULL DEFAULT '',
-			document_json TEXT NOT NULL
-		)`,
+	if _, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS app_settings (
+		id INTEGER PRIMARY KEY CHECK(id = 1),
+		revision INTEGER NOT NULL DEFAULT 1,
+		document_json TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		updated_by TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		return fmt.Errorf("ensure settings schema: %w", err)
 	}
-	for _, statement := range statements {
-		if _, err := r.db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("ensure settings schema: %w", err)
-		}
+	// Drop legacy snapshot history; settings now keep only the current document.
+	if _, err := r.db.ExecContext(ctx, `DROP TABLE IF EXISTS app_settings_snapshots`); err != nil {
+		return fmt.Errorf("drop settings snapshots: %w", err)
 	}
 	var count int
 	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM app_settings WHERE id=1`).Scan(&count); err != nil {
@@ -55,16 +47,6 @@ func (r *SQLite) ensureSettingsSchema(ctx context.Context) error {
 			now,
 		); err != nil {
 			return fmt.Errorf("seed settings: %w", err)
-		}
-		if _, err := r.db.ExecContext(
-			ctx,
-			`INSERT INTO app_settings_snapshots(revision, created_at, created_by, reason, document_json)
-			 VALUES (?, ?, '', 'seed', ?)`,
-			doc.Revision,
-			now,
-			string(raw),
-		); err != nil {
-			return fmt.Errorf("seed settings snapshot: %w", err)
 		}
 	}
 	return nil
@@ -130,105 +112,8 @@ func (r *SQLite) PutSettings(ctx context.Context, expectedRevision int64, doc se
 	); err != nil {
 		return settings.Document{}, err
 	}
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO app_settings_snapshots(revision, created_at, created_by, reason, document_json)
-		 VALUES (?, ?, ?, 'update', ?)`,
-		next,
-		doc.UpdatedAt.Format(time.RFC3339Nano),
-		updatedBy,
-		string(raw),
-	); err != nil {
-		return settings.Document{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return settings.Document{}, err
 	}
 	return doc, nil
-}
-
-func (r *SQLite) ListSettingsSnapshots(ctx context.Context, limit int) ([]settings.Snapshot, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	rows, err := r.db.QueryContext(
-		ctx,
-		`SELECT revision, created_at, created_by, reason, document_json
-		 FROM app_settings_snapshots
-		 ORDER BY revision DESC
-		 LIMIT ?`,
-		limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []settings.Snapshot
-	for rows.Next() {
-		var snap settings.Snapshot
-		var createdAt, raw string
-		if err := rows.Scan(&snap.Revision, &createdAt, &snap.CreatedBy, &snap.Reason, &raw); err != nil {
-			return nil, err
-		}
-		snap.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		doc, err := settings.Unmarshal([]byte(raw))
-		if err != nil {
-			return nil, err
-		}
-		doc.Revision = snap.Revision
-		snap.Document = doc
-		out = append(out, snap)
-	}
-	return out, rows.Err()
-}
-
-func (r *SQLite) GetSettingsSnapshot(ctx context.Context, revision int64) (settings.Snapshot, bool, error) {
-	var snap settings.Snapshot
-	var createdAt, raw string
-	err := r.db.QueryRowContext(
-		ctx,
-		`SELECT revision, created_at, created_by, reason, document_json
-		 FROM app_settings_snapshots WHERE revision=?`,
-		revision,
-	).Scan(&snap.Revision, &createdAt, &snap.CreatedBy, &snap.Reason, &raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return settings.Snapshot{}, false, nil
-	}
-	if err != nil {
-		return settings.Snapshot{}, false, err
-	}
-	snap.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	doc, err := settings.Unmarshal([]byte(raw))
-	if err != nil {
-		return settings.Snapshot{}, false, err
-	}
-	doc.Revision = snap.Revision
-	snap.Document = doc
-	return snap, true, nil
-}
-
-func (r *SQLite) RollbackSettings(ctx context.Context, expectedRevision, targetRevision int64, updatedBy string) (settings.Document, error) {
-	snap, found, err := r.GetSettingsSnapshot(ctx, targetRevision)
-	if err != nil {
-		return settings.Document{}, err
-	}
-	if !found {
-		return settings.Document{}, repository.ErrSettingsSnapshotGone
-	}
-	doc := snap.Document
-	doc.UpdatedBy = updatedBy
-	// PutSettings creates a new revision from the snapshot content.
-	// Annotate reason via temporary reason field in Put path: reuse Put then patch snapshot reason.
-	put, err := r.PutSettings(ctx, expectedRevision, doc, updatedBy)
-	if err != nil {
-		return settings.Document{}, err
-	}
-	// Rewrite latest snapshot reason to rollback.
-	_, _ = r.db.ExecContext(
-		ctx,
-		`UPDATE app_settings_snapshots SET reason=? WHERE revision=?`,
-		fmt.Sprintf("rollback_to_%d", targetRevision),
-		put.Revision,
-	)
-	return put, nil
 }

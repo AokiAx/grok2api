@@ -12,8 +12,6 @@ import (
 )
 
 // SettingsAdmin is the settings center port.
-// Snapshot/rollback storage may still exist under the repository for
-// optimistic-locking history, but is not exposed through the admin API.
 type SettingsAdmin interface {
 	GetSettings(context.Context) (settings.Document, error)
 	PutSettings(context.Context, int64, settings.Document, string) (settings.Document, error)

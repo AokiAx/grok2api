@@ -67,15 +67,6 @@ type ClientKeys struct {
 	DefaultMaxConcurrent int `json:"default_max_concurrent"`
 }
 
-// Snapshot is an immutable historical revision.
-type Snapshot struct {
-	Revision  int64
-	CreatedAt time.Time
-	CreatedBy string
-	Reason    string
-	Document  Document
-}
-
 func Defaults() Document {
 	return Document{
 		Revision:  1,
