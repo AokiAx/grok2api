@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -10,9 +11,15 @@ import (
 	auth "github.com/AokiAx/grok2api/backend/internal/adminauth"
 )
 
-type AdminAuthHandlerOptions struct{ SecureCookies bool }
+type AdminAuthHandlerOptions struct {
+	SecureCookies bool
+	Clock         func() time.Time
+}
 
 func NewAdminAuthHandler(service *auth.Service, opts AdminAuthHandlerOptions) http.Handler {
+	if opts.Clock == nil {
+		opts.Clock = time.Now
+	}
 	mux := http.NewServeMux()
 	h := &adminAuthHandler{service: service, opts: opts}
 	mux.HandleFunc("POST /api/admin/v1/auth/login", h.login)
@@ -87,7 +94,10 @@ func (h *adminAuthHandler) setCookie(w http.ResponseWriter, v string, remember b
 	max := 0
 	cookie := &http.Cookie{Name: "grok2api_admin_refresh", Value: v, Path: "/api/admin/v1/auth", MaxAge: max, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.opts.SecureCookies}
 	if remember {
-		max = int((30 * 24 * time.Hour).Seconds())
+		max = int(exp.Sub(h.opts.Clock()).Seconds())
+		if max < 1 {
+			max = 1
+		}
 		cookie.MaxAge = max
 		cookie.Expires = exp
 	}
@@ -106,7 +116,7 @@ func (h *adminAuthHandler) error(w http.ResponseWriter, status int, code, msg st
 	if status == http.StatusUnauthorized {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 	}
-	if status == http.StatusTooManyRequests {
+	if status == http.StatusTooManyRequests && w.Header().Get("Retry-After") == "" {
 		w.Header().Set("Retry-After", "900")
 	}
 	w.WriteHeader(status)
@@ -119,9 +129,14 @@ func (h *adminAuthHandler) writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		h.error(w, http.StatusUnauthorized, "invalid_credentials", "")
 	case errors.Is(err, auth.ErrRateLimited):
-		h.error(w, http.StatusTooManyRequests, "rate_limited", "")
+		var limited *auth.LoginRateLimitError
+		if errors.As(err, &limited) {
+			seconds := int64((limited.RetryAfter + time.Second - 1) / time.Second)
+			w.Header().Set("Retry-After", fmt.Sprint(seconds))
+		}
+		h.error(w, http.StatusTooManyRequests, "login_rate_limited", "")
 	case errors.Is(err, auth.ErrConflict):
-		h.error(w, http.StatusConflict, "session_conflict", "")
+		h.error(w, http.StatusConflict, "refresh_conflict", "")
 	case errors.Is(err, auth.ErrInvalidRefresh):
 		h.error(w, http.StatusUnauthorized, "invalid_refresh_session", "")
 	case errors.Is(err, auth.ErrUnauthorized):

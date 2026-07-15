@@ -23,6 +23,11 @@ var (
 	ErrInvalidRefresh     = errors.New("invalid refresh session")
 )
 
+type LoginRateLimitError struct{ RetryAfter time.Duration }
+
+func (e *LoginRateLimitError) Error() string { return ErrRateLimited.Error() }
+func (e *LoginRateLimitError) Unwrap() error { return ErrRateLimited }
+
 type Clock func() time.Time
 type Random func([]byte) error
 type Option func(*Service)
@@ -88,7 +93,18 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 		return LoginOutput{}, err
 	}
 	if failures >= 5 {
-		return LoginOutput{}, ErrRateLimited
+		oldest, found, e := s.repo.OldestRecentAdminLoginFailure(ctx, username, ip, now.Add(-15*time.Minute))
+		if e != nil {
+			return LoginOutput{}, e
+		}
+		retry := 15 * time.Minute
+		if found {
+			retry = oldest.Add(15 * time.Minute).Sub(now)
+			if retry < time.Second {
+				retry = time.Second
+			}
+		}
+		return LoginOutput{}, &LoginRateLimitError{RetryAfter: retry}
 	}
 	u, ok, err := s.repo.GetAdminUserByUsername(ctx, username)
 	if err != nil {

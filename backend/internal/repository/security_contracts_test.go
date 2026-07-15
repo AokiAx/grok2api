@@ -46,6 +46,9 @@ func (adminAuthContractRepository) RecordAdminLoginAttempt(context.Context, admi
 func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error) {
 	return 0, nil
 }
+func (adminAuthContractRepository) OldestRecentAdminLoginFailure(context.Context, string, string, time.Time) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
 
 type clientKeyContractRepository struct{}
 

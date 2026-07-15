@@ -248,6 +248,18 @@ func (r *SQLite) CountRecentAdminLoginFailures(
 	return count, nil
 }
 
+func (r *SQLite) OldestRecentAdminLoginFailure(ctx context.Context, username, sourceIP string, since time.Time) (time.Time, bool, error) {
+	var raw sql.NullString
+	err := r.db.QueryRowContext(ctx, `SELECT MIN(created_at) FROM admin_login_attempts WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?`, strings.ToLower(strings.TrimSpace(username)), strings.TrimSpace(sourceIP), formatTime(since)).Scan(&raw)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("oldest admin login failure: %w", err)
+	}
+	if !raw.Valid || raw.String == "" {
+		return time.Time{}, false, nil
+	}
+	return parseTime(raw.String), true, nil
+}
+
 const sessionSelect = `SELECT
 	id, family_id, admin_user_id, access_token_hash, refresh_secret_hash,
 	source_ip, user_agent, remember, created_at, access_expires_at, expires_at,

@@ -2,6 +2,7 @@ package adminauth
 
 import (
 	"context"
+	"errors"
 	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	"strings"
@@ -72,6 +73,12 @@ func (f *fakeRepo) RecordAdminLoginAttempt(_ context.Context, a adminauth.LoginA
 func (f *fakeRepo) CountRecentAdminLoginFailures(_ context.Context, _ string, _ string, _ time.Time) (int, error) {
 	return len(f.attempts), nil
 }
+func (f *fakeRepo) OldestRecentAdminLoginFailure(_ context.Context, _ string, _ string, _ time.Time) (time.Time, bool, error) {
+	if len(f.attempts) == 0 {
+		return time.Time{}, false, nil
+	}
+	return f.attempts[0].CreatedAt, true, nil
+}
 
 func TestLoginIssuesOpaqueTokensAndRejectsBadPassword(t *testing.T) {
 	cred, _ := security.HashAdminPassword("secret", 4)
@@ -110,7 +117,7 @@ func TestLoginSetupRequiredAndThrottle(t *testing.T) {
 		if i < 5 && err != ErrInvalidCredentials {
 			t.Fatalf("attempt %d err %v", i, err)
 		}
-		if i == 5 && err != ErrRateLimited {
+		if i == 5 && !errors.Is(err, ErrRateLimited) {
 			t.Fatalf("attempt 6 err %v", err)
 		}
 	}

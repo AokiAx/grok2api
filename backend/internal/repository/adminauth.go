@@ -26,6 +26,7 @@ type AdminSessionStore interface {
 type AdminLoginAttemptStore interface {
 	RecordAdminLoginAttempt(context.Context, adminauth.LoginAttempt) error
 	CountRecentAdminLoginFailures(context.Context, string, string, time.Time) (int, error)
+	OldestRecentAdminLoginFailure(context.Context, string, string, time.Time) (time.Time, bool, error)
 }
 
 type AdminAuthRepository interface {
