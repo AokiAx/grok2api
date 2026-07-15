@@ -53,6 +53,7 @@ function AuthProbe() {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   apiMocks.meta.mockResolvedValue({ auth_required: true, version: "1", api_version: "v1" });
   apiMocks.me.mockResolvedValue({ id: "admin-1", username: "admin" });
   apiMocks.login.mockResolvedValue({

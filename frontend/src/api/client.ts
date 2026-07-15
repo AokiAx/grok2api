@@ -9,12 +9,14 @@ export type AdminEnvelope<T> = {
 export class AdminApiError extends Error {
   code: string;
   status: number;
+  retryAfter: string | null;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, retryAfter: string | null = null) {
     super(message);
     this.name = "AdminApiError";
     this.status = status;
     this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -23,6 +25,12 @@ const LEGACY_REMEMBER_KEY = "grok2api.admin.remember";
 let accessToken = "";
 let sessionGeneration = 0;
 let refreshFlight: { generation: number; promise: Promise<boolean> } | null = null;
+const sessionInvalidatedListeners = new Set<() => void>();
+
+export function subscribeAdminSessionInvalidated(listener: () => void): () => void {
+  sessionInvalidatedListeners.add(listener);
+  return () => sessionInvalidatedListeners.delete(listener);
+}
 
 function clearLegacyAuthStorage(): void {
   try {
@@ -41,6 +49,13 @@ function setAccessToken(token: string): void {
 
 function clearAccessToken(): void {
   accessToken = "";
+}
+
+function invalidateSession(generation: number): void {
+  if (generation !== sessionGeneration) return;
+  sessionGeneration += 1;
+  clearAccessToken();
+  sessionInvalidatedListeners.forEach((listener) => listener());
 }
 
 clearLegacyAuthStorage();
@@ -72,39 +87,62 @@ async function parseEnvelope<T>(response: Response): Promise<T> {
   try {
     body = text ? (JSON.parse(text) as AdminEnvelope<T>) : null;
   } catch {
-    throw new AdminApiError(response.status, "invalid_json", text || response.statusText);
+    throw new AdminApiError(
+      response.status,
+      "invalid_json",
+      text || response.statusText,
+      response.headers.get("Retry-After"),
+    );
   }
   if (!body) {
-    throw new AdminApiError(response.status, "empty", "Empty response");
+    throw new AdminApiError(
+      response.status,
+      "empty",
+      "Empty response",
+      response.headers.get("Retry-After"),
+    );
   }
   if (!response.ok || !body.ok || body.error) {
     throw new AdminApiError(
       response.status,
       body.error?.code || "error",
       body.error?.message || "Request failed",
+      response.headers.get("Retry-After"),
     );
   }
   return body.data as T;
 }
 
 async function refreshAccessToken(generation: number): Promise<boolean> {
-  try {
-    const response = await fetch("/api/admin/v1/auth/refresh", {
-      method: "POST",
-      credentials: "include",
-    });
-    const data = await parseEnvelope<TokenPayload>(response);
-    const nextToken = extractAccessToken(data);
-    if (!nextToken) {
-      throw new AdminApiError(response.status, "invalid_session", "Refresh response omitted access token");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch("/api/admin/v1/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await parseEnvelope<TokenPayload>(response);
+      const nextToken = extractAccessToken(data);
+      if (!nextToken) {
+        throw new AdminApiError(response.status, "invalid_session", "Refresh response omitted access token");
+      }
+      if (generation !== sessionGeneration) return false;
+      setAccessToken(nextToken);
+      return true;
+    } catch (error) {
+      const isConflict = error instanceof AdminApiError
+        && error.status === 409
+        && error.code === "refresh_conflict";
+      if (isConflict && attempt === 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        if (generation !== sessionGeneration) return false;
+        continue;
+      }
+      invalidateSession(generation);
+      return false;
     }
-    if (generation !== sessionGeneration) return false;
-    setAccessToken(nextToken);
-    return true;
-  } catch {
-    if (generation === sessionGeneration) clearAccessToken();
-    return false;
   }
+  invalidateSession(generation);
+  return false;
 }
 
 function refreshSingleFlight(): Promise<boolean> {
@@ -169,10 +207,16 @@ async function downloadAttachment(path: string, fallbackName: string): Promise<v
         response.status,
         body.error?.code || "download_failed",
         body.error?.message || "Download failed",
+        response.headers.get("Retry-After"),
       );
     } catch (error) {
       if (error instanceof AdminApiError) throw error;
-      throw new AdminApiError(response.status, "download_failed", text || response.statusText);
+      throw new AdminApiError(
+        response.status,
+        "download_failed",
+        text || response.statusText,
+        response.headers.get("Retry-After"),
+      );
     }
   }
 

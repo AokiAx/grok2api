@@ -4,10 +4,15 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
-import { adminApi, type SystemMeta } from "@/api/client";
+import {
+  adminApi,
+  subscribeAdminSessionInvalidated,
+  type SystemMeta,
+} from "@/api/client";
 
 type AuthState = {
   ready: boolean;
@@ -26,44 +31,58 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [authenticated, setAuthenticated] = useState(false);
   const [meta, setMeta] = useState<SystemMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const probeGeneration = useRef(0);
 
   const refreshMeta = useCallback(async () => {
-    setMeta(await adminApi.meta());
+    const generation = probeGeneration.current + 1;
+    probeGeneration.current = generation;
+    setReady(false);
+    setAuthenticated(false);
+    setMeta(null);
+    setError(null);
+    try {
+      const nextMeta = await adminApi.meta();
+      if (generation !== probeGeneration.current) return;
+      setMeta(nextMeta);
+      if (!nextMeta.auth_required) {
+        setAuthenticated(true);
+        return;
+      }
+      if (nextMeta.setup_required) return;
+      try {
+        await adminApi.me();
+        if (generation === probeGeneration.current) setAuthenticated(true);
+      } catch {
+        if (generation === probeGeneration.current) setAuthenticated(false);
+      }
+    } catch (err) {
+      if (generation === probeGeneration.current) {
+        setError(err instanceof Error ? err.message : "Failed to load meta");
+      }
+    } finally {
+      if (generation === probeGeneration.current) setReady(true);
+    }
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const nextMeta = await adminApi.meta();
-        if (cancelled) return;
-        setMeta(nextMeta);
-        if (!nextMeta.auth_required) {
-          setAuthenticated(true);
-          setReady(true);
-          return;
-        }
-        try {
-          await adminApi.me();
-          if (!cancelled) setAuthenticated(true);
-        } catch {
-          if (!cancelled) setAuthenticated(false);
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load meta");
-      } finally {
-        if (!cancelled) setReady(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    return subscribeAdminSessionInvalidated(() => {
+      setAuthenticated(false);
+      setError("登录会话已失效，请重新登录");
+    });
   }, []);
+
+  useEffect(() => {
+    void refreshMeta();
+    return () => {
+      probeGeneration.current += 1;
+    };
+  }, [refreshMeta]);
 
   const login = useCallback(async (password: string, remember: boolean) => {
     setError(null);
     await adminApi.login(password, remember);
     setAuthenticated(true);
+    setError(null);
   }, []);
 
   const logout = useCallback(async () => {

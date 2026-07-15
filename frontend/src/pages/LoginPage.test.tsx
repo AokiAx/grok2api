@@ -30,6 +30,7 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   authMocks.login.mockResolvedValue(undefined);
   authMocks.auth.ready = true;
   authMocks.auth.error = null;
