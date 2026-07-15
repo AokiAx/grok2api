@@ -77,7 +77,7 @@ func TestLegacyDisabledAccountsMigrateByFailureReason(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
-	if _, err := repo.ImportLegacyJSON(ctx, legacy); err != nil {
+	if _, err := repo.ImportLegacyJSON(ctx, legacy, 0); err != nil {
 		t.Fatalf("import legacy: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestLegacyDisabledHeuristicSeparatesExpiredAuthAndQuota(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
-	if _, err := repo.ImportLegacyJSON(ctx, legacy); err != nil {
+	if _, err := repo.ImportLegacyJSON(ctx, legacy, 0); err != nil {
 		t.Fatalf("import legacy: %v", err)
 	}
 	accounts, err := repo.ListAccounts(ctx)
@@ -441,7 +441,7 @@ func TestLegacyEnabledExpiredCredentialMigratesToAuth(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
-	if _, err := repo.ImportLegacyJSON(ctx, legacy); err != nil {
+	if _, err := repo.ImportLegacyJSON(ctx, legacy, 0); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	accounts, err := repo.ListAccounts(ctx)
@@ -546,7 +546,7 @@ func TestImportLegacyJSONKeepsTeamID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
-	count, err := repo.ImportLegacyJSON(ctx, legacy)
+	count, err := repo.ImportLegacyJSON(ctx, legacy, 0)
 	if err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
@@ -1069,5 +1069,42 @@ func TestLegacyBareCiphertextIsReadableAndUpgradedOnOpen(t *testing.T) {
 	}
 	if !strings.HasPrefix(rawAccess, security.EnvelopePrefix) {
 		t.Fatalf("expected envelope after open migration, got %q", rawAccess)
+	}
+}
+
+func TestImportLegacyJSONUsesDefaultMaxActive(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "cli_accounts.json")
+	payload := map[string]any{"accounts": []map[string]any{
+		{"id": "a1", "key": "token-a", "email": "a@example.com", "enabled": true},
+		{"id": "a2", "key": "token-b", "email": "b@example.com", "enabled": true, "max_active": 7},
+	}}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(legacy, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(dir, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	count, err := repo.ImportLegacyJSON(ctx, legacy, 4)
+	if err != nil || count != 2 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]account.Account{}
+	for _, item := range accounts {
+		byID[item.ID] = item
+	}
+	if byID["a1"].MaxActive != 4 {
+		t.Fatalf("a1 max_active=%d want 4 (global default)", byID["a1"].MaxActive)
+	}
+	if byID["a2"].MaxActive != 7 {
+		t.Fatalf("a2 max_active=%d want 7 (explicit)", byID["a2"].MaxActive)
 	}
 }

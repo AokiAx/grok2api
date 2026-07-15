@@ -601,23 +601,32 @@ type legacyFile struct {
 }
 
 type legacyAccount struct {
-	ID            string `json:"id"`
-	Key           string `json:"key"`
-	AccessToken   string `json:"access_token"`
-	RefreshToken  string `json:"refresh_token"`
-	ExpiresAt     string `json:"expires_at"`
-	OIDCIssuer    string `json:"oidc_issuer"`
-	OIDCClientID  string `json:"oidc_client_id"`
-	Email         string `json:"email"`
-	UserID        string `json:"user_id"`
-	TeamID        string `json:"team_id"`
-	Enabled       *bool  `json:"enabled"`
+	ID           string `json:"id"`
+	Key          string `json:"key"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresAt    string `json:"expires_at"`
+	OIDCIssuer   string `json:"oidc_issuer"`
+	OIDCClientID string `json:"oidc_client_id"`
+	Email        string `json:"email"`
+	UserID       string `json:"user_id"`
+	TeamID       string `json:"team_id"`
+	Enabled      *bool  `json:"enabled"`
+	// MaxActive is optional; when omitted/<=0, ImportLegacyJSON uses defaultMaxActive.
+	MaxActive     int    `json:"max_active"`
 	RequestCount  int64  `json:"request_count"`
 	FailCount     int    `json:"fail_count"`
 	LastErrorCode string `json:"last_error_code"`
 }
 
-func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string) (int, error) {
+// ImportLegacyJSON imports accounts from a legacy cli_accounts.json file.
+// defaultMaxActive is used when a record omits max_active or sets it <= 0
+// (same policy as admin API import / global pool.max_concurrent).
+// Pass <=0 to fall back to 1.
+func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string, defaultMaxActive int) (int, error) {
+	if defaultMaxActive <= 0 {
+		defaultMaxActive = 1
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("read legacy accounts: %w", err)
@@ -640,7 +649,7 @@ func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string) (int, error)
 	count := 0
 	now := time.Now().UTC()
 	for index, legacy := range payload.Accounts {
-		item, ok := legacy.toAccount(now, index)
+		item, ok := legacy.toAccount(now, index, defaultMaxActive)
 		if !ok {
 			continue
 		}
@@ -655,7 +664,7 @@ func (r *SQLite) ImportLegacyJSON(ctx context.Context, path string) (int, error)
 	return count, nil
 }
 
-func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, bool) {
+func (a legacyAccount) toAccount(now time.Time, index int, defaultMaxActive int) (account.Account, bool) {
 	token := strings.TrimSpace(a.Key)
 	if token == "" {
 		token = strings.TrimSpace(a.AccessToken)
@@ -712,10 +721,20 @@ func (a legacyAccount) toAccount(now time.Time, index int) (account.Account, boo
 		LastErrorCode:       a.LastErrorCode,
 		RequestCount:        a.RequestCount,
 		AuthenticationFails: a.FailCount,
-		MaxActive:           1,
+		MaxActive:           resolveLegacyMaxActive(a.MaxActive, defaultMaxActive),
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}, true
+}
+
+func resolveLegacyMaxActive(explicit, defaultMaxActive int) int {
+	if explicit > 0 {
+		return explicit
+	}
+	if defaultMaxActive > 0 {
+		return defaultMaxActive
+	}
+	return 1
 }
 
 func (r *SQLite) SaveAccount(ctx context.Context, item account.Account) error {

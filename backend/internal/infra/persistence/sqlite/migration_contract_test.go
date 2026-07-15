@@ -104,7 +104,7 @@ func TestLegacyJSONFixtureImportsAllSupportedFieldsAndStates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	count, err := repo.ImportLegacyJSON(ctx, filepath.Join("testdata", "legacy_accounts.json"))
+	count, err := repo.ImportLegacyJSON(ctx, filepath.Join("testdata", "legacy_accounts.json"), 0)
 	if err != nil {
 		t.Fatalf("import fixture: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestLegacyJSONImportRollsBackAllRowsWhenOneUpsertFails(t *testing.T) {
 		t.Fatalf("create failure trigger: %v", err)
 	}
 
-	if _, err := repo.ImportLegacyJSON(ctx, filepath.Join("testdata", "legacy_accounts.json")); err == nil {
+	if _, err := repo.ImportLegacyJSON(ctx, filepath.Join("testdata", "legacy_accounts.json"), 0); err == nil {
 		t.Fatal("expected import error")
 	}
 	count, err := repo.AccountCount(ctx)
@@ -396,7 +396,7 @@ func TestMalformedLegacyJSONDoesNotModifyExistingDatabase(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(`{"accounts":[`), 0o600); err != nil {
 		t.Fatalf("write malformed fixture: %v", err)
 	}
-	if _, err := repo.ImportLegacyJSON(ctx, legacy); err == nil {
+	if _, err := repo.ImportLegacyJSON(ctx, legacy, 0); err == nil {
 		t.Fatal("expected malformed JSON error")
 	}
 	accounts, err := repo.ListAccounts(ctx)

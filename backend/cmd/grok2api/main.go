@@ -118,7 +118,7 @@ func runWithIOAndServe(
 	}
 	defer repo.Close()
 	if command != "bootstrap-admin" {
-		if err := importLegacyWhenEmpty(ctx, repo, settings.DataDir); err != nil {
+		if err := importLegacyWhenEmpty(ctx, repo, settings.DataDir, settings.MaxConcurrent); err != nil {
 			return err
 		}
 	}
@@ -194,7 +194,7 @@ func bootstrapServeSecurity(ctx context.Context, settings *config.Config, repo r
 	return nil
 }
 
-func importLegacyWhenEmpty(ctx context.Context, repo *sqlite.SQLite, dataDir string) error {
+func importLegacyWhenEmpty(ctx context.Context, repo *sqlite.SQLite, dataDir string, defaultMaxActive int) error {
 	count, err := repo.AccountCount(ctx)
 	if err != nil {
 		return err
@@ -208,7 +208,7 @@ func importLegacyWhenEmpty(ctx context.Context, repo *sqlite.SQLite, dataDir str
 	} else if err != nil {
 		return fmt.Errorf("inspect legacy account file: %w", err)
 	}
-	imported, err := repo.ImportLegacyJSON(ctx, legacyPath)
+	imported, err := repo.ImportLegacyJSON(ctx, legacyPath, defaultMaxActive)
 	if err != nil {
 		return err
 	}
