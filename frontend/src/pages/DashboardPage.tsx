@@ -252,7 +252,7 @@ export function DashboardPage() {
               </div>
             </CardHeader>
             <CardContent>
-              <UsageTrendChart series={trendSeries} />
+              <UsageTrendChart series={trendSeries} period={period} loading={loading} />
             </CardContent>
           </Card>
 
