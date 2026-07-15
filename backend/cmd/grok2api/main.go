@@ -49,17 +49,31 @@ type serveCommand func(context.Context, config.Config, runtimeRepository) error
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+	if err := runWithIO(ctx, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		slog.Error("grok2api stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, arguments []string, output io.Writer) error {
-	return runWithServe(ctx, arguments, output, serve)
+	return runWithIOAndServe(ctx, arguments, os.Stdin, output, serve)
+}
+
+func runWithIO(ctx context.Context, arguments []string, input io.Reader, output io.Writer) error {
+	return runWithIOAndServe(ctx, arguments, input, output, serve)
 }
 
 func runWithServe(ctx context.Context, arguments []string, output io.Writer, serveFn serveCommand) error {
+	return runWithIOAndServe(ctx, arguments, os.Stdin, output, serveFn)
+}
+
+func runWithIOAndServe(
+	ctx context.Context,
+	arguments []string,
+	input io.Reader,
+	output io.Writer,
+	serveFn serveCommand,
+) error {
 	command := "serve"
 	if len(arguments) > 0 && arguments[0] != "--config" {
 		command = arguments[0]
@@ -70,8 +84,12 @@ func runWithServe(ctx context.Context, arguments []string, output io.Writer, ser
 	configPath := flags.String("config", "config.json", "configuration file")
 	exportPath := flags.String("out", "", "output file path for export command (default data/export_accounts.json)")
 	exportPool := flags.String("pool", "", "export only accounts in this pool (ready|unavailable); empty = all")
+	passwordStdin := flags.Bool("password-stdin", false, "read the administrator bootstrap password from stdin")
 	if err := flags.Parse(arguments); err != nil {
 		return err
+	}
+	if command != "bootstrap-admin" && *passwordStdin {
+		return errors.New("--password-stdin is only valid for bootstrap-admin")
 	}
 
 	settings, err := config.Load(*configPath)
@@ -93,11 +111,18 @@ func runWithServe(ctx context.Context, arguments []string, output io.Writer, ser
 		return err
 	}
 	defer repo.Close()
-	if err := importLegacyWhenEmpty(ctx, repo, settings.DataDir); err != nil {
-		return err
+	if command != "bootstrap-admin" {
+		if err := importLegacyWhenEmpty(ctx, repo, settings.DataDir); err != nil {
+			return err
+		}
 	}
 
 	switch command {
+	case "bootstrap-admin":
+		if !*passwordStdin {
+			return errors.New("bootstrap-admin requires --password-stdin")
+		}
+		return runBootstrapAdmin(ctx, input, output, repo)
 	case "migrate", "status":
 		return printStatus(ctx, output, repo)
 	case "serve":
@@ -115,6 +140,29 @@ func runWithServe(ctx context.Context, arguments []string, output io.Writer, ser
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func runBootstrapAdmin(
+	ctx context.Context,
+	input io.Reader,
+	output io.Writer,
+	repo repository.AdminBootstrapRepository,
+) error {
+	if output == nil {
+		return errors.New("bootstrap-admin output is required")
+	}
+	password, err := bootstrap.ReadPasswordStdin(input)
+	if err != nil {
+		return fmt.Errorf("read administrator password: %w", err)
+	}
+	result, err := bootstrap.NewAdminBootstrapService(repo, time.Now, bcrypt.DefaultCost).Bootstrap(ctx, password)
+	if err != nil {
+		return fmt.Errorf("bootstrap administrator: %w", err)
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"status":   result.Status,
+		"username": result.Admin.Username,
+	})
 }
 
 func bootstrapServeSecurity(ctx context.Context, settings *config.Config, repo repository.LegacySecurityBootstrapRepository) error {
