@@ -209,4 +209,58 @@ func TestClientRateLimitMiddlewareAllowsUnlimitedDecision(t *testing.T) {
 	}
 }
 
+func TestClientConcurrencyMiddlewareHoldsPermitUntilStreamCompletes(t *testing.T) {
+	access := service.NewClientAccess(nil)
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	handler := ClientConcurrencyMiddleware(access, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("data: first\n\n"))
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(started)
+		<-finish
+		_, _ = writer.Write([]byte("data: done\n\n"))
+	}))
+	grant := service.ClientGrant{Authenticated: true, KeyID: "ck_stream", MaxConcurrent: 1}
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		req = req.WithContext(service.WithClientGrant(req.Context(), grant))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		firstDone <- rec
+	}()
+	<-started
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req = req.WithContext(service.WithClientGrant(req.Context(), grant))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"code":"concurrent_limit_exceeded"`) {
+		t.Fatalf("while stream active status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	close(finish)
+	first := <-firstDone
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "data: done") {
+		t.Fatalf("first stream status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	// The stream handler returned, so the permit must be available again.
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req = req.WithContext(service.WithClientGrant(req.Context(), grant))
+	rec = httptest.NewRecorder()
+	quick := ClientConcurrencyMiddleware(access, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	quick.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("after stream status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 var _ ClientAuthenticator = (*fakeRequestAuthenticator)(nil)

@@ -194,3 +194,43 @@ func TestClientAccessReturnsRateLimitedDecision(t *testing.T) {
 		t.Fatalf("decision=%+v err=%v", decision, err)
 	}
 }
+
+func TestClientAccessConcurrencyPermitIsPerKeyAndIdempotent(t *testing.T) {
+	access := NewClientAccess(nil)
+	limited := ClientGrant{Authenticated: true, KeyID: "ck_limited", MaxConcurrent: 1}
+	permit, err := access.AcquireConcurrency(limited)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	if _, err := access.AcquireConcurrency(limited); !errors.Is(err, ErrClientConcurrencyLimited) {
+		t.Fatalf("second acquire err=%v", err)
+	}
+	other, err := access.AcquireConcurrency(ClientGrant{Authenticated: true, KeyID: "ck_other", MaxConcurrent: 1})
+	if err != nil {
+		t.Fatalf("other key acquire: %v", err)
+	}
+	other.Release()
+	permit.Release()
+	permit.Release()
+	if next, err := access.AcquireConcurrency(limited); err != nil {
+		t.Fatalf("acquire after idempotent release: %v", err)
+	} else {
+		next.Release()
+	}
+}
+
+func TestClientAccessConcurrencyZeroIsUnlimited(t *testing.T) {
+	access := NewClientAccess(nil)
+	grant := ClientGrant{Authenticated: true, KeyID: "ck_unlimited", MaxConcurrent: 0}
+	permits := make([]ClientPermit, 100)
+	for index := range permits {
+		permit, err := access.AcquireConcurrency(grant)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", index, err)
+		}
+		permits[index] = permit
+	}
+	for _, permit := range permits {
+		permit.Release()
+	}
+}
