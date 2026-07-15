@@ -48,6 +48,20 @@ type orderedPermit struct {
 	released bool
 }
 
+type eventReader struct {
+	reader io.Reader
+	events *[]string
+	seen   bool
+}
+
+func (r *eventReader) Read(buffer []byte) (int, error) {
+	if !r.seen {
+		*r.events = append(*r.events, "body")
+		r.seen = true
+	}
+	return r.reader.Read(buffer)
+}
+
 func (p *orderedPermit) Release() {
 	if !p.released {
 		*p.events = append(*p.events, "release")
@@ -304,21 +318,84 @@ func TestClientInferenceMiddlewareFixesSecurityCheckOrder(t *testing.T) {
 	}}
 	handler := ClientInferenceMiddleware(access, "grok-4.5", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		access.events = append(access.events, "handler")
+		first, err := readInferenceRequestBody(writer, request)
+		if err != nil {
+			t.Fatalf("read cached body: %v", err)
+		}
+		second, err := readInferenceRequestBody(writer, request)
+		if err != nil || string(second) != `{"input":"hi"}` {
+			t.Fatalf("reused body=%q err=%v", second, err)
+		}
+		if len(first) == 0 || &first[0] != &second[0] {
+			t.Fatal("inference body was copied instead of reused")
+		}
 		if model, ok := service.EffectiveModelFromContext(request.Context()); !ok || model != "grok-4.5" {
 			t.Fatalf("effective model=%q ok=%v", model, ok)
 		}
 		writer.WriteHeader(http.StatusNoContent)
 	}))
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", &eventReader{
+		reader: strings.NewReader(`{"input":"hi"}`),
+		events: &access.events,
+	})
 	req.Header.Set("Authorization", "Bearer raw-secret")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	want := []string{"authenticate", "rpm", "concurrency", "handler", "release"}
+	want := []string{"authenticate", "rpm", "concurrency", "body", "handler", "release"}
 	if strings.Join(access.events, ",") != strings.Join(want, ",") {
 		t.Fatalf("events=%#v want=%#v", access.events, want)
+	}
+}
+
+func TestClientInferenceMiddlewareKeepsExistingBodyLimitAndReleasesPermitOnOversize(t *testing.T) {
+	if maxInferenceBodyBytes != 32<<20 {
+		t.Fatalf("inference body limit=%d want=%d", maxInferenceBodyBytes, 32<<20)
+	}
+	valid := make([]byte, maxInferenceBodyBytes)
+	prefix := []byte(`{"model":"grok-4.5"}`)
+	copy(valid, prefix)
+	for index := len(prefix); index < len(valid); index++ {
+		valid[index] = ' '
+	}
+
+	access := &orderedInferenceAccess{grant: service.ClientGrant{
+		Authenticated: true, KeyID: "ck_large", Principal: "client-key:ck_large",
+		ModelPolicy: clientkey.ModelPolicyAll, MaxConcurrent: 1,
+	}}
+	handlerCalled := false
+	handler := ClientInferenceMiddleware(access, "grok-4.5", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		handlerCalled = true
+		body, err := readInferenceRequestBody(writer, request)
+		if err != nil || len(body) != maxInferenceBodyBytes {
+			t.Fatalf("body len=%d err=%v", len(body), err)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(valid))
+	req.Header.Set("Authorization", "Bearer raw-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || !handlerCalled || access.permit == nil || !access.permit.released {
+		t.Fatalf("exact-limit status=%d called=%v permit=%+v body=%s", rec.Code, handlerCalled, access.permit, rec.Body.String())
+	}
+
+	access.events = nil
+	access.permit = nil
+	handlerCalled = false
+	oversized := append(valid, ' ')
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(oversized))
+	req.Header.Set("Authorization", "Bearer raw-secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || handlerCalled || access.permit == nil || !access.permit.released {
+		t.Fatalf("oversize status=%d called=%v permit=%+v body=%s", rec.Code, handlerCalled, access.permit, rec.Body.String())
+	}
+	want := "authenticate,rpm,concurrency,release"
+	if strings.Join(access.events, ",") != want {
+		t.Fatalf("oversize events=%v want=%s", access.events, want)
 	}
 }
 
