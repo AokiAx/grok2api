@@ -272,6 +272,7 @@ func TestNewAPIHandlerWiresPersistentSecurityAndSecureCookies(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 
 	meta := httptest.NewRecorder()

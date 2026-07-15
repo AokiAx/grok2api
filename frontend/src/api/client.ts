@@ -509,6 +509,11 @@ export type SettingsDocument = {
     client_id: string;
     scope: string;
   };
+  debug_trace: {
+    enabled: boolean;
+    dir: string;
+    errors_only: boolean;
+  };
 };
 
 
@@ -784,6 +789,7 @@ export const adminApi = {
     proxy: SettingsDocument["proxy"];
     client_keys: SettingsDocument["client_keys"];
     device_auth: SettingsDocument["device_auth"];
+    debug_trace: SettingsDocument["debug_trace"];
   }) =>
     request<SettingsDocument>("/api/admin/v1/settings", {
       method: "PUT",

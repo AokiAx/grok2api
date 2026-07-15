@@ -64,8 +64,42 @@ func New(opts Options) *Tracer {
 	}
 }
 
+// Configure updates runtime intercept options without replacing the tracer pointer.
+// Empty dir keeps the previous directory.
+func (t *Tracer) Configure(opts Options) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if opts.MaxBody <= 0 {
+		opts.MaxBody = t.opts.MaxBody
+	}
+	if opts.MaxBody <= 0 {
+		opts.MaxBody = 64 << 10
+	}
+	if strings.TrimSpace(opts.Dir) == "" {
+		opts.Dir = t.opts.Dir
+	}
+	if strings.TrimSpace(opts.Dir) == "" {
+		opts.Dir = "data/traces"
+	}
+	t.opts = opts
+}
+
 func (t *Tracer) Enabled() bool {
-	return t != nil && t.opts.Enabled
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.opts.Enabled
+}
+
+func (t *Tracer) snapshotOpts() Options {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.opts
 }
 
 // Start begins a new request span and stores it on the context.
@@ -101,6 +135,7 @@ func (s *Span) Event(stage string, fields map[string]any) {
 	if s == nil || s.tracer == nil || !s.tracer.Enabled() {
 		return
 	}
+	opts := s.tracer.snapshotOpts()
 	event := map[string]any{
 		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
 		"stage": stage,
@@ -113,7 +148,7 @@ func (s *Span) Event(stage string, fields map[string]any) {
 	s.mu.Unlock()
 
 	// Errors-only mode buffers silently until End decides to flush.
-	if s.tracer.opts.ErrorsOnly {
+	if opts.ErrorsOnly {
 		return
 	}
 	// Also emit a short slog line so docker logs show the trail live.
@@ -130,6 +165,7 @@ func (s *Span) End(status int, err error) {
 	if s == nil || s.tracer == nil || !s.tracer.Enabled() {
 		return
 	}
+	opts := s.tracer.snapshotOpts()
 	fields := map[string]any{
 		"status":      status,
 		"elapsed_ms":  time.Since(s.start).Milliseconds(),
@@ -150,10 +186,10 @@ func (s *Span) End(status int, err error) {
 	s.events = append(s.events, event)
 	s.mu.Unlock()
 
-	if s.tracer.opts.ErrorsOnly && !isErrorStatus(status, err) {
+	if opts.ErrorsOnly && !isErrorStatus(status, err) {
 		return
 	}
-	if !s.tracer.opts.ErrorsOnly {
+	if !opts.ErrorsOnly {
 		s.tracer.logger.Info("trace",
 			"trace_id", s.id,
 			"path", s.path,
@@ -183,14 +219,11 @@ func isErrorStatus(status int, err error) bool {
 }
 
 func (t *Tracer) write(span *Span) {
-	if err := os.MkdirAll(t.opts.Dir, 0o700); err != nil {
-		t.logger.Error("create trace dir", "error", err, "dir", t.opts.Dir)
+	opts := t.snapshotOpts()
+	if err := os.MkdirAll(opts.Dir, 0o700); err != nil {
+		t.logger.Error("create trace dir", "error", err, "dir", opts.Dir)
 		return
 	}
-	name := fmt.Sprintf("%s_%s.jsonl",
-		span.start.Format("20060102T150405.000"),
-		span.id,
-	)
 	// Sanitize path for filename.
 	safePath := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
@@ -198,12 +231,12 @@ func (t *Tracer) write(span *Span) {
 		}
 		return '_'
 	}, span.path)
-	name = fmt.Sprintf("%s_%s_%s.jsonl",
+	name := fmt.Sprintf("%s_%s_%s.jsonl",
 		span.start.Format("20060102T150405.000"),
 		safePath,
 		span.id,
 	)
-	path := filepath.Join(t.opts.Dir, name)
+	path := filepath.Join(opts.Dir, name)
 
 	span.mu.Lock()
 	events := append([]map[string]any(nil), span.events...)
@@ -238,8 +271,10 @@ func (t *Tracer) write(span *Span) {
 // BodyPreview redacts secrets and truncates large payloads for safe logging.
 func (t *Tracer) BodyPreview(raw []byte) map[string]any {
 	max := 64 << 10
-	if t != nil && t.opts.MaxBody > 0 {
-		max = t.opts.MaxBody
+	if t != nil {
+		if opts := t.snapshotOpts(); opts.MaxBody > 0 {
+			max = opts.MaxBody
+		}
 	}
 	preview := map[string]any{
 		"bytes": len(raw),

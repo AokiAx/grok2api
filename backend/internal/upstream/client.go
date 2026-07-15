@@ -65,6 +65,9 @@ type Client struct {
 	httpClient       *http.Client
 	streamHTTPClient *http.Client
 	requestTimeout   atomic.Int64
+	proxyMu          sync.RWMutex
+	proxyURL         string
+	proxyEnabled     bool
 	discoveryMu      sync.Mutex
 	tokenEndpoints   map[string]string
 	deviceEndpoints  map[string]string
@@ -118,6 +121,83 @@ func (c *Client) ConfigureRequestTimeout(timeout time.Duration) {
 		return
 	}
 	c.requestTimeout.Store(int64(timeout))
+}
+
+// ConfigureProxy installs or clears an HTTP(S) forward proxy for outbound traffic.
+// Empty URL or enabled=false clears the proxy (direct dial). Invalid URLs return error
+// and leave the previous proxy configuration unchanged.
+func (c *Client) ConfigureProxy(proxyURL string, enabled bool) error {
+	if c == nil {
+		return fmt.Errorf("upstream client is nil")
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if !enabled || proxyURL == "" {
+		c.applyProxy(nil, "", false)
+		return nil
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return fmt.Errorf("parse proxy url: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("proxy url scheme must be http or https, got %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("proxy url host is required")
+	}
+	c.applyProxy(http.ProxyURL(parsed), parsed.Redacted(), true)
+	return nil
+}
+
+// ProxyRuntimeStatus reports whether outbound traffic is currently proxied.
+func (c *Client) ProxyRuntimeStatus() (enabled bool, proxyURL string) {
+	if c == nil {
+		return false, ""
+	}
+	c.proxyMu.RLock()
+	defer c.proxyMu.RUnlock()
+	return c.proxyEnabled, c.proxyURL
+}
+
+func (c *Client) applyProxy(proxy func(*http.Request) (*url.URL, error), display string, enabled bool) {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	apply := func(client *http.Client) {
+		if client == nil {
+			return
+		}
+		base := http.DefaultTransport
+		if client.Transport != nil {
+			base = client.Transport
+		}
+		// Clone DefaultTransport when possible so we keep timeouts/TLS defaults.
+		var transport *http.Transport
+		if dt, ok := base.(*http.Transport); ok {
+			transport = dt.Clone()
+		} else if base == nil {
+			transport = http.DefaultTransport.(*http.Transport).Clone()
+		} else {
+			// Custom RoundTripper: wrap via a fresh transport that still uses Proxy only
+			// for dial path when possible; fall back to DefaultTransport clone.
+			transport = http.DefaultTransport.(*http.Transport).Clone()
+		}
+		if enabled && proxy != nil {
+			transport.Proxy = proxy
+		} else {
+			// Force direct dial; nil would fall back to ProxyFromEnvironment on some transports.
+			transport.Proxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+		}
+		client.Transport = transport
+	}
+	apply(c.httpClient)
+	apply(c.streamHTTPClient)
+	c.proxyEnabled = enabled
+	if enabled {
+		c.proxyURL = display
+	} else {
+		c.proxyURL = ""
+	}
 }
 
 func (c *Client) do(request *http.Request, stream bool) (*http.Response, error) {

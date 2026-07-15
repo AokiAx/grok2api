@@ -91,7 +91,7 @@ func (g *TraceGateway) trace(
 		// Tee stream so we can log a preview without consuming the client stream.
 		var preview bytes.Buffer
 		sniffer := &usageSniffer{}
-		limited := &limitedBuffer{buf: &preview, max: g.Tracer.opts.MaxBody}
+		limited := &limitedBuffer{buf: &preview, max: g.Tracer.snapshotOpts().MaxBody}
 		multi := io.MultiWriter(limited, sniffer)
 		result.Stream = &teeReadCloser{
 			Reader: io.TeeReader(result.Stream, multi),

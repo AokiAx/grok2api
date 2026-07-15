@@ -295,6 +295,18 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 			UserAgent:        settings.ClientUserAgent,
 		},
 	)
+	// Outbound proxy: managed settings when enabled; else bootstrap GROK2API_PROXY / config.proxy.
+	proxyURL, proxyEnabled := resolveOutboundProxy(settings.Proxy, nil)
+	if managed, err := repo.GetSettings(ctx); err == nil {
+		proxyURL, proxyEnabled = resolveOutboundProxy(settings.Proxy, &managed.Proxy)
+	}
+	if err := upstreamClient.ConfigureProxy(proxyURL, proxyEnabled); err != nil {
+		slog.Warn("configure proxy failed; using direct outbound", "error", err, "proxy", proxyURL)
+	} else if proxyEnabled {
+		slog.Info("outbound proxy enabled", "proxy", proxyURL)
+	} else {
+		slog.Info("outbound proxy disabled")
+	}
 	gateway := service.NewGateway(
 		pool,
 		repo,
@@ -305,21 +317,36 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		service.WithAcquireTimeout(time.Duration(settings.AcquireTimeoutSec)*time.Second),
 		service.WithAuditSink(repo),
 	)
-	// Optional temporary interceptor: logs client + upstream stages for protocol debugging.
-	var apiGateway api.Gateway = gateway
-	var tracer *intercept.Tracer
-	if settings.DebugTrace {
-		traceDir := settings.DebugTraceDir
-		if strings.TrimSpace(traceDir) == "" {
-			traceDir = filepath.Join(settings.DataDir, "traces")
+	// Temporary interceptor is always installed so settings can toggle it at runtime.
+	traceDir := settings.DebugTraceDir
+	errorsOnly := settings.DebugTraceErrorsOnly
+	enabled := settings.DebugTrace
+	if managed, err := repo.GetSettings(ctx); err == nil {
+		// Managed settings center is the operator source of truth after first load.
+		if managed.DebugTrace.Enabled || !settings.DebugTrace {
+			enabled = managed.DebugTrace.Enabled
+			errorsOnly = managed.DebugTrace.ErrorsOnly
+			if strings.TrimSpace(managed.DebugTrace.Dir) != "" {
+				traceDir = managed.DebugTrace.Dir
+			}
 		}
-		tracer = intercept.New(intercept.Options{
-			Enabled:    true,
-			Dir:        traceDir,
-			ErrorsOnly: settings.DebugTraceErrorsOnly,
-		})
-		apiGateway = &intercept.TraceGateway{Inner: gateway, Tracer: tracer}
-		if settings.DebugTraceErrorsOnly {
+		// Bootstrap env/file can still force-on for this process until an explicit settings save.
+		if settings.DebugTrace && !managed.DebugTrace.Enabled {
+			enabled = true
+			errorsOnly = settings.DebugTraceErrorsOnly
+		}
+	}
+	if strings.TrimSpace(traceDir) == "" {
+		traceDir = filepath.Join(settings.DataDir, "traces")
+	}
+	tracer := intercept.New(intercept.Options{
+		Enabled:    enabled,
+		Dir:        traceDir,
+		ErrorsOnly: errorsOnly,
+	})
+	apiGateway := api.Gateway(&intercept.TraceGateway{Inner: gateway, Tracer: tracer})
+	if enabled {
+		if errorsOnly {
 			slog.Warn("debug_trace enabled (errors only); writing failed-request JSONL", "dir", traceDir)
 		} else {
 			slog.Warn("debug_trace enabled; writing JSONL traces", "dir", traceDir)
@@ -347,7 +374,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 	pool.ConfigureQuotaRetry(time.Duration(settings.QuotaRetryMinutes) * time.Minute)
 	applier := &runtimeSettingsApplier{
 		pool: pool, gateway: gateway, admin: adminService, recovery: recoveryKnobs,
-		requestTimeout: upstreamClient, settings: settingsPtr,
+		upstreamClient: upstreamClient, settings: settingsPtr, tracer: tracer,
 	}
 	handler := newAPIHandler(
 		*settingsPtr,
@@ -361,6 +388,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		repo,
 		applier,
 		deviceAuthService,
+		upstreamClient,
 	)
 	// Accept traffic once accounts are loaded into the scheduler. Recovery
 	// continues in the background and may still move accounts between pools.
@@ -459,6 +487,7 @@ func newAPIHandler(
 	audits api.AuditReader,
 	settingsApplier api.SettingsApplier,
 	deviceAuth api.DeviceAuthAdmin,
+	proxyRuntime api.ProxyRuntime,
 ) http.Handler {
 	adminAuthService := adminauth.NewService(repo)
 	clientAccess := service.NewClientAccess(repo)
@@ -479,8 +508,9 @@ func newAPIHandler(
 	if frontendFS != nil {
 		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
 	}
-	if tracer != nil {
-		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
+	serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
+	if proxyRuntime != nil {
+		serverOptions = append(serverOptions, api.WithProxyRuntime(proxyRuntime))
 	}
 	if models, err := repo.ListModels(context.Background(), false); err == nil {
 		serverOptions = append(serverOptions, api.WithModelCatalog(sqlite.CatalogFromRegistry(models)))
@@ -618,6 +648,31 @@ func runExport(
 	return nil
 }
 
+
+// resolveOutboundProxy picks managed settings when enabled; otherwise bootstrap env/file proxy.
+// Managed enabled=false always forces direct (operator explicit). Managed enabled=true uses managed URL.
+// When managed is nil or managed has never enabled proxy and URL empty, bootstrap is used.
+func resolveOutboundProxy(bootstrap string, managed *settings.Proxy) (proxyURL string, enabled bool) {
+	bootstrap = strings.TrimSpace(bootstrap)
+	if managed == nil {
+		return bootstrap, bootstrap != ""
+	}
+	if managed.Enabled {
+		url := strings.TrimSpace(managed.URL)
+		if url == "" {
+			url = bootstrap
+		}
+		return url, url != ""
+	}
+	// Settings center disabled. Empty URL keeps bootstrap env as restart fallback
+	// for operators who only set GROK2API_PROXY and never touched the UI.
+	// Non-empty URL with enabled=false means "stored but off".
+	if strings.TrimSpace(managed.URL) == "" {
+		return bootstrap, bootstrap != ""
+	}
+	return strings.TrimSpace(managed.URL), false
+}
+
 func applyManagedSettings(base config.Config, managed settings.Document) config.Config {
 	base.MaxConcurrent = managed.Pool.MaxConcurrent
 	base.MaxAttempts = managed.Pool.MaxAttempts
@@ -637,8 +692,9 @@ type runtimeSettingsApplier struct {
 	gateway        *service.Gateway
 	admin          *admin.Service
 	recovery       *runtimeworker.RuntimeKnobs
-	requestTimeout interface{ ConfigureRequestTimeout(time.Duration) }
+	upstreamClient *upstream.Client
 	settings       *config.Config
+	tracer         *intercept.Tracer
 }
 
 func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
@@ -664,8 +720,42 @@ func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
 	if a.recovery != nil {
 		a.recovery.ConfigureQuotaRetry(quotaRetry)
 	}
-	if a.requestTimeout != nil && a.settings.RequestTimeoutSec > 0 {
-		a.requestTimeout.ConfigureRequestTimeout(a.settings.RequestTimeout())
+	if a.upstreamClient != nil && a.settings.RequestTimeoutSec > 0 {
+		a.upstreamClient.ConfigureRequestTimeout(a.settings.RequestTimeout())
+	}
+	if a.upstreamClient != nil {
+		proxyURL, proxyEnabled := resolveOutboundProxy(a.settings.Proxy, &doc.Proxy)
+		if err := a.upstreamClient.ConfigureProxy(proxyURL, proxyEnabled); err != nil {
+			slog.Warn("apply proxy failed", "error", err, "proxy", proxyURL)
+			doc.Proxy.RuntimeStatus = "invalid"
+		} else if proxyEnabled {
+			a.settings.Proxy = proxyURL
+			doc.Proxy.RuntimeStatus = "active"
+			slog.Info("outbound proxy updated", "enabled", true, "proxy", proxyURL)
+		} else {
+			// Keep bootstrap string in config for restart fallback; runtime is direct.
+			doc.Proxy.RuntimeStatus = "disabled"
+			slog.Info("outbound proxy updated", "enabled", false)
+		}
+	}
+	if a.tracer != nil {
+		traceDir := doc.DebugTrace.Dir
+		if strings.TrimSpace(traceDir) == "" {
+			traceDir = filepath.Join(a.settings.DataDir, "traces")
+		}
+		a.tracer.Configure(intercept.Options{
+			Enabled:    doc.DebugTrace.Enabled,
+			Dir:        traceDir,
+			ErrorsOnly: doc.DebugTrace.ErrorsOnly,
+		})
+		a.settings.DebugTrace = doc.DebugTrace.Enabled
+		a.settings.DebugTraceDir = doc.DebugTrace.Dir
+		a.settings.DebugTraceErrorsOnly = doc.DebugTrace.ErrorsOnly
+		if doc.DebugTrace.Enabled {
+			slog.Warn("debug_trace updated", "enabled", true, "errors_only", doc.DebugTrace.ErrorsOnly, "dir", traceDir)
+		} else {
+			slog.Info("debug_trace updated", "enabled", false)
+		}
 	}
 	slog.Info("applied managed settings", "revision", doc.Revision)
 	return nil

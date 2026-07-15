@@ -31,7 +31,7 @@ func Middleware(tracer *Tracer, next http.Handler) http.Handler {
 			ResponseWriter: writer,
 			status:         http.StatusOK,
 			body:           &bytes.Buffer{},
-			maxBody:        tracer.opts.MaxBody,
+			maxBody:        tracer.snapshotOpts().MaxBody,
 		}
 		start := time.Now()
 		next.ServeHTTP(recorder, request)

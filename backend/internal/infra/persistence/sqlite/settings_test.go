@@ -44,7 +44,7 @@ func TestSettingsOptimisticLock(t *testing.T) {
 	if current.Revision != 2 || current.Pool.MaxConcurrent != 8 {
 		t.Fatalf("current=%+v", current)
 	}
-	if current.Proxy.RuntimeStatus != "not_wired" {
+	if current.Proxy.RuntimeStatus != "disabled" {
 		t.Fatalf("proxy status=%q", current.Proxy.RuntimeStatus)
 	}
 }

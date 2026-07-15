@@ -21,6 +21,8 @@ type Document struct {
 	Proxy      Proxy      `json:"proxy"`
 	ClientKeys ClientKeys `json:"client_keys"`
 	DeviceAuth DeviceAuth `json:"device_auth"`
+	// DebugTrace toggles the temporary protocol interceptor (JSONL under data/traces).
+	DebugTrace DebugTrace `json:"debug_trace"`
 }
 
 type Pool struct {
@@ -43,11 +45,12 @@ type Audit struct {
 	RetentionDays int `json:"retention_days"`
 }
 
-// Proxy is stored/versioned but not applied to the runtime yet.
+// Proxy controls outbound HTTP(S) forward proxy for upstream + OIDC traffic.
+// RuntimeStatus is filled by the API from the live client when possible.
 type Proxy struct {
 	URL           string `json:"url"`
 	Enabled       bool   `json:"enabled"`
-	RuntimeStatus string `json:"runtime_status"` // always "not_wired" until implemented
+	RuntimeStatus string `json:"runtime_status"` // disabled | active | invalid
 	Note          string `json:"note,omitempty"`
 }
 
@@ -65,6 +68,14 @@ type DeviceAuth struct {
 type ClientKeys struct {
 	DefaultRPMLimit      int `json:"default_rpm_limit"`
 	DefaultMaxConcurrent int `json:"default_max_concurrent"`
+}
+
+// DebugTrace controls the temporary request interceptor for protocol debugging.
+// Bodies are truncated; prompts/secrets should still be treated carefully.
+type DebugTrace struct {
+	Enabled    bool   `json:"enabled"`
+	Dir        string `json:"dir"`
+	ErrorsOnly bool   `json:"errors_only"`
 }
 
 func Defaults() Document {
@@ -88,8 +99,8 @@ func Defaults() Document {
 		Audit: Audit{RetentionDays: 30},
 		Proxy: Proxy{
 			Enabled:       false,
-			RuntimeStatus: "not_wired",
-			Note:          "Proxy settings are stored for future use and do not affect runtime outbound traffic yet.",
+			RuntimeStatus: "disabled",
+			Note:          "HTTP(S) proxy for outbound Grok/OIDC traffic (e.g. http://privoxy:8118 via WARP).",
 		},
 		ClientKeys: ClientKeys{
 			DefaultRPMLimit:      120,
@@ -99,6 +110,11 @@ func Defaults() Document {
 			Issuer:   "https://auth.x.ai",
 			ClientID: "b1a00492-073a-47ea-816f-4c329264a828",
 			Scope:    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+		},
+		DebugTrace: DebugTrace{
+			Enabled:    false,
+			Dir:        "",
+			ErrorsOnly: true,
 		},
 	}
 }
@@ -165,10 +181,18 @@ func (d *Document) Normalize() error {
 		d.DeviceAuth.Scope = defaultsDA.Scope
 	}
 	d.Proxy.URL = strings.TrimSpace(d.Proxy.URL)
-	d.Proxy.RuntimeStatus = "not_wired"
-	if d.Proxy.Note == "" {
-		d.Proxy.Note = "Proxy settings are stored for future use and do not affect runtime outbound traffic yet."
+	// Desired config status; live overlay may refine via ProxyRuntime API.
+	if d.Proxy.Enabled && d.Proxy.URL != "" {
+		if d.Proxy.RuntimeStatus != "invalid" {
+			d.Proxy.RuntimeStatus = "active"
+		}
+	} else {
+		d.Proxy.RuntimeStatus = "disabled"
 	}
+	if d.Proxy.Note == "" {
+		d.Proxy.Note = "HTTP(S) proxy for outbound Grok/OIDC traffic (e.g. http://privoxy:8118 via WARP)."
+	}
+	d.DebugTrace.Dir = strings.TrimSpace(d.DebugTrace.Dir)
 	if d.UpdatedAt.IsZero() {
 		d.UpdatedAt = time.Now().UTC()
 	}
@@ -196,6 +220,9 @@ func Unmarshal(raw []byte) (Document, error) {
 	if !jsonHasDeviceAuth(raw) {
 		doc.DeviceAuth = Defaults().DeviceAuth
 	}
+	if !jsonHasDebugTrace(raw) {
+		doc.DebugTrace = Defaults().DebugTrace
+	}
 	if err := doc.Normalize(); err != nil {
 		return Document{}, err
 	}
@@ -220,4 +247,14 @@ func jsonHasDeviceAuth(raw []byte) bool {
 		return false
 	}
 	return len(probe.DeviceAuth) > 0 && string(probe.DeviceAuth) != "null"
+}
+
+func jsonHasDebugTrace(raw []byte) bool {
+	var probe struct {
+		DebugTrace json.RawMessage `json:"debug_trace"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return len(probe.DebugTrace) > 0 && string(probe.DebugTrace) != "null"
 }

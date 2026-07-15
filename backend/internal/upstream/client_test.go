@@ -504,3 +504,60 @@ func TestRefreshTransientStatusIsNotPermanent(t *testing.T) {
 		t.Fatalf("expected transient error, got %v", err)
 	}
 }
+
+
+func TestConfigureProxyRoutesHTTPClient(t *testing.T) {
+	var sawProxy atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawProxy.Store(true)
+		// CONNECT or absolute-form; for httptest http proxy absolute URI is used.
+		if r.Method == http.MethodConnect {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer proxy.Close()
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstreamSrv.Close()
+
+	client := upstream.NewClient(upstreamSrv.URL+"/v1", "0.2.93", &http.Client{})
+	if err := client.ConfigureProxy(proxy.URL, true); err != nil {
+		t.Fatalf("configure proxy: %v", err)
+	}
+	enabled, _ := client.ProxyRuntimeStatus()
+	if !enabled {
+		t.Fatal("expected proxy enabled")
+	}
+	item := account.Account{ID: "a1", AccessToken: "tok"}
+	resp, err := client.Request(context.Background(), item, http.MethodPost, "/chat/completions", []byte(`{"model":"m"}`), false)
+	if err != nil {
+		t.Fatalf("request via proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if !sawProxy.Load() {
+		t.Fatal("expected traffic through proxy")
+	}
+	if err := client.ConfigureProxy("", false); err != nil {
+		t.Fatalf("clear proxy: %v", err)
+	}
+	enabled, _ = client.ProxyRuntimeStatus()
+	if enabled {
+		t.Fatal("expected proxy disabled")
+	}
+}
+
+func TestConfigureProxyRejectsInvalidURL(t *testing.T) {
+	client := upstream.NewClient("http://example.invalid/v1", "0.2.93", &http.Client{})
+	if err := client.ConfigureProxy("socks5://127.0.0.1:1080", true); err == nil {
+		t.Fatal("expected socks5 reject")
+	}
+	if err := client.ConfigureProxy("://bad", true); err == nil {
+		t.Fatal("expected parse reject")
+	}
+}

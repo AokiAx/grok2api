@@ -52,6 +52,11 @@ export function SettingsPage() {
           client_id: "b1a00492-073a-47ea-816f-4c329264a828",
           scope: "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
         },
+        debug_trace: doc.debug_trace || {
+          enabled: false,
+          dir: "",
+          errors_only: true,
+        },
       });
       setDoc(next);
       setMessage("已保存");
@@ -249,9 +254,9 @@ export function SettingsPage() {
 
         <Card className="p-4 sm:p-5 lg:col-span-2">
           <CardHeader>
-            <CardTitle>代理（未接入运行时）</CardTitle>
+            <CardTitle>出站代理</CardTitle>
             <CardDescription>
-              {doc.proxy.note || "可保存与版本化，但不会影响当前出站流量。"}
+              {doc.proxy.note || "HTTP(S) 正向代理；启用后影响 Grok 上游与 OIDC 刷新（如 http://privoxy:8118）。"}
             </CardDescription>
           </CardHeader>
           <CardContent className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto_auto]">
@@ -268,7 +273,7 @@ export function SettingsPage() {
                 checked={doc.proxy.enabled}
                 onChange={(e) => setDoc({ ...doc, proxy: { ...doc.proxy, enabled: e.target.checked } })}
               />
-              标记启用
+              启用代理
             </label>
             <div className="pt-6 text-xs text-muted-foreground mono">{doc.proxy.runtime_status}</div>
           </CardContent>
@@ -374,6 +379,69 @@ export function SettingsPage() {
           </Field>
         </CardContent>
       </Card>
+
+      <Card className="p-4 sm:p-5">
+        <CardHeader>
+          <CardTitle>调试拦截器</CardTitle>
+          <CardDescription>
+            协议排查用临时开关。开启后会将 Chat/Responses/Messages 的请求阶段写入 JSONL（截断 body，仍可能含 prompt）。默认建议仅记录失败请求。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="mt-3 grid gap-3 sm:grid-cols-2">
+          <label className="flex items-center gap-2 text-xs pt-1 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={Boolean(doc.debug_trace?.enabled)}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  debug_trace: {
+                    enabled: e.target.checked,
+                    dir: doc.debug_trace?.dir ?? "",
+                    errors_only: doc.debug_trace?.errors_only ?? true,
+                  },
+                })
+              }
+            />
+            启用 debug_trace
+          </label>
+          <label className="flex items-center gap-2 text-xs pt-1 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={doc.debug_trace?.errors_only ?? true}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  debug_trace: {
+                    enabled: Boolean(doc.debug_trace?.enabled),
+                    dir: doc.debug_trace?.dir ?? "",
+                    errors_only: e.target.checked,
+                  },
+                })
+              }
+            />
+            仅记录失败请求（推荐）
+          </label>
+          <Field label="输出目录（空= data/traces）">
+            <Input
+              className="mono"
+              value={doc.debug_trace?.dir ?? ""}
+              placeholder="data/traces"
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  debug_trace: {
+                    enabled: Boolean(doc.debug_trace?.enabled),
+                    dir: e.target.value,
+                    errors_only: doc.debug_trace?.errors_only ?? true,
+                  },
+                })
+              }
+            />
+          </Field>
+        </CardContent>
+      </Card>
+
 
         </>
       ) : null}

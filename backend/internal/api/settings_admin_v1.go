@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/settings"
@@ -39,7 +40,7 @@ func (s *Server) adminV1GetSettings(writer http.ResponseWriter, request *http.Re
 		writeAdminError(writer, http.StatusInternalServerError, "settings_get_failed", err.Error())
 		return
 	}
-	writeAdminOK(writer, http.StatusOK, settingsToMap(doc))
+	writeAdminOK(writer, http.StatusOK, s.settingsResponse(doc))
 }
 
 func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Request) {
@@ -54,6 +55,7 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 		Proxy            settings.Proxy      `json:"proxy"`
 		ClientKeys       settings.ClientKeys `json:"client_keys"`
 		DeviceAuth       settings.DeviceAuth `json:"device_auth"`
+		DebugTrace       settings.DebugTrace `json:"debug_trace"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
 		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid settings payload")
@@ -75,6 +77,7 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 	next.Proxy = body.Proxy
 	next.ClientKeys = body.ClientKeys
 	next.DeviceAuth = body.DeviceAuth
+	next.DebugTrace = body.DebugTrace
 	updatedBy := "admin"
 	doc, err := s.settings.PutSettings(request.Context(), body.ExpectedRevision, next, updatedBy)
 	if errors.Is(err, repository.ErrSettingsConflict) {
@@ -91,7 +94,41 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 			return
 		}
 	}
-	writeAdminOK(writer, http.StatusOK, settingsToMap(doc))
+	writeAdminOK(writer, http.StatusOK, s.settingsResponse(doc))
+}
+
+func (s *Server) settingsResponse(doc settings.Document) map[string]any {
+	out := settingsToMap(doc)
+	overlayProxyRuntime(out, doc, s.proxyRuntime)
+	return out
+}
+
+func overlayProxyRuntime(out map[string]any, doc settings.Document, runtime ProxyRuntime) {
+	if out == nil {
+		return
+	}
+	proxy, _ := out["proxy"].(settings.Proxy)
+	// Prefer typed value from doc when map holds struct.
+	proxy = doc.Proxy
+	if runtime != nil {
+		enabled, url := runtime.ProxyRuntimeStatus()
+		if enabled {
+			proxy.RuntimeStatus = "active"
+			if url != "" {
+				// Do not overwrite operator URL; only status is live.
+				_ = url
+			}
+		} else if proxy.Enabled && strings.TrimSpace(proxy.URL) != "" {
+			proxy.RuntimeStatus = "invalid"
+		} else {
+			proxy.RuntimeStatus = "disabled"
+		}
+	} else if proxy.Enabled && strings.TrimSpace(proxy.URL) != "" {
+		proxy.RuntimeStatus = "active"
+	} else {
+		proxy.RuntimeStatus = "disabled"
+	}
+	out["proxy"] = proxy
 }
 
 func settingsToMap(doc settings.Document) map[string]any {
@@ -105,6 +142,7 @@ func settingsToMap(doc settings.Document) map[string]any {
 		"proxy":       doc.Proxy,
 		"client_keys": doc.ClientKeys,
 		"device_auth":  doc.DeviceAuth,
+		"debug_trace": doc.DebugTrace,
 	}
 }
 

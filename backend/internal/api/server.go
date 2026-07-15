@@ -58,6 +58,7 @@ type Server struct {
 	preferResponses  bool
 	bridge           *bridge.Pipeline
 	tracer           *intercept.Tracer
+	proxyRuntime     ProxyRuntime
 	admin            AdminService
 	adminKey         string
 	adminAuth        *authservice.Service
@@ -95,6 +96,18 @@ func WithModelCatalog(catalog *upstream.Catalog) Option {
 func WithPreferResponses(enabled bool) Option {
 	return func(server *Server) {
 		server.preferResponses = enabled
+	}
+}
+
+
+// ProxyRuntime reports live outbound proxy configuration.
+type ProxyRuntime interface {
+	ProxyRuntimeStatus() (enabled bool, proxyURL string)
+}
+
+func WithProxyRuntime(runtime ProxyRuntime) Option {
+	return func(server *Server) {
+		server.proxyRuntime = runtime
 	}
 }
 
@@ -271,8 +284,7 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	server.registerSettingsRoutes(mux)
 	server.registerDeviceAuthRoutes(mux)
 	var handler http.Handler = mux
-	if server.tracer != nil && server.tracer.Enabled() {
-		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.
+	if server.tracer != nil {
 		handler = intercept.Middleware(server.tracer, mux)
 	}
 	// Outermost: request id, security headers, body limit, access log.
