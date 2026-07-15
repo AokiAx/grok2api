@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,5 +125,56 @@ func TestSQLiteBootstrapAdminRollsBackUserAndMarkerOnInsertFailure(t *testing.T)
 	var marker string
 	if err := raw.QueryRow(`SELECT value FROM app_meta WHERE key='admin_bootstrap_v1'`).Scan(&marker); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("marker=%q err=%v, want no marker", marker, err)
+	}
+}
+
+func TestSQLiteBootstrapAdminConcurrentCallsCreateOneAdministrator(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "admin-concurrent.db")
+	repo, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	users := []adminauth.AdminUser{
+		newBootstrapAdmin(t, "admin-1", "admin"),
+		newBootstrapAdmin(t, "admin-2", "replacement"),
+	}
+	statuses := make([]repository.BootstrapStatus, len(users))
+	errorsByCall := make([]error, len(users))
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for index := range users {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			statuses[index], errorsByCall[index] = repo.BootstrapAdmin(ctx, users[index])
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+
+	created := 0
+	closed := 0
+	for index, status := range statuses {
+		if errorsByCall[index] != nil {
+			t.Fatalf("call %d status=%q err=%v", index, status, errorsByCall[index])
+		}
+		switch status {
+		case repository.BootstrapCreated:
+			created++
+		case repository.BootstrapAlreadyCompleted, repository.BootstrapExisting:
+			closed++
+		default:
+			t.Fatalf("call %d returned unsupported status %q", index, status)
+		}
+	}
+	if created != 1 || closed != 1 {
+		t.Fatalf("statuses=%v", statuses)
+	}
+	if count, err := repo.CountAdminUsers(ctx); err != nil || count != 1 {
+		t.Fatalf("admin count=%d err=%v", count, err)
 	}
 }

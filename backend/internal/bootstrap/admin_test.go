@@ -73,7 +73,7 @@ func TestAdminBootstrapServiceCreatesHashedAdministrator(t *testing.T) {
 }
 
 func TestAdminBootstrapServiceRejectsWeakPasswordsWithoutWriting(t *testing.T) {
-	for _, password := range []string{"", "            ", "short", strings.Repeat("x", 1025)} {
+	for _, password := range []string{"", "            ", "short", strings.Repeat("界", 11), strings.Repeat("x", 1025)} {
 		t.Run(password, func(t *testing.T) {
 			repo := &fakeAdminBootstrapRepository{}
 			service := bootstrap.NewAdminBootstrapService(repo, fixedBootstrapClock, bcrypt.MinCost)
@@ -84,6 +84,19 @@ func TestAdminBootstrapServiceRejectsWeakPasswordsWithoutWriting(t *testing.T) {
 				t.Fatalf("weak password wrote user=%+v", repo.createdUser)
 			}
 		})
+	}
+}
+
+func TestAdminBootstrapServiceAcceptsUnicodeRuneAndByteBoundaries(t *testing.T) {
+	for _, password := range []string{strings.Repeat("界", 12), strings.Repeat("x", 1024)} {
+		repo := &fakeAdminBootstrapRepository{}
+		service := bootstrap.NewAdminBootstrapService(repo, fixedBootstrapClock, bcrypt.MinCost)
+		if _, err := service.Bootstrap(context.Background(), password); err != nil {
+			t.Fatalf("password runes=%d bytes=%d err=%v", len([]rune(password)), len([]byte(password)), err)
+		}
+		if !security.VerifyAdminPassword(repo.createdUser.Password, password) {
+			t.Fatal("boundary password does not verify")
+		}
 	}
 }
 
@@ -127,6 +140,9 @@ func TestReadPasswordStdinRejectsUnsafeInput(t *testing.T) {
 	for _, input := range []string{
 		"long-enough-password\nsecond-line\n",
 		"long-enough-password\x00\n",
+		"long-enough-password\r",
+		"long\r-enough-password\n",
+		string([]byte{0xff, 0xfe}),
 		strings.Repeat("x", 1025),
 	} {
 		if _, err := bootstrap.ReadPasswordStdin(strings.NewReader(input)); !errors.Is(err, bootstrap.ErrInvalidPasswordInput) {
