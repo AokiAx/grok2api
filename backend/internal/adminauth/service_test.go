@@ -11,15 +11,22 @@ import (
 )
 
 type fakeRepo struct {
-	users    map[string]adminauth.AdminUser
-	sessions map[string]adminauth.Session
-	attempts []adminauth.LoginAttempt
-	rotateOK bool
+	users                map[string]adminauth.AdminUser
+	sessions             map[string]adminauth.Session
+	attempts             []adminauth.LoginAttempt
+	rotateOK             bool
+	createWithSuccessErr error
+	recordAttemptErr     error
+	getUserByIDErr       error
+	rotateCalls          int
 }
 
 func (f *fakeRepo) CountAdminUsers(context.Context) (int, error)               { return len(f.users), nil }
 func (f *fakeRepo) CreateAdminUser(context.Context, adminauth.AdminUser) error { return nil }
 func (f *fakeRepo) GetAdminUserByID(_ context.Context, id string) (adminauth.AdminUser, bool, error) {
+	if f.getUserByIDErr != nil {
+		return adminauth.AdminUser{}, false, f.getUserByIDErr
+	}
 	u, ok := f.users[id]
 	return u, ok, nil
 }
@@ -35,6 +42,14 @@ func (f *fakeRepo) CreateAdminSession(_ context.Context, s adminauth.Session) er
 	f.sessions[s.ID] = s
 	return nil
 }
+func (f *fakeRepo) CreateAdminSessionWithLoginSuccess(_ context.Context, s adminauth.Session, a adminauth.LoginAttempt) error {
+	if f.createWithSuccessErr != nil {
+		return f.createWithSuccessErr
+	}
+	f.sessions[s.ID] = s
+	f.attempts = append(f.attempts, a)
+	return nil
+}
 func (f *fakeRepo) GetAdminSession(_ context.Context, id string) (adminauth.Session, bool, error) {
 	s, ok := f.sessions[id]
 	return s, ok, nil
@@ -48,6 +63,7 @@ func (f *fakeRepo) FindAdminSessionByAccessHash(_ context.Context, h [32]byte) (
 	return adminauth.Session{}, false, nil
 }
 func (f *fakeRepo) RotateAdminSession(_ context.Context, id string, h [32]byte, r adminauth.Session, at time.Time) (bool, error) {
+	f.rotateCalls++
 	if !f.rotateOK {
 		return false, nil
 	}
@@ -67,11 +83,94 @@ func (f *fakeRepo) RevokeAdminSessionFamily(context.Context, string, time.Time, 
 	return nil
 }
 func (f *fakeRepo) RecordAdminLoginAttempt(_ context.Context, a adminauth.LoginAttempt) error {
+	if f.recordAttemptErr != nil {
+		return f.recordAttemptErr
+	}
 	f.attempts = append(f.attempts, a)
 	return nil
 }
 func (f *fakeRepo) CountRecentAdminLoginFailures(_ context.Context, _ string, _ string, _ time.Time) (int, error) {
 	return len(f.attempts), nil
+}
+
+func TestLoginPersistsSessionAndSuccessAtomically(t *testing.T) {
+	cred, _ := security.HashAdminPassword("secret", 4)
+	now := time.Unix(3000, 0).UTC()
+	repo := &fakeRepo{
+		users: map[string]adminauth.AdminUser{}, sessions: map[string]adminauth.Session{},
+		createWithSuccessErr: errors.New("commit failed"),
+	}
+	u, _ := adminauth.NewAdminUser("u1", "admin", cred, now)
+	repo.users[u.ID] = u
+	svc := NewService(repo, WithClock(func() time.Time { return now }), WithRandom(func([]byte) error { return nil }))
+	if _, err := svc.Login(context.Background(), LoginInput{Username: "admin", Password: "secret", SourceIP: "127.0.0.1"}); err == nil || err.Error() != "commit failed" {
+		t.Fatalf("login err=%v", err)
+	}
+	if len(repo.sessions) != 0 || len(repo.attempts) != 0 {
+		t.Fatalf("partial success persisted sessions=%d attempts=%d", len(repo.sessions), len(repo.attempts))
+	}
+}
+
+func TestLoginReturnsAttemptPersistenceFailure(t *testing.T) {
+	cred, _ := security.HashAdminPassword("secret", 4)
+	now := time.Unix(3000, 0).UTC()
+	repo := &fakeRepo{users: map[string]adminauth.AdminUser{}, sessions: map[string]adminauth.Session{}, recordAttemptErr: errors.New("attempt write failed")}
+	u, _ := adminauth.NewAdminUser("u1", "admin", cred, now)
+	repo.users[u.ID] = u
+	svc := NewService(repo, WithClock(func() time.Time { return now }))
+	if _, err := svc.Login(context.Background(), LoginInput{Username: "admin", Password: "bad", SourceIP: "127.0.0.1"}); err == nil || err.Error() != "attempt write failed" {
+		t.Fatalf("login err=%v", err)
+	}
+}
+
+func TestRefreshChecksAdminBeforeRotation(t *testing.T) {
+	cred, _ := security.HashAdminPassword("secret", 4)
+	now := time.Unix(4000, 0).UTC()
+	for _, tc := range []struct {
+		name      string
+		disabled  bool
+		lookupErr error
+	}{
+		{name: "disabled", disabled: true},
+		{name: "lookup error", lookupErr: errors.New("lookup failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepo{users: map[string]adminauth.AdminUser{}, sessions: map[string]adminauth.Session{}, rotateOK: true, getUserByIDErr: tc.lookupErr}
+			u, _ := adminauth.NewAdminUser("u1", "admin", cred, now)
+			if tc.disabled {
+				u.Enabled = false
+			}
+			repo.users[u.ID] = u
+			svc := NewService(repo, WithClock(func() time.Time { return now }))
+			if tc.lookupErr != nil {
+				repo.getUserByIDErr = nil
+			}
+			login, err := svc.Login(context.Background(), LoginInput{Username: "admin", Password: "secret", SourceIP: "127.0.0.1"})
+			if tc.disabled {
+				u.Enabled = true
+				repo.users[u.ID] = u
+				login, err = svc.Login(context.Background(), LoginInput{Username: "admin", Password: "secret", SourceIP: "127.0.0.1"})
+			}
+			if err != nil {
+				t.Fatalf("seed login: %v", err)
+			}
+			if tc.disabled {
+				u.Enabled = false
+				repo.users[u.ID] = u
+			}
+			repo.getUserByIDErr = tc.lookupErr
+			_, err = svc.Refresh(context.Background(), login.RefreshCookieValue, "127.0.0.1", "ua")
+			if tc.lookupErr != nil && (err == nil || err.Error() != tc.lookupErr.Error()) {
+				t.Fatalf("refresh err=%v", err)
+			}
+			if tc.disabled && !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("refresh err=%v", err)
+			}
+			if repo.rotateCalls != 0 {
+				t.Fatalf("rotate calls=%d", repo.rotateCalls)
+			}
+		})
+	}
 }
 func (f *fakeRepo) OldestRecentAdminLoginFailure(_ context.Context, _ string, _ string, _ time.Time) (time.Time, bool, error) {
 	if len(f.attempts) == 0 {
