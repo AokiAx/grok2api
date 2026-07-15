@@ -127,6 +127,10 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 		return LoginOutput{}, err
 	}
 	if err := s.recordAttempt(ctx, username, ip, true, "", now); err != nil {
+		revokeErr := s.repo.RevokeAdminSession(ctx, session.ID, now, domain.RevocationLogout)
+		if revokeErr != nil {
+			return LoginOutput{}, errors.Join(err, revokeErr)
+		}
 		return LoginOutput{}, err
 	}
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt, Remember: session.Remember}, nil
@@ -232,4 +236,18 @@ func (s *Service) Logout(ctx context.Context, cookie string) error {
 		return nil
 	}
 	return s.repo.RevokeAdminSession(ctx, p[0], s.clock().UTC(), domain.RevocationLogout)
+}
+
+func (s *Service) LogoutAccess(ctx context.Context, token string) error {
+	if strings.TrimSpace(token) == "" {
+		return nil
+	}
+	sess, ok, err := s.repo.FindAdminSessionByAccessHash(ctx, sha256.Sum256([]byte(token)))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	return s.repo.RevokeAdminSession(ctx, sess.ID, s.clock().UTC(), domain.RevocationLogout)
 }
