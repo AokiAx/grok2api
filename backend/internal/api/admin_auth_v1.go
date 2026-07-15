@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -40,8 +41,16 @@ type authRequest struct {
 }
 
 func (h *adminAuthHandler) login(w http.ResponseWriter, r *http.Request) {
+	if h.service == nil {
+		h.error(w, http.StatusInternalServerError, "internal_error", "")
+		return
+	}
 	var in authRequest
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		h.error(w, http.StatusBadRequest, "invalid_request", "")
+		return
+	}
+	if strings.TrimSpace(in.Username) == "" || in.Password == "" {
 		h.error(w, http.StatusBadRequest, "invalid_request", "")
 		return
 	}
@@ -54,6 +63,10 @@ func (h *adminAuthHandler) login(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, authDTO(out))
 }
 func (h *adminAuthHandler) refresh(w http.ResponseWriter, r *http.Request) {
+	if h.service == nil {
+		h.error(w, http.StatusInternalServerError, "internal_error", "")
+		return
+	}
 	c, err := r.Cookie("grok2api_admin_refresh")
 	if err != nil {
 		h.error(w, http.StatusUnauthorized, "unauthorized", "")
@@ -68,16 +81,29 @@ func (h *adminAuthHandler) refresh(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, authDTO(out))
 }
 func (h *adminAuthHandler) logout(w http.ResponseWriter, r *http.Request) {
+	h.deleteCookie(w)
+	if h.service == nil {
+		h.error(w, http.StatusInternalServerError, "internal_error", "")
+		return
+	}
+	var logoutErr error
 	if p := strings.Fields(r.Header.Get("Authorization")); len(p) == 2 && strings.EqualFold(p[0], "Bearer") {
-		_ = h.service.LogoutAccess(r.Context(), p[1])
+		logoutErr = errors.Join(logoutErr, h.service.LogoutAccess(r.Context(), p[1]))
 	}
 	if c, e := r.Cookie("grok2api_admin_refresh"); e == nil {
-		_ = h.service.Logout(r.Context(), c.Value)
+		logoutErr = errors.Join(logoutErr, h.service.Logout(r.Context(), c.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: "grok2api_admin_refresh", Value: "", Path: "/api/admin/v1/auth", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.opts.SecureCookies})
+	if logoutErr != nil {
+		h.writeErr(w, logoutErr)
+		return
+	}
 	h.ok(w, map[string]bool{"logged_out": true})
 }
 func (h *adminAuthHandler) me(w http.ResponseWriter, r *http.Request) {
+	if h.service == nil {
+		h.error(w, http.StatusInternalServerError, "internal_error", "")
+		return
+	}
 	parts := strings.Fields(r.Header.Get("Authorization"))
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		h.error(w, http.StatusUnauthorized, "unauthorized", "")
@@ -89,6 +115,9 @@ func (h *adminAuthHandler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.ok(w, map[string]any{"id": u.ID, "username": u.Username, "role": u.Role})
+}
+func (h *adminAuthHandler) deleteCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: "grok2api_admin_refresh", Value: "", Path: "/api/admin/v1/auth", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: h.opts.SecureCookies})
 }
 func (h *adminAuthHandler) setCookie(w http.ResponseWriter, v string, remember bool, exp time.Time) {
 	max := 0
@@ -113,6 +142,7 @@ func authDTO(out auth.LoginOutput) map[string]any {
 }
 func (h *adminAuthHandler) error(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
 	if status == http.StatusUnauthorized {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 	}
@@ -146,9 +176,9 @@ func (h *adminAuthHandler) writeErr(w http.ResponseWriter, err error) {
 	}
 }
 func requestIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i > 0 {
-		return strings.Trim(host[:i], "[]")
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
 	}
-	return host
+	return strings.Trim(r.RemoteAddr, "[]")
 }

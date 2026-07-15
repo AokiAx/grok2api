@@ -254,7 +254,10 @@ func (s *Service) Logout(ctx context.Context, cookie string) error {
 		return nil
 	}
 	old, ok, err := s.repo.GetAdminSession(ctx, p[0])
-	if err != nil || !ok || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(p[1]))) {
+	if err != nil {
+		return err
+	}
+	if !ok || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(p[1]))) {
 		return nil
 	}
 	return s.repo.RevokeAdminSession(ctx, p[0], s.clock().UTC(), domain.RevocationLogout)

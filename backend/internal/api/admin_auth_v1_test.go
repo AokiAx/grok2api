@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -130,5 +131,81 @@ func TestRequestIPSupportsIPv6WithAndWithoutPort(t *testing.T) {
 		if got := requestIP(r); got != want {
 			t.Fatalf("requestIP(%q)=%q want=%q", remote, got, want)
 		}
+	}
+}
+
+func TestAdminAuthLogoutAttemptsBothCredentialsAndReportsStorageFailure(t *testing.T) {
+	ctx := context.Background()
+	database := t.TempDir() + "/logout-errors.db"
+	repo, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	cred, _ := security.HashAdminPassword("secret", 4)
+	u, _ := domain.NewAdminUser("u1", "admin", cred, now)
+	if err := repo.CreateAdminUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewAdminAuthHandler(service.NewService(repo, service.WithClock(func() time.Time { return now })), AdminAuthHandlerOptions{SecureCookies: true})
+	login := func() (string, *http.Cookie) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/login", strings.NewReader(`{"username":"admin","password":"secret"}`))
+		req.RemoteAddr = "127.0.0.1:1"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Data struct {
+				Tokens struct {
+					Access string `json:"accessToken"`
+				} `json:"tokens"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Data.Tokens.Access, rec.Result().Cookies()[0]
+	}
+	failedAccess, failedCookie := login()
+	_, successfulCookie := login()
+	failedSessionID := strings.SplitN(failedCookie.Value, ".", 2)[0]
+	raw, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(ctx, `CREATE TRIGGER fail_selected_logout BEFORE UPDATE OF revoked_at ON admin_sessions
+		WHEN OLD.id='`+failedSessionID+`' BEGIN SELECT RAISE(ABORT, 'forced logout failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	logout := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/logout", nil)
+	logout.Header.Set("Authorization", "Bearer "+failedAccess)
+	logout.AddCookie(successfulCookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, logout)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"code":"internal_error"`) {
+		t.Fatalf("logout status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if cookie := rec.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Max-Age=0") || !strings.Contains(cookie, "Secure") {
+		t.Fatalf("delete cookie=%q", cookie)
+	}
+	me := httptest.NewRequest(http.MethodGet, "/api/admin/v1/auth/me", nil)
+	me.Header.Set("Authorization", "Bearer "+failedAccess)
+	meRec := httptest.NewRecorder()
+	handler.ServeHTTP(meRec, me)
+	if meRec.Code != http.StatusOK {
+		t.Fatalf("failed storage session should remain valid: %d %s", meRec.Code, meRec.Body.String())
+	}
+	refresh := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/refresh", nil)
+	refresh.RemoteAddr = "127.0.0.1:1"
+	refresh.AddCookie(successfulCookie)
+	refreshRec := httptest.NewRecorder()
+	handler.ServeHTTP(refreshRec, refresh)
+	if refreshRec.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh credential logout was not attempted: %d %s", refreshRec.Code, refreshRec.Body.String())
 	}
 }
