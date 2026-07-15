@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatAdaptiveNumber, formatAdaptiveRatio } from "@/lib/formatNumber";
+import { statusCodeLabel } from "@/lib/statusLabels";
 
 function n(v?: number) {
   if (v == null || Number.isNaN(v)) return "—";
@@ -122,13 +123,13 @@ export function DashboardPage() {
         <Stat
           label="可用账号"
           value={n(ready)}
-          hint={total != null ? `账号总数 ${n(total)}` : "当前 ready 池"}
+          hint={total != null ? `账号总数 ${n(total)}` : "当前可用池"}
           icon={<Users className="h-4 w-4" />}
         />
         <Stat
           label="不可用账号"
           value={n(unavailable)}
-          hint="当前 unavailable 池"
+          hint="当前不可用池"
           icon={<CircleAlert className="h-4 w-4" />}
         />
         <Stat
@@ -261,7 +262,7 @@ export function DashboardPage() {
           <CardContent className="space-y-3">
             <div className="flex items-center justify-between gap-3 rounded-lg bg-background px-3 py-2.5">
               <span className="text-xs text-muted-foreground">状态</span>
-              <Badge tone={circuit?.open ? "danger" : "success"}>{circuit?.open ? "OPEN" : "CLOSED"}</Badge>
+              <Badge tone={circuit?.open ? "danger" : "success"}>{circuit?.open ? "熔断中" : "正常"}</Badge>
             </div>
             {circuit?.retry_at ? (
               <div className="flex items-start justify-between gap-3 px-3 text-xs">
@@ -281,14 +282,17 @@ function ReasonMap({ map, empty = "无" }: { map: Record<string, number>; empty?
   if (!entries.length) return <p className="py-5 text-center text-xs text-muted-foreground">{empty}</p>;
   return (
     <ul className="divide-y divide-border/70">
-      {entries.map(([k, v]) => (
-        <li key={k} className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
-          <span className="mono min-w-0 truncate text-xs text-muted-foreground" title={k || "(empty)"}>
-            {k || "(empty)"}
-          </span>
-          <strong className="shrink-0 text-xs font-medium tabular-nums">{n(v)}</strong>
-        </li>
-      ))}
+      {entries.map(([k, v]) => {
+        const label = statusCodeLabel(k);
+        return (
+          <li key={k} className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
+            <span className="min-w-0 truncate text-xs text-muted-foreground" title={k || "(empty)"}>
+              {label === "—" ? "(空)" : label}
+            </span>
+            <strong className="shrink-0 text-xs font-medium tabular-nums">{n(v)}</strong>
+          </li>
+        );
+      })}
     </ul>
   );
 }

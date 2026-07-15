@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
 import { formatAdaptiveRatio } from "@/lib/formatNumber";
+import { poolLabel, unavailableReasonLabel } from "@/lib/statusLabels";
 import { ImportPage, type ImportWorkspaceMode } from "@/pages/ImportPage";
 
 function formatDate(value?: string) {
@@ -388,7 +389,7 @@ export function AccountsPage() {
                     setPage(1);
                   }}
                 >
-                  {value === "all" ? "全部" : value}
+                  {poolLabel(value)}
                 </button>
               ))}
             </div>
@@ -511,12 +512,12 @@ export function AccountsPage() {
                       </div>
                     </td>
                     <td className="px-3 py-2.5 align-middle">
-                      <Badge tone={item.pool === "ready" ? "success" : "warning"}>{item.pool}</Badge>
+                      <Badge tone={item.pool === "ready" ? "success" : "warning"}>{poolLabel(item.pool)}</Badge>
                     </td>
                     <td className="px-3 py-2.5 align-middle">
                       {item.unavailable_reason ? (
                         <Badge tone={item.unavailable_reason === "auth" ? "danger" : "warning"}>
-                          {item.unavailable_reason}
+                          {unavailableReasonLabel(item.unavailable_reason)}
                         </Badge>
                       ) : (
                         <span className="text-muted-foreground">—</span>
@@ -619,10 +620,10 @@ export function AccountsPage() {
             {selected ? (
               <>
                 <div className="mb-4 flex items-center gap-2">
-                  <Badge tone={selected.pool === "ready" ? "success" : "warning"}>{selected.pool}</Badge>
+                  <Badge tone={selected.pool === "ready" ? "success" : "warning"}>{poolLabel(selected.pool)}</Badge>
                   {selected.unavailable_reason ? (
                     <Badge tone={selected.unavailable_reason === "auth" ? "danger" : "warning"}>
-                      {selected.unavailable_reason}
+                      {unavailableReasonLabel(selected.unavailable_reason)}
                     </Badge>
                   ) : null}
                 </div>
