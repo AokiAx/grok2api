@@ -25,8 +25,8 @@ func TestPythonV1FixtureMigratesAllSupportedFieldsAndStates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = repo.Close() })
 
-	if got := repo.SchemaVersion(ctx); got != 7 {
-		t.Fatalf("schema version = %d; want 7", got)
+	if got := repo.SchemaVersion(ctx); got != 8 {
+		t.Fatalf("schema version = %d; want 8", got)
 	}
 	accounts, err := repo.ListAccounts(ctx)
 	if err != nil {
@@ -184,8 +184,8 @@ func TestOpenV4DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.
 		if err != nil {
 			t.Fatalf("reopen attempt %d: %v", attempt, err)
 		}
-		if got := repo.SchemaVersion(ctx); got != 7 {
-			t.Fatalf("attempt %d schema version = %d; want 7", attempt, got)
+		if got := repo.SchemaVersion(ctx); got != 8 {
+			t.Fatalf("attempt %d schema version = %d; want 8", attempt, got)
 		}
 		accounts, err := repo.ListAccounts(ctx)
 		if err != nil {
@@ -364,8 +364,8 @@ func TestV3SchemaUpgradesToV4WithoutLosingAccountsOrEvents(t *testing.T) {
 		t.Fatalf("upgrade v3: %v", err)
 	}
 	defer repo.Close()
-	if got := repo.SchemaVersion(ctx); got != 7 {
-		t.Fatalf("schema version=%d; want 7", got)
+	if got := repo.SchemaVersion(ctx); got != 8 {
+		t.Fatalf("schema version=%d; want 8", got)
 	}
 	item, found, err := repo.GetAccount(ctx, "legacy-v3")
 	if err != nil || !found || item.Priority != 0 || item.MaxActive != 2 {

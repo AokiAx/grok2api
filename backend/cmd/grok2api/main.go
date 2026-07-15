@@ -24,6 +24,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/config"
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
+	"github.com/AokiAx/grok2api/backend/internal/domain/settings"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
@@ -44,6 +45,7 @@ type runtimeRepository interface {
 	repository.LegacySecurityBootstrapRepository
 	repository.AuditRepository
 	repository.ModelRegistryRepository
+	repository.SettingsRepository
 }
 
 type serveCommand func(context.Context, config.Config, runtimeRepository) error
@@ -246,6 +248,10 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		return err
 	}
 	pool := scheduler.New(accounts)
+	if managed, err := repo.GetSettings(ctx); err == nil {
+		settings = applyManagedSettings(settings, managed)
+		slog.Info("loaded managed settings", "revision", managed.Revision)
+	}
 	maxConcurrent := settings.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
@@ -322,8 +328,10 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 	// imports credentials via the admin import API / panel.
 	readiness := &api.AtomicReadiness{}
 	readiness.Set(false, "starting")
+	settingsPtr := &settings
+	applier := &runtimeSettingsApplier{pool: pool, gateway: gateway, settings: settingsPtr}
 	handler := newAPIHandler(
-		settings,
+		*settingsPtr,
 		repo,
 		apiGateway,
 		poolStatusProvider{scheduler: pool},
@@ -332,6 +340,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		tracer,
 		readiness,
 		repo,
+		applier,
 	)
 	// Accept traffic once accounts are loaded into the scheduler. Recovery
 	// continues in the background and may still move accounts between pools.
@@ -351,7 +360,11 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
 		prune := func() {
-			cut := time.Now().UTC().Add(-30 * 24 * time.Hour)
+			days := 30
+			if managed, err := repo.GetSettings(context.Background()); err == nil && managed.Audit.RetentionDays > 0 {
+				days = managed.Audit.RetentionDays
+			}
+			cut := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
 			n, err := repo.PruneRequestAudits(context.Background(), cut)
 			if err != nil {
 				slog.Warn("prune request audits failed", "error", err)
@@ -422,6 +435,7 @@ func newAPIHandler(
 	tracer *intercept.Tracer,
 	readiness api.Readiness,
 	audits api.AuditReader,
+	settingsApplier api.SettingsApplier,
 ) http.Handler {
 	adminAuthService := adminauth.NewService(repo)
 	clientAccess := service.NewClientAccess(repo)
@@ -435,6 +449,8 @@ func newAPIHandler(
 		api.WithReadiness(readiness),
 		api.WithAuditReader(audits),
 		api.WithModelAdmin(repo),
+		api.WithSettingsAdmin(repo),
+		api.WithSettingsApplier(settingsApplier),
 	}
 	if frontendFS != nil {
 		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
@@ -575,5 +591,39 @@ func runExport(
 		"output":       outPath,
 	}
 	_ = json.NewEncoder(output).Encode(summary)
+	return nil
+}
+
+func applyManagedSettings(base config.Config, managed settings.Document) config.Config {
+	base.MaxConcurrent = managed.Pool.MaxConcurrent
+	base.MaxAttempts = managed.Pool.MaxAttempts
+	base.Strategy = managed.Pool.Strategy
+	base.ActiveSize = managed.Pool.ActiveSize
+	base.StickyPool = managed.Pool.Sticky
+	base.StickyTTLMinutes = managed.Pool.StickyTTLMinutes
+	base.QuotaRetryMinutes = managed.Pool.QuotaRetryMinutes
+	base.RateRetrySeconds = managed.Pool.RateRetrySeconds
+	base.RequestTimeoutSec = managed.Timeouts.RequestTimeoutSec
+	base.AcquireTimeoutSec = managed.Timeouts.AcquireTimeoutSec
+	return base
+}
+
+type runtimeSettingsApplier struct {
+	pool     *scheduler.Scheduler
+	gateway  *service.Gateway
+	settings *config.Config
+}
+
+func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
+	if a == nil || a.pool == nil || a.settings == nil {
+		return nil
+	}
+	*a.settings = applyManagedSettings(*a.settings, doc)
+	a.pool.ApplyMaxActive(a.settings.MaxConcurrent)
+	a.pool.WithStrategy(scheduler.ParseStrategy(a.settings.Strategy))
+	a.pool.ApplyActiveSize(a.settings.ActiveSize)
+	stickyTTL := time.Duration(a.settings.StickyTTLMinutes) * time.Minute
+	a.pool.WithSticky(a.settings.StickyPool, stickyTTL)
+	slog.Info("applied managed settings", "revision", doc.Revision)
 	return nil
 }

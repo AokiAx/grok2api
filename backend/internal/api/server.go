@@ -67,6 +67,8 @@ type Server struct {
 	readiness        Readiness
 	audits           AuditReader
 	modelAdmin       ModelAdmin
+	settings         SettingsAdmin
+	settingsApplier  SettingsApplier
 	onModelsChanged  func([]modelreg.Model)
 	maxBodyBytes     int64
 	handler          http.Handler
@@ -175,6 +177,20 @@ type AuditReader interface {
 	AuditRecentFailures(context.Context, time.Time, time.Time, int) ([]audit.RecentFailure, error)
 }
 
+// WithSettingsAdmin installs the versioned settings center.
+func WithSettingsAdmin(admin SettingsAdmin) Option {
+	return func(server *Server) {
+		server.settings = admin
+	}
+}
+
+// WithSettingsApplier installs a runtime applier for accepted settings.
+func WithSettingsApplier(applier SettingsApplier) Option {
+	return func(server *Server) {
+		server.settingsApplier = applier
+	}
+}
+
 // WithModelAdmin installs the managed model registry for admin APIs and catalog refresh.
 func WithModelAdmin(admin ModelAdmin) Option {
 	return func(server *Server) {
@@ -242,6 +258,7 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	}
 	server.registerAdminRoutes(mux)
 	server.registerModelAdminRoutes(mux)
+	server.registerSettingsRoutes(mux)
 	var handler http.Handler = mux
 	if server.tracer != nil && server.tracer.Enabled() {
 		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.
