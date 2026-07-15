@@ -449,6 +449,128 @@ func TestSQLitePruneAdminAuthHistoryIsAtomicAndConcurrentSafe(t *testing.T) {
 	})
 }
 
+func TestSQLiteAdminAuthWritesAutomaticallyEnforceThirtyDayRetention(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "auth-auto-retention.db")
+	repo := openSecurityRepo(t, ctx, database)
+	defer repo.Close()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	user := createStoredAdmin(t, ctx, repo, "retention-admin", "retention", start)
+	for day := 0; day < 40; day++ {
+		at := start.Add(time.Duration(day) * 24 * time.Hour)
+		attempt := mustLoginAttempt(t, fmt.Sprintf("failed-%02d", day), "10.0.0.1", false, "invalid_credentials", at)
+		if err := repo.RecordAdminLoginAttempt(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+		session := newStoredSession(t, fmt.Sprintf("session-%02d", day), fmt.Sprintf("family-%02d", day), user.ID, fmt.Sprintf("secret-%02d", day), at)
+		success := mustLoginAttempt(t, "retention", "10.0.0.2", true, "", at)
+		if err := repo.CreateAdminSessionWithLoginSuccess(ctx, session, success); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := openRawSQLite(t, database)
+	defer raw.Close()
+	var attempts, sessions int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts`).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 62 || sessions != 31 {
+		t.Fatalf("retained attempts=%d sessions=%d; want attempts=62 sessions=31", attempts, sessions)
+	}
+}
+
+func TestSQLiteAutomaticRetentionCleanupRollsBackCurrentWrites(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 15, 6, 0, 0, 0, time.UTC)
+	t.Run("failed attempt write", func(t *testing.T) {
+		database := filepath.Join(t.TempDir(), "attempt-retention-rollback.db")
+		repo := openSecurityRepo(t, ctx, database)
+		defer repo.Close()
+		if err := repo.RecordAdminLoginAttempt(ctx, mustLoginAttempt(t, "old", "10.0.0.1", false, "invalid_credentials", now.Add(-31*24*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+		raw := openRawSQLite(t, database)
+		defer raw.Close()
+		if _, err := raw.ExecContext(ctx, `CREATE TRIGGER fail_attempt_retention BEFORE DELETE ON admin_login_attempts BEGIN SELECT RAISE(ABORT, 'forced retention failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RecordAdminLoginAttempt(ctx, mustLoginAttempt(t, "new", "10.0.0.1", false, "invalid_credentials", now)); err == nil {
+			t.Fatal("attempt write should roll back")
+		}
+		var count int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("attempt count=%d; current write was not rolled back", count)
+		}
+	})
+
+	t.Run("successful login write", func(t *testing.T) {
+		database := filepath.Join(t.TempDir(), "login-retention-rollback.db")
+		repo := openSecurityRepo(t, ctx, database)
+		defer repo.Close()
+		user := createStoredAdmin(t, ctx, repo, "login-admin", "login", now.Add(-40*24*time.Hour))
+		stale := newStoredSession(t, "stale", "stale-family", user.ID, "stale", now.Add(-31*24*time.Hour-time.Hour))
+		if err := repo.CreateAdminSession(ctx, stale); err != nil {
+			t.Fatal(err)
+		}
+		raw := openRawSQLite(t, database)
+		defer raw.Close()
+		if _, err := raw.ExecContext(ctx, `CREATE TRIGGER fail_login_retention BEFORE DELETE ON admin_sessions BEGIN SELECT RAISE(ABORT, 'forced retention failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		current := newStoredSession(t, "current", "current-family", user.ID, "current", now)
+		success := mustLoginAttempt(t, "login", "10.0.0.1", true, "", now)
+		if err := repo.CreateAdminSessionWithLoginSuccess(ctx, current, success); err == nil {
+			t.Fatal("login write should roll back")
+		}
+		if _, found, err := repo.GetAdminSession(ctx, current.ID); err != nil || found {
+			t.Fatalf("current session found=%v err=%v", found, err)
+		}
+		var attempts int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts`).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if attempts != 0 {
+			t.Fatalf("success attempt count=%d", attempts)
+		}
+	})
+
+	t.Run("rotation write", func(t *testing.T) {
+		database := filepath.Join(t.TempDir(), "rotation-retention-rollback.db")
+		repo := openSecurityRepo(t, ctx, database)
+		defer repo.Close()
+		user := createStoredAdmin(t, ctx, repo, "rotation-admin", "rotation-retention", now.Add(-40*24*time.Hour))
+		stale := newStoredSession(t, "stale", "stale-family", user.ID, "stale", now.Add(-31*24*time.Hour-time.Hour))
+		current := newStoredSession(t, "current", "current-family", user.ID, "current", now.Add(-30*time.Minute))
+		for _, session := range []adminauth.Session{stale, current} {
+			if err := repo.CreateAdminSession(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+		}
+		raw := openRawSQLite(t, database)
+		defer raw.Close()
+		if _, err := raw.ExecContext(ctx, `CREATE TRIGGER fail_rotation_retention BEFORE DELETE ON admin_sessions BEGIN SELECT RAISE(ABORT, 'forced retention failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		replacement := newStoredSession(t, "replacement", current.FamilyID, user.ID, "replacement", now)
+		if rotated, err := repo.RotateAdminSession(ctx, current.ID, current.RefreshSecretHash, replacement, now); err == nil || rotated {
+			t.Fatalf("rotated=%v err=%v", rotated, err)
+		}
+		stored, found, err := repo.GetAdminSession(ctx, current.ID)
+		if err != nil || !found || !stored.RotatedAt.IsZero() {
+			t.Fatalf("current=%+v found=%v err=%v", stored, found, err)
+		}
+		if _, found, err := repo.GetAdminSession(ctx, replacement.ID); err != nil || found {
+			t.Fatalf("replacement found=%v err=%v", found, err)
+		}
+	})
+}
+
 func TestSQLiteRPMReadsPersistedPolicyAndInactiveFailuresDoNotCreateWindows(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "rpm-policy.db")
