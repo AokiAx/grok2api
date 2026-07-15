@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
@@ -159,5 +161,42 @@ func copyHTTPHeader(destination, source http.Header) {
 		for _, value := range values {
 			destination.Add(name, value)
 		}
+	}
+}
+
+type ClientRateConsumer interface {
+	ConsumeRPM(context.Context, service.ClientGrant) (repository.RateLimitDecision, error)
+}
+
+// ClientRateLimitMiddleware consumes one persisted per-key RPM unit. SQLite is
+// authoritative for both the configured limit and the atomic window state.
+func ClientRateLimitMiddleware(consumer ClientRateConsumer, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if consumer == nil {
+			writeOpenAIErrorCode(writer, http.StatusInternalServerError, "rate_limit_unavailable", "Rate limiting is unavailable")
+			return
+		}
+		grant, _ := service.ClientGrantFromContext(request.Context())
+		decision, err := consumer.ConsumeRPM(request.Context(), grant)
+		writeRateLimitHeaders(writer.Header(), decision)
+		if errors.Is(err, service.ErrClientRateLimited) {
+			writeOpenAIErrorCode(writer, http.StatusTooManyRequests, "rate_limit_exceeded", "Rate limit exceeded for this API key")
+			return
+		}
+		if err != nil {
+			writeOpenAIErrorCode(writer, http.StatusInternalServerError, "rate_limit_failed", "Rate limit check failed")
+			return
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func writeRateLimitHeaders(header http.Header, decision repository.RateLimitDecision) {
+	if decision.Limit > 0 {
+		header.Set("X-RateLimit-Limit-Requests", strconv.Itoa(decision.Limit))
+		header.Set("X-RateLimit-Remaining-Requests", strconv.Itoa(decision.Remaining))
+	}
+	if !decision.ResetAt.IsZero() {
+		header.Set("X-RateLimit-Reset-Requests", strconv.FormatInt(decision.ResetAt.UTC().Unix(), 10))
 	}
 }

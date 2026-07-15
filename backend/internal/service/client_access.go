@@ -15,6 +15,7 @@ import (
 var (
 	ErrClientUnauthorized = errors.New("client credential is invalid")
 	ErrModelNotAllowed    = errors.New("model is not allowed for this client key")
+	ErrClientRateLimited  = errors.New("client key request rate exceeded")
 )
 
 type ClientAccessRepository interface {
@@ -143,6 +144,30 @@ func (a *ClientAccess) Authenticate(ctx context.Context, secret string) (ClientG
 		RPMLimit:      credential.Key.RPMLimit,
 		MaxConcurrent: credential.Key.MaxConcurrent,
 	}, nil
+}
+
+// ConsumeRPM delegates the whole decision to the repository so the persisted
+// policy and counter are consumed atomically. The grant's copied RPMLimit is
+// intentionally not passed back as caller-controlled input.
+func (a *ClientAccess) ConsumeRPM(ctx context.Context, grant ClientGrant) (repository.RateLimitDecision, error) {
+	if !grant.Authenticated {
+		return repository.RateLimitDecision{Allowed: true, Limit: 0}, nil
+	}
+	if a == nil || a.repository == nil || a.now == nil {
+		return repository.RateLimitDecision{}, errors.New("client access dependencies are required")
+	}
+	at := a.now()
+	if at.IsZero() {
+		return repository.RateLimitDecision{}, errors.New("client access clock returned zero time")
+	}
+	decision, err := a.repository.ConsumeClientKeyRPM(ctx, grant.KeyID, at.UTC())
+	if err != nil {
+		return repository.RateLimitDecision{}, fmt.Errorf("consume client key rpm: %w", err)
+	}
+	if !decision.Allowed {
+		return decision, ErrClientRateLimited
+	}
+	return decision, nil
 }
 
 type clientGrantContextKey struct{}
