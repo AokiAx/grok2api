@@ -7,6 +7,7 @@ import {
 
 export type KeyDraft = {
   name: string;
+  /** Kept for compatibility; final policy is derived from selected scopes + catalog. */
   modelPolicy: ClientKeyModelPolicy | "";
   modelScopes: string;
   rpmLimit: string;
@@ -17,7 +18,8 @@ export type KeyDraft = {
 export type LimitDecisions = {
   unlimitedRPM: boolean;
   unlimitedConcurrent: boolean;
-  allModelsConfirmed: boolean;
+  /** Optional enabled model ids from registry; used to detect "select all". */
+  catalogModelIds?: string[];
 };
 
 export function emptyKeyDraft(): KeyDraft {
@@ -44,15 +46,24 @@ export function buildClientKeyInput(
   draft: KeyDraft,
   decisions: LimitDecisions,
 ): ClientKeyInput | string {
-  if (!draft.modelPolicy) return "请选择模型权限";
   if (!draft.name.trim()) return "请输入密钥名称";
   const scopes = parseModelScopes(draft.modelScopes);
-  if (draft.modelPolicy === "all" && !decisions.allModelsConfirmed) {
-    return "请确认允许访问全部模型";
-  }
-  if (draft.modelPolicy === "allowlist" && scopes.length === 0) {
-    return "请至少填写一个允许的模型";
-  }
+  if (scopes.length === 0) return "请至少选择一个模型";
+
+  const catalog = (decisions.catalogModelIds || [])
+    .map((id) => id.trim().toLowerCase())
+    .filter(Boolean);
+  const catalogSet = new Set(catalog);
+  const selectsAllCatalog =
+    catalog.length > 0
+    && catalog.every((id) => scopes.includes(id))
+    && scopes.every((id) => catalogSet.has(id));
+
+  // Full catalog selection maps to backend "all"; otherwise explicit allowlist.
+  // Legacy keys that already used model_policy=all are rehydrated by selecting
+  // the full catalog in the detail dialog.
+  const modelPolicy: ClientKeyModelPolicy = selectsAllCatalog ? "all" : "allowlist";
+
   const rpm = Number(draft.rpmLimit);
   if (!decisions.unlimitedRPM && (!draft.rpmLimit || !Number.isInteger(rpm) || rpm < 1)) {
     return "请输入大于 0 的 RPM，或主动选择 RPM 不限";
@@ -66,19 +77,25 @@ export function buildClientKeyInput(
   }
   return {
     name: draft.name.trim(),
-    model_policy: draft.modelPolicy,
-    model_scopes: draft.modelPolicy === "allowlist" ? scopes : [],
+    model_policy: modelPolicy,
+    model_scopes: modelPolicy === "allowlist" ? scopes : [],
     rpm_limit: decisions.unlimitedRPM ? 0 : rpm,
     max_concurrent: decisions.unlimitedConcurrent ? 0 : concurrent,
     expires_at: expiresPayload(draft.expiresAt),
   };
 }
 
-export function draftFromClientKey(key: ClientKey): KeyDraft {
+export function draftFromClientKey(key: ClientKey, catalogModelIds: string[] = []): KeyDraft {
+  const catalog = catalogModelIds.map((id) => id.trim().toLowerCase()).filter(Boolean);
+  // "all" keys have empty scopes in API; rehydrate UI as full catalog selection.
+  const scopes =
+    key.model_policy === "all" && catalog.length > 0
+      ? catalog
+      : key.model_scopes;
   return {
     name: key.name,
-    modelPolicy: key.model_policy,
-    modelScopes: key.model_scopes.join(", "),
+    modelPolicy: key.model_policy === "all" ? "all" : scopes.length ? "allowlist" : "",
+    modelScopes: scopes.join(", "),
     rpmLimit: String(key.rpm_limit),
     maxConcurrent: String(key.max_concurrent),
     expiresAt: localDateTime(key.expires_at),

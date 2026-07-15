@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClientKeysPage } from "@/pages/ClientKeysPage";
@@ -25,6 +25,8 @@ const apiMocks = vi.hoisted(() => ({
   clientKey: vi.fn(),
   updateClientKey: vi.fn(),
   revokeClientKey: vi.fn(),
+  models: vi.fn(),
+  settings: vi.fn(),
 }));
 
 vi.mock("@/api/client", async (importOriginal) => {
@@ -53,10 +55,27 @@ beforeEach(() => {
   });
   apiMocks.updateClientKey.mockResolvedValue({ ...activeKey, name: "renamed" });
   apiMocks.revokeClientKey.mockResolvedValue({ ...activeKey, revoked_at: "2026-07-15T02:00:00Z" });
+  apiMocks.models.mockResolvedValue({
+    count: 2,
+    enabled: 2,
+    models: [
+      { id: "grok-4.5", name: "Grok 4.5", enabled: true, aliases: [] },
+      { id: "grok-code", name: "Grok Code", enabled: true, aliases: [] },
+    ],
+  });
+  apiMocks.settings.mockResolvedValue({
+    revision: 1,
+    updated_at: "2026-07-15T00:00:00Z",
+    pool: {},
+    timeouts: {},
+    audit: {},
+    proxy: {},
+    client_keys: { default_rpm_limit: 120, default_max_concurrent: 4 },
+  });
 });
 
 describe("ClientKeysPage", () => {
-  it("requires explicit model and limit decisions before creating and reveals the secret once", async () => {
+  it("creates a key from the model list without a separate policy selector", async () => {
     const copy = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: copy } });
@@ -64,16 +83,22 @@ describe("ClientKeysPage", () => {
     await screen.findByText("automation");
 
     await user.click(screen.getByRole("button", { name: "创建密钥" }));
-    await user.click(screen.getByRole("button", { name: "生成密钥" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("请选择模型权限");
+    const dialog = await screen.findByRole("dialog", { name: "创建密钥" });
+    expect(await within(dialog).findByText(/默认来自设置/)).toBeInTheDocument();
+    await within(dialog).findByText("grok-4.5");
+
+    await user.click(within(dialog).getByRole("button", { name: "生成密钥" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("请输入密钥名称");
+
+    await user.type(within(dialog).getByLabelText("名称"), "ci-agent");
+    await user.click(within(dialog).getByRole("button", { name: "生成密钥" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("请至少选择一个模型");
     expect(apiMocks.createClientKey).not.toHaveBeenCalled();
 
-    await user.type(screen.getByLabelText("名称"), "ci-agent");
-    await user.selectOptions(screen.getByLabelText("模型权限"), "all");
-    await user.click(screen.getByRole("checkbox", { name: "我确认此密钥可访问全部模型" }));
-    await user.click(screen.getByRole("checkbox", { name: "RPM 不限" }));
-    await user.click(screen.getByRole("checkbox", { name: "并发不限" }));
-    await user.click(screen.getByRole("button", { name: "生成密钥" }));
+    await user.click(within(dialog).getByRole("button", { name: "全选" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "RPM 不限" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "并发不限" }));
+    await user.click(within(dialog).getByRole("button", { name: "生成密钥" }));
 
     expect(apiMocks.createClientKey).toHaveBeenCalledWith({
       name: "ci-agent",
@@ -92,35 +117,40 @@ describe("ClientKeysPage", () => {
     expect(screen.queryByText("g2a_once_only_secret")).not.toBeInTheDocument();
   });
 
-  it("loads details, edits policy settings, and revokes a key", async () => {
+  it("loads details, edits selected models, and revokes a key", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     render(<ClientKeysPage />);
 
     await user.click(await screen.findByRole("button", { name: "查看 automation" }));
     expect(apiMocks.clientKey).toHaveBeenCalledWith("ck_1");
-    expect(await screen.findByRole("heading", { name: "密钥详情" })).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "密钥详情" });
 
-    const name = screen.getByLabelText("密钥名称");
+    await waitFor(() => {
+      expect(within(dialog).getByRole("checkbox", { name: /grok-4\.5/i })).toBeChecked();
+    });
+
+    // Drop one model so backend becomes allowlist.
+    await user.click(within(dialog).getByRole("checkbox", { name: /grok-code/i }));
+
+    const name = within(dialog).getByLabelText("密钥名称");
     await user.clear(name);
     await user.type(name, "renamed");
-    await user.selectOptions(screen.getByLabelText("模型权限"), "allowlist");
-    await user.type(screen.getByLabelText("允许的模型"), "grok-4, grok-code");
-    await user.clear(screen.getByLabelText("每分钟请求数"));
-    await user.type(screen.getByLabelText("每分钟请求数"), "30");
-    await user.clear(screen.getByLabelText("最大并发"));
-    await user.type(screen.getByLabelText("最大并发"), "3");
-    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await user.clear(within(dialog).getByLabelText("每分钟请求数"));
+    await user.type(within(dialog).getByLabelText("每分钟请求数"), "30");
+    await user.clear(within(dialog).getByLabelText("最大并发"));
+    await user.type(within(dialog).getByLabelText("最大并发"), "3");
+    await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
 
     expect(apiMocks.updateClientKey).toHaveBeenCalledWith("ck_1", expect.objectContaining({
       name: "renamed",
       model_policy: "allowlist",
-      model_scopes: ["grok-4", "grok-code"],
+      model_scopes: ["grok-4.5"],
       rpm_limit: 30,
       max_concurrent: 3,
     }));
 
-    await user.click(screen.getByRole("button", { name: "撤销密钥" }));
+    await user.click(within(dialog).getByRole("button", { name: "撤销密钥" }));
     expect(apiMocks.revokeClientKey).toHaveBeenCalledWith("ck_1");
   });
 
@@ -129,20 +159,23 @@ describe("ClientKeysPage", () => {
     render(<ClientKeysPage />);
 
     await user.click(await screen.findByRole("button", { name: "查看 automation" }));
-    await screen.findByRole("heading", { name: "密钥详情" });
+    const dialog = await screen.findByRole("dialog", { name: "密钥详情" });
+    await waitFor(() => {
+      expect(within(dialog).getByRole("checkbox", { name: /grok-4\.5/i })).toBeChecked();
+    });
 
-    await user.clear(screen.getByLabelText("每分钟请求数"));
-    await user.type(screen.getByLabelText("每分钟请求数"), "0");
-    await user.clear(screen.getByLabelText("最大并发"));
-    await user.type(screen.getByLabelText("最大并发"), "0");
-    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await user.clear(within(dialog).getByLabelText("每分钟请求数"));
+    await user.type(within(dialog).getByLabelText("每分钟请求数"), "0");
+    await user.clear(within(dialog).getByLabelText("最大并发"));
+    await user.type(within(dialog).getByLabelText("最大并发"), "0");
+    await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
 
-    expect(screen.getByRole("alert")).toHaveTextContent("RPM 不限");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(/RPM|并发/);
     expect(apiMocks.updateClientKey).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("checkbox", { name: "RPM 不限" }));
-    await user.click(screen.getByRole("checkbox", { name: "并发不限" }));
-    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "RPM 不限" }));
+    await user.click(within(dialog).getByRole("checkbox", { name: "并发不限" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
 
     expect(apiMocks.updateClientKey).toHaveBeenCalledWith("ck_1", expect.objectContaining({
       rpm_limit: 0,
@@ -160,15 +193,18 @@ describe("ClientKeysPage", () => {
     render(<ClientKeysPage />);
 
     await user.click(await screen.findByRole("button", { name: "查看 automation" }));
-    await screen.findByRole("heading", { name: "密钥详情" });
+    const dialog = await screen.findByRole("dialog", { name: "密钥详情" });
+    await waitFor(() => {
+      expect(within(dialog).getByRole("checkbox", { name: /grok-4\.5/i })).toBeChecked();
+    });
 
-    expect(screen.getByRole("checkbox", { name: "RPM 不限" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "并发不限" })).toBeChecked();
+    expect(within(dialog).getByRole("checkbox", { name: "RPM 不限" })).toBeChecked();
+    expect(within(dialog).getByRole("checkbox", { name: "并发不限" })).toBeChecked();
 
-    const name = screen.getByLabelText("密钥名称");
+    const name = within(dialog).getByLabelText("密钥名称");
     await user.clear(name);
     await user.type(name, "renamed-unlimited");
-    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
 
     expect(apiMocks.updateClientKey).toHaveBeenCalledWith("ck_1", expect.objectContaining({
       name: "renamed-unlimited",

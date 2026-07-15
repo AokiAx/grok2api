@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { adminApi, type ClientKey } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -32,12 +32,17 @@ export function CreateClientKeyDialog({
   const [draft, setDraft] = useState(() =>
     draftWithDefaults(FALLBACK_DEFAULTS.default_rpm_limit, FALLBACK_DEFAULTS.default_max_concurrent),
   );
-  const [allModelsConfirmed, setAllModelsConfirmed] = useState(false);
+  const [catalogModelIds, setCatalogModelIds] = useState<string[]>([]);
   const [unlimitedRPM, setUnlimitedRPM] = useState(false);
   const [unlimitedConcurrent, setUnlimitedConcurrent] = useState(false);
+  const [defaultsReady, setDefaultsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [defaultsHint, setDefaultsHint] = useState("默认 RPM 120 · 并发 4（可在设置中修改）");
+
+  const handleCatalogChange = useCallback((ids: string[]) => {
+    setCatalogModelIds(ids);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -57,6 +62,9 @@ export function CreateClientKeyDialog({
       })
       .catch(() => {
         /* keep hardcoded product defaults */
+      })
+      .finally(() => {
+        if (active) setDefaultsReady(true);
       });
     return () => {
       active = false;
@@ -68,7 +76,7 @@ export function CreateClientKeyDialog({
     const input = buildClientKeyInput(draft, {
       unlimitedRPM,
       unlimitedConcurrent,
-      allModelsConfirmed: draft.modelPolicy !== "all" || allModelsConfirmed,
+      catalogModelIds,
     });
     if (typeof input === "string") {
       setError(input);
@@ -100,7 +108,7 @@ export function CreateClientKeyDialog({
             <div>
               <h2 id="create-client-key-title" className="text-base font-medium">创建密钥</h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                权限与限额需明确确认。{defaultsHint}
+                选择可用模型并确认限额。{defaultsHint}
               </p>
             </div>
             <Button size="icon" variant="ghost" aria-label="关闭创建密钥" onClick={onClose}>
@@ -108,17 +116,12 @@ export function CreateClientKeyDialog({
             </Button>
           </div>
           <form className="space-y-4" onSubmit={submit}>
-            <ClientKeyFields draft={draft} onChange={setDraft} nameLabel="名称" />
-            {draft.modelPolicy === "all" ? (
-              <label className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/8 p-3 text-xs leading-5">
-                <input
-                  type="checkbox"
-                  checked={allModelsConfirmed}
-                  onChange={(event) => setAllModelsConfirmed(event.target.checked)}
-                />
-                我确认此密钥可访问全部模型
-              </label>
-            ) : null}
+            <ClientKeyFields
+              draft={draft}
+              onChange={setDraft}
+              nameLabel="名称"
+              onCatalogChange={handleCatalogChange}
+            />
             <LimitDecision
               id="create-rpm"
               label="每分钟请求数"
@@ -140,7 +143,9 @@ export function CreateClientKeyDialog({
             {error ? <p className="text-xs text-destructive" role="alert">{error}</p> : null}
             <div className="flex justify-end gap-2 pt-2">
               <Button type="button" variant="outline" onClick={onClose}>取消</Button>
-              <Button type="submit" disabled={busy}>{busy ? "生成中…" : "生成密钥"}</Button>
+              <Button type="submit" disabled={busy || !defaultsReady}>
+                {busy ? "生成中…" : "生成密钥"}
+              </Button>
             </div>
           </form>
         </CardContent>

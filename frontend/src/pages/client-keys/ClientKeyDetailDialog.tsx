@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ShieldOff, X } from "lucide-react";
 import { adminApi, type ClientKey } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
@@ -24,12 +24,16 @@ export function ClientKeyDetailDialog({
 }) {
   const [detail, setDetail] = useState(initial);
   const [draft, setDraft] = useState(emptyKeyDraft);
+  const [catalogModelIds, setCatalogModelIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unlimitedRPM, setUnlimitedRPM] = useState(false);
   const [unlimitedConcurrent, setUnlimitedConcurrent] = useState(false);
-  const [allModelsConfirmed, setAllModelsConfirmed] = useState(false);
+
+  const handleCatalogChange = useCallback((ids: string[]) => {
+    setCatalogModelIds(ids);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -37,15 +41,12 @@ export function ClientKeyDetailDialog({
     setError(null);
     setUnlimitedRPM(false);
     setUnlimitedConcurrent(false);
-    setAllModelsConfirmed(false);
     void adminApi.clientKey(initial.id).then((loaded) => {
       if (!active) return;
       setDetail(loaded);
-      setDraft(draftFromClientKey(loaded));
+      setDraft(draftFromClientKey(loaded, catalogModelIds));
       setUnlimitedRPM(loaded.rpm_limit === 0);
       setUnlimitedConcurrent(loaded.max_concurrent === 0);
-      // Existing all-policy keys are already confirmed; reconfirm only when switching to all.
-      setAllModelsConfirmed(loaded.model_policy === "all");
     }).catch((failure) => {
       if (active) setError(clientKeyErrorMessage(failure, "加载密钥详情失败"));
     }).finally(() => {
@@ -54,14 +55,25 @@ export function ClientKeyDetailDialog({
     return () => {
       active = false;
     };
+    // catalog is applied separately when models finish loading
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initial.id]);
+
+  // Rehydrate "all" keys once model catalog is available.
+  useEffect(() => {
+    if (!catalogModelIds.length || detail.model_policy !== "all") return;
+    setDraft((current) => {
+      if (current.modelScopes) return current;
+      return draftFromClientKey(detail, catalogModelIds);
+    });
+  }, [catalogModelIds, detail]);
 
   async function save(event: FormEvent) {
     event.preventDefault();
     const input = buildClientKeyInput(draft, {
       unlimitedRPM,
       unlimitedConcurrent,
-      allModelsConfirmed: draft.modelPolicy !== "all" || allModelsConfirmed,
+      catalogModelIds,
     });
     if (typeof input === "string") {
       setError(input);
@@ -73,10 +85,9 @@ export function ClientKeyDetailDialog({
       const updated = await adminApi.updateClientKey(detail.id, input);
       const merged = { ...detail, ...updated, secret: undefined };
       setDetail(merged);
-      setDraft(draftFromClientKey(merged));
+      setDraft(draftFromClientKey(merged, catalogModelIds));
       setUnlimitedRPM(merged.rpm_limit === 0);
       setUnlimitedConcurrent(merged.max_concurrent === 0);
-      setAllModelsConfirmed(merged.model_policy === "all");
       onChanged(merged);
     } catch (failure) {
       setError(clientKeyErrorMessage(failure, "保存密钥设置失败"));
@@ -130,28 +141,11 @@ export function ClientKeyDetailDialog({
             <form className="space-y-4" onSubmit={save}>
               <ClientKeyFields
                 draft={draft}
-                onChange={(next) => {
-                  setDraft(next);
-                  if (next.modelPolicy !== "all") {
-                    setAllModelsConfirmed(false);
-                  } else if (detail.model_policy === "all" && next.modelPolicy === "all") {
-                    setAllModelsConfirmed(true);
-                  }
-                }}
+                onChange={setDraft}
                 nameLabel="密钥名称"
                 disabled={Boolean(detail.revoked_at)}
+                onCatalogChange={handleCatalogChange}
               />
-              {draft.modelPolicy === "all" && detail.model_policy !== "all" ? (
-                <label className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/8 p-3 text-xs leading-5">
-                  <input
-                    type="checkbox"
-                    checked={allModelsConfirmed}
-                    disabled={Boolean(detail.revoked_at)}
-                    onChange={(event) => setAllModelsConfirmed(event.target.checked)}
-                  />
-                  我确认将此密钥升级为可访问全部模型
-                </label>
-              ) : null}
               <div className="grid gap-3 sm:grid-cols-2">
                 <LimitDecision
                   id="detail-rpm"
@@ -178,23 +172,30 @@ export function ClientKeyDetailDialog({
               </div>
               <dl className="grid gap-2 rounded-lg bg-background p-3 text-[11px] sm:grid-cols-2">
                 <KeyFact label="来源" value={detail.origin} />
-                <KeyFact label="最后使用" value={formatClientKeyDate(detail.last_used_at)} />
                 <KeyFact label="创建时间" value={formatClientKeyDate(detail.created_at)} />
-                <KeyFact label="到期时间" value={formatClientKeyDate(detail.expires_at)} />
+                <KeyFact label="最近使用" value={formatClientKeyDate(detail.last_used_at)} />
+                <KeyFact label="更新时间" value={formatClientKeyDate(detail.updated_at)} />
+                {detail.revoked_at ? (
+                  <KeyFact label="撤销时间" value={formatClientKeyDate(detail.revoked_at)} />
+                ) : null}
               </dl>
               {error ? <p className="text-xs text-destructive" role="alert">{error}</p> : null}
-              <div className="flex flex-col-reverse justify-between gap-2 border-t border-border/70 pt-4 sm:flex-row">
+              <div className="flex flex-wrap justify-between gap-2 pt-1">
                 <Button
                   type="button"
                   variant="destructive"
                   disabled={busy || Boolean(detail.revoked_at)}
                   onClick={() => void revoke()}
                 >
-                  <ShieldOff className="size-3.5" />撤销密钥
+                  <ShieldOff className="size-3.5" />
+                  撤销密钥
                 </Button>
-                <Button type="submit" disabled={busy || Boolean(detail.revoked_at)}>
-                  {busy ? "保存中…" : "保存修改"}
-                </Button>
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" onClick={onClose}>关闭</Button>
+                  <Button type="submit" disabled={busy || Boolean(detail.revoked_at)}>
+                    {busy ? "保存中…" : "保存修改"}
+                  </Button>
+                </div>
               </div>
             </form>
           )}
@@ -205,5 +206,10 @@ export function ClientKeyDetailDialog({
 }
 
 function KeyFact({ label, value }: { label: string; value: string }) {
-  return <div><dt className="text-muted-foreground">{label}</dt><dd className="mt-0.5">{value}</dd></div>;
+  return (
+    <div className="min-w-0">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 truncate font-mono">{value}</dd>
+    </div>
+  );
 }
