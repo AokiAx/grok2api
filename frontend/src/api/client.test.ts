@@ -164,6 +164,29 @@ describe("admin authentication transport", () => {
     expect(invalidated).toHaveBeenCalledOnce();
   });
 
+  it("publishes final session invalidation when the refreshed request is still unauthorized", async () => {
+    const invalidated = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const authorization = new Headers(init?.headers).get("Authorization");
+      if (path.endsWith("/auth/login")) return envelope({ tokens: { accessToken: "expired" } });
+      if (path.endsWith("/auth/refresh")) return envelope({ tokens: { accessToken: "fresh" } });
+      if (path.endsWith("/auth/me") && authorization === "Bearer expired") return envelope(null, 401);
+      if (path.endsWith("/auth/me") && authorization === "Bearer fresh") return envelope(null, 401);
+      return envelope({ id: "admin-1", username: "admin" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { adminApi, subscribeAdminSessionInvalidated } = await loadClient();
+    const unsubscribe = subscribeAdminSessionInvalidated(invalidated);
+    await adminApi.login("secret", false);
+    await expect(adminApi.me()).rejects.toMatchObject({ status: 401 });
+    unsubscribe();
+
+    expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith("/auth/refresh"))).toHaveLength(1);
+    expect(invalidated).toHaveBeenCalledOnce();
+  });
+
   it("preserves Retry-After on structured admin API errors", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
       envelope(
