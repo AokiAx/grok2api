@@ -143,7 +143,7 @@ func (a *clientKeyAdminAPI) update(writer http.ResponseWriter, request *http.Req
 		ModelScopes   *[]string              `json:"model_scopes"`
 		RPMLimit      *int                   `json:"rpm_limit"`
 		MaxConcurrent *int                   `json:"max_concurrent"`
-		ExpiresAt     *time.Time             `json:"expires_at"`
+		ExpiresAt     nullableTime           `json:"expires_at"`
 	}
 	if err := decodeStrictJSON(writer, request, &body); err != nil {
 		writeAdminError(writer, http.StatusBadRequest, "invalid_request", err.Error())
@@ -177,8 +177,8 @@ func (a *clientKeyAdminAPI) update(writer http.ResponseWriter, request *http.Req
 	if body.MaxConcurrent != nil {
 		update.MaxConcurrent = *body.MaxConcurrent
 	}
-	if body.ExpiresAt != nil {
-		update.ExpiresAt = *body.ExpiresAt
+	if body.ExpiresAt.Set {
+		update.ExpiresAt = body.ExpiresAt.Value
 	}
 	result, err := a.service.Update(request.Context(), id, update)
 	if err != nil {
@@ -198,6 +198,25 @@ func (a *clientKeyAdminAPI) revoke(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeAdminOK(writer, http.StatusOK, clientKeyResultDTO(result, false))
+}
+
+type nullableTime struct {
+	Set   bool
+	Value time.Time
+}
+
+func (value *nullableTime) UnmarshalJSON(payload []byte) error {
+	value.Set = true
+	if strings.TrimSpace(string(payload)) == "null" {
+		value.Value = time.Time{}
+		return nil
+	}
+	var parsed time.Time
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return err
+	}
+	value.Value = parsed
+	return nil
 }
 
 type clientKeyDTO struct {
