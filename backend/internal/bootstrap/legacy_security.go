@@ -65,17 +65,23 @@ func (s *LegacySecurityService) Bootstrap(ctx context.Context, secrets LegacySec
 
 	password := firstNonEmpty(secrets.PanelPassword, secrets.AppKey)
 	if password != "" {
-		credential, err := security.HashAdminPassword(password, s.bcryptCost)
-		if err != nil {
-			return result, err
-		}
-		admin, err := adminauth.NewAdminUser("admin-legacy-bootstrap", "admin", credential, at)
-		if err != nil {
-			return result, err
-		}
-		result.Admin, err = s.repository.BootstrapLegacyAdmin(ctx, admin)
-		if err != nil {
-			return result, err
+		// Match bootstrap-admin strength so short panel secrets cannot become the sole admin password.
+		if err := validateAdminBootstrapPassword(password); err != nil {
+			// Leave setup_required=true so operators must run bootstrap-admin with a strong password.
+			result.Admin = BootstrapSkipped
+		} else {
+			credential, err := security.HashAdminPassword(password, s.bcryptCost)
+			if err != nil {
+				return result, err
+			}
+			admin, err := adminauth.NewAdminUser("admin-legacy-bootstrap", "admin", credential, at)
+			if err != nil {
+				return result, err
+			}
+			result.Admin, err = s.repository.BootstrapLegacyAdmin(ctx, admin)
+			if err != nil {
+				return result, err
+			}
 		}
 	}
 

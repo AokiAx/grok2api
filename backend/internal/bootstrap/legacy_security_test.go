@@ -26,7 +26,7 @@ func TestLegacySecurityBootstrapPrefersPanelPasswordAndMigratesAPIKeyHashOnly(t 
 	service := bootstrap.NewLegacySecurityService(repo, func() time.Time { return now }, bcrypt.MinCost)
 
 	result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{
-		PanelPassword: " panel-secret ", AppKey: "app-secret", APIKey: " legacy-client-secret ",
+		PanelPassword: " panel-secret-strong ", AppKey: "app-secret-strong", APIKey: " legacy-client-secret ",
 	})
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
@@ -38,7 +38,7 @@ func TestLegacySecurityBootstrapPrefersPanelPasswordAndMigratesAPIKeyHashOnly(t 
 	if err != nil || !found {
 		t.Fatalf("admin found=%v err=%v", found, err)
 	}
-	if !security.VerifyAdminPassword(user.Password, "panel-secret") || security.VerifyAdminPassword(user.Password, "app-secret") {
+	if !security.VerifyAdminPassword(user.Password, "panel-secret-strong") || security.VerifyAdminPassword(user.Password, "app-secret-strong") {
 		t.Fatal("panel_password did not take precedence over app_key")
 	}
 	clientHash := sha256.Sum256([]byte("legacy-client-secret"))
@@ -61,18 +61,18 @@ func TestLegacySecurityBootstrapPrefersPanelPasswordAndMigratesAPIKeyHashOnly(t 
 	if err := raw.QueryRow(`SELECT password_hash FROM admin_users WHERE id=?`, user.ID).Scan(&storedPasswordHash); err != nil {
 		t.Fatalf("read stored password hash: %v", err)
 	}
-	if storedPasswordHash == "panel-secret" || storedPasswordHash == "app-secret" || storedPasswordHash != user.Password.Hash {
+	if storedPasswordHash == "panel-secret-strong" || storedPasswordHash == "app-secret-strong" || storedPasswordHash != user.Password.Hash {
 		t.Fatalf("stored password hash = %q", storedPasswordHash)
 	}
 	var rawSecretCount int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM client_keys WHERE CAST(key_hash AS TEXT) IN (?, ?)`, "legacy-client-secret", " panel-secret ").Scan(&rawSecretCount); err != nil {
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM client_keys WHERE CAST(key_hash AS TEXT) IN (?, ?)`, "legacy-client-secret", " panel-secret-strong ").Scan(&rawSecretCount); err != nil {
 		t.Fatalf("scan raw secrets: %v", err)
 	}
 	if rawSecretCount != 0 {
 		t.Fatal("legacy plaintext was stored in client_keys")
 	}
 
-	second, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "different-admin", APIKey: "legacy-client-secret"})
+	second, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "different-admin-strong", APIKey: "legacy-client-secret"})
 	if err != nil {
 		t.Fatalf("idempotent bootstrap: %v", err)
 	}
@@ -126,12 +126,12 @@ func TestLegacySecurityBootstrapOnlyAPIKeyLeavesAdminSetupRequiredAndAppKeyFalls
 		repo := openBootstrapRepo(t, ctx, filepath.Join(t.TempDir(), "app-key.db"))
 		defer repo.Close()
 		service := bootstrap.NewLegacySecurityService(repo, func() time.Time { return now }, bcrypt.MinCost)
-		result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{AppKey: "app-admin"})
+		result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{AppKey: "app-admin-strong"})
 		if err != nil || result.Admin != bootstrap.BootstrapCreated || result.AdminSetupRequired {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
 		user, found, err := repo.GetAdminUserByUsername(ctx, "admin")
-		if err != nil || !found || !security.VerifyAdminPassword(user.Password, "app-admin") {
+		if err != nil || !found || !security.VerifyAdminPassword(user.Password, "app-admin-strong") {
 			t.Fatalf("app fallback user=%+v found=%v err=%v", user, found, err)
 		}
 	})
@@ -152,7 +152,7 @@ func TestLegacySecurityBootstrapDoesNotOverwriteAdminOrReviveLegacyClientKey(t *
 		t.Fatalf("create original admin err=%v", err)
 	}
 	service := bootstrap.NewLegacySecurityService(repo, func() time.Time { return now }, bcrypt.MinCost)
-	result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "replacement", APIKey: "legacy-key"})
+	result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "replacement-strong", APIKey: "legacy-key"})
 	if err != nil || result.Admin != bootstrap.BootstrapExisting || result.ClientKey != bootstrap.BootstrapCreated {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -168,7 +168,7 @@ func TestLegacySecurityBootstrapDoesNotOverwriteAdminOrReviveLegacyClientKey(t *
 	if err := repo.RevokeClientKey(ctx, legacy.Key.ID, now.Add(time.Minute)); err != nil {
 		t.Fatalf("revoke legacy: %v", err)
 	}
-	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "another", APIKey: "legacy-key"}); err != nil {
+	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "another-strong1", APIKey: "legacy-key"}); err != nil {
 		t.Fatalf("rebootstrap revoked legacy: %v", err)
 	}
 	revoked, found, err := repo.FindClientKeyByHash(ctx, hash)
@@ -197,7 +197,7 @@ func TestLegacySecurityBootstrapMarkersAreIndependentAndTransactionFailureDoesNo
 	defer repo.Close()
 	now := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
 	service := bootstrap.NewLegacySecurityService(repo, func() time.Time { return now }, bcrypt.MinCost)
-	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "admin", APIKey: "client"}); err == nil {
+	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "admin-password-strong", APIKey: "client"}); err == nil {
 		t.Fatal("expected client bootstrap transaction failure")
 	}
 	raw = openBootstrapRaw(t, database)
@@ -231,7 +231,7 @@ func TestLegacyAdminBootstrapFailureDoesNotPersistAdminOrMarker(t *testing.T) {
 	service := bootstrap.NewLegacySecurityService(repo, func() time.Time {
 		return time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
 	}, bcrypt.MinCost)
-	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "admin"}); err == nil {
+	if _, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "admin-password-strong"}); err == nil {
 		t.Fatal("expected admin bootstrap transaction failure")
 	}
 	raw = openBootstrapRaw(t, database)
@@ -274,5 +274,24 @@ func assertMarkerMissing(t *testing.T, db *sql.DB, key string) {
 	var value string
 	if err := db.QueryRow(`SELECT value FROM app_meta WHERE key=?`, key).Scan(&value); err == nil {
 		t.Fatalf("marker %s unexpectedly exists with value %q", key, value)
+	}
+}
+
+func TestLegacySecurityBootstrapRejectsWeakPanelPassword(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "legacy-weak.db")
+	repo := openBootstrapRepo(t, ctx, database)
+	defer repo.Close()
+	now := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
+	service := bootstrap.NewLegacySecurityService(repo, func() time.Time { return now }, bcrypt.MinCost)
+	result, err := service.Bootstrap(ctx, bootstrap.LegacySecrets{PanelPassword: "short", APIKey: "legacy-client-secret"})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if result.Admin != bootstrap.BootstrapSkipped || !result.AdminSetupRequired {
+		t.Fatalf("weak password should skip admin create: %+v", result)
+	}
+	if result.ClientKey != bootstrap.BootstrapCreated {
+		t.Fatalf("client key should still migrate: %+v", result)
 	}
 }

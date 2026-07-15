@@ -80,6 +80,8 @@ func Defaults() Config {
 		QuotaRetryMinutes: 1440,
 		RateRetrySeconds:  45,
 		RequestTimeoutSec: 600,
+		// Secure by default; set admin_secure_cookies=false for plain HTTP loopback panels.
+		AdminSecureCookies: true,
 	}
 }
 
