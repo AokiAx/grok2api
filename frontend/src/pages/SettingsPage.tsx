@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { adminApi, AdminApiError, type SettingsDocument, type SettingsSnapshot } from "@/api/client";
+import { adminApi, AdminApiError, type SettingsDocument } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -17,7 +17,6 @@ type SettingsTab = "runtime" | "system";
 export function SettingsPage() {
   const [tab, setTab] = useState<SettingsTab>("runtime");
   const [doc, setDoc] = useState<SettingsDocument | null>(null);
-  const [snapshots, setSnapshots] = useState<SettingsSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -25,12 +24,7 @@ export function SettingsPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [settings, snap] = await Promise.all([
-        adminApi.settings(),
-        adminApi.settingsSnapshots(12),
-      ]);
-      setDoc(settings);
-      setSnapshots(snap.snapshots || []);
+      setDoc(await adminApi.settings());
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : "加载失败");
     }
@@ -60,9 +54,7 @@ export function SettingsPage() {
         },
       });
       setDoc(next);
-      setMessage(`已保存 revision ${next.revision}`);
-      const snap = await adminApi.settingsSnapshots(12);
-      setSnapshots(snap.snapshots || []);
+      setMessage("已保存");
     } catch (err) {
       setError(err instanceof AdminApiError ? err.message : "保存失败");
     } finally {
@@ -70,23 +62,6 @@ export function SettingsPage() {
     }
   }
 
-  async function rollback(target: number) {
-    if (!doc) return;
-    if (!window.confirm(`回滚到 revision ${target}？会生成新的 revision。`)) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await adminApi.rollbackSettings(doc.revision, target);
-      setDoc(next);
-      setMessage(`已回滚到内容 revision ${target}，当前 revision ${next.revision}`);
-      const snap = await adminApi.settingsSnapshots(12);
-      setSnapshots(snap.snapshots || []);
-    } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "回滚失败");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="space-y-8">
@@ -97,8 +72,8 @@ export function SettingsPage() {
             {tab === "system"
               ? "运行信息、公开配置与 API 文档入口"
               : doc
-                ? `版本化运行配置 · revision ${doc.revision}${doc.updated_at ? ` · 更新于 ${new Date(doc.updated_at).toLocaleString()}` : ""}`
-                : "版本化运行配置"}
+                ? `运行配置${doc.updated_at ? ` · 更新于 ${new Date(doc.updated_at).toLocaleString()}` : ""}`
+                : "运行配置"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -400,35 +375,6 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card className="p-4 sm:p-5">
-        <CardHeader>
-          <CardTitle>版本快照</CardTitle>
-          <CardDescription>乐观锁 + 回滚到历史内容（生成新 revision）</CardDescription>
-        </CardHeader>
-        <CardContent className="mt-3">
-          <ul className="divide-y divide-border/70">
-            {snapshots.map((snap) => (
-              <li key={snap.revision} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0">
-                <div className="min-w-0 text-xs">
-                  <div className="font-medium">revision {snap.revision}</div>
-                  <div className="text-muted-foreground">
-                    {snap.reason || "update"} · {snap.created_by || "—"} ·{" "}
-                    {snap.created_at ? new Date(snap.created_at).toLocaleString() : ""}
-                  </div>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || snap.revision === doc.revision}
-                  onClick={() => void rollback(snap.revision)}
-                >
-                  回滚到此内容
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
         </>
       ) : null}
     </div>

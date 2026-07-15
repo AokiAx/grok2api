@@ -113,14 +113,5 @@
   "/api/admin/v1/settings": [
     "GET",
     "PUT"
-  ],
-  "/api/admin/v1/settings/snapshots": [
-    "GET"
-  ],
-  "/api/admin/v1/settings/snapshots/{revision}": [
-    "GET"
-  ],
-  "/api/admin/v1/settings/rollback": [
-    "POST"
   ]
 }

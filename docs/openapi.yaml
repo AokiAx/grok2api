@@ -579,8 +579,6 @@ paths:
           description: Updated settings
         "409":
           description: Revision conflict
-  /api/admin/v1/settings/snapshots:
-    get:
       tags: [admin]
       summary: List settings snapshots
       operationId: adminListSettingsSnapshots
@@ -589,8 +587,6 @@ paths:
       responses:
         "200":
           description: Snapshots
-  /api/admin/v1/settings/snapshots/{revision}:
-    get:
       tags: [admin]
       summary: Get settings snapshot
       operationId: adminGetSettingsSnapshot
@@ -604,8 +600,6 @@ paths:
       responses:
         "200":
           description: Snapshot
-  /api/admin/v1/settings/rollback:
-    post:
       tags: [admin]
       summary: Rollback settings to a snapshot as a new revision
       operationId: adminRollbackSettings

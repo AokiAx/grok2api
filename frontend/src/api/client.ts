@@ -503,13 +503,6 @@ export type SettingsDocument = {
   };
 };
 
-export type SettingsSnapshot = {
-  revision: number;
-  created_at: string;
-  created_by: string;
-  reason: string;
-  document: SettingsDocument;
-};
 
 export type DeviceAuthSession = {
   id: string;
@@ -785,19 +778,6 @@ export const adminApi = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-  settingsSnapshots: (limit = 20) =>
-    request<{ count: number; snapshots: SettingsSnapshot[] }>(
-      `/api/admin/v1/settings/snapshots?limit=${limit}`,
-    ),
-  rollbackSettings: (expectedRevision: number, targetRevision: number) =>
-    request<SettingsDocument>("/api/admin/v1/settings/rollback", {
-      method: "POST",
-      body: JSON.stringify({
-        expected_revision: expectedRevision,
-        target_revision: targetRevision,
-      }),
-    }),
-
   // ---- Build Device OAuth ----
   startDeviceAuth: (input: { issuer?: string; client_id?: string; scope?: string } = {}) =>
     request<DeviceAuthSession>("/api/admin/v1/device-auth/sessions", {
