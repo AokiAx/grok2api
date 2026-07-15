@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,6 +53,23 @@ type eventReader struct {
 	reader io.Reader
 	events *[]string
 	seen   bool
+}
+
+type integratedInferenceAccess struct {
+	grant       service.ClientGrant
+	concurrency *service.ClientAccess
+}
+
+func (a *integratedInferenceAccess) Authenticate(context.Context, string) (service.ClientGrant, error) {
+	return a.grant, nil
+}
+
+func (a *integratedInferenceAccess) ConsumeRPM(context.Context, service.ClientGrant) (repository.RateLimitDecision, error) {
+	return repository.RateLimitDecision{Allowed: true, Limit: 100, Remaining: 99}, nil
+}
+
+func (a *integratedInferenceAccess) AcquireConcurrency(grant service.ClientGrant) (service.ClientPermit, error) {
+	return a.concurrency.AcquireConcurrency(grant)
 }
 
 func (r *eventReader) Read(buffer []byte) (int, error) {
@@ -396,6 +414,67 @@ func TestClientInferenceMiddlewareKeepsExistingBodyLimitAndReleasesPermitOnOvers
 	want := "authenticate,rpm,concurrency,release"
 	if strings.Join(access.events, ",") != want {
 		t.Fatalf("oversize events=%v want=%s", access.events, want)
+	}
+}
+
+func TestClientInferenceMiddlewareHoldsPermitBeforeBodyAndThroughStream(t *testing.T) {
+	access := &integratedInferenceAccess{
+		grant: service.ClientGrant{
+			Authenticated: true, KeyID: "ck_stream", Principal: "client-key:ck_stream",
+			ModelPolicy: clientkey.ModelPolicyAll, MaxConcurrent: 1,
+		},
+		concurrency: service.NewClientAccess(nil),
+	}
+	streamStarted := make(chan struct{})
+	finishStream := make(chan struct{})
+	var calls atomic.Int32
+	handler := ClientInferenceMiddleware(access, "grok-4.5", http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			writer.Header().Set("Content-Type", "text/event-stream")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write([]byte("data: first\n\n"))
+			close(streamStarted)
+			<-finishStream
+			_, _ = writer.Write([]byte("data: done\n\n"))
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok-4.5"}`))
+		request.Header.Set("Authorization", "Bearer stream-key")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		firstDone <- recorder
+	}()
+	<-streamStarted
+
+	var secondEvents []string
+	second := httptest.NewRequest(http.MethodPost, "/v1/responses", &eventReader{
+		reader: strings.NewReader(`{"model":"grok-4.5"}`),
+		events: &secondEvents,
+	})
+	second.Header.Set("Authorization", "Bearer stream-key")
+	secondRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(secondRecorder, second)
+	if secondRecorder.Code != http.StatusTooManyRequests || len(secondEvents) != 0 {
+		t.Fatalf("active stream status=%d body-read-events=%v body=%s", secondRecorder.Code, secondEvents, secondRecorder.Body.String())
+	}
+
+	close(finishStream)
+	first := <-firstDone
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "data: done") {
+		t.Fatalf("stream status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	third := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok-4.5"}`))
+	third.Header.Set("Authorization", "Bearer stream-key")
+	thirdRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(thirdRecorder, third)
+	if thirdRecorder.Code != http.StatusNoContent {
+		t.Fatalf("released permit status=%d body=%s", thirdRecorder.Code, thirdRecorder.Body.String())
 	}
 }
 

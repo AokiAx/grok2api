@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -334,7 +333,7 @@ func (s *Server) chat(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
+	body, err := readInferenceRequestBody(writer, request)
 	if err != nil {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
@@ -462,7 +461,7 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
+	body, err := readInferenceRequestBody(writer, request)
 	if err != nil {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return
@@ -480,7 +479,7 @@ func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
+	body, err := readInferenceRequestBody(writer, request)
 	if err != nil {
 		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
 		return

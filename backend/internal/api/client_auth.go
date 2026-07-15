@@ -18,6 +18,32 @@ type ClientAuthenticator interface {
 	Authenticate(context.Context, string) (service.ClientGrant, error)
 }
 
+const maxInferenceBodyBytes = 32 << 20
+
+type inferenceRequestBodyContextKey struct{}
+
+func withInferenceRequestBody(ctx context.Context, body []byte) context.Context {
+	return context.WithValue(ctx, inferenceRequestBodyContextKey{}, body)
+}
+
+func inferenceRequestBodyFromContext(ctx context.Context) ([]byte, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	body, ok := ctx.Value(inferenceRequestBodyContextKey{}).([]byte)
+	return body, ok
+}
+
+func readInferenceRequestBody(writer http.ResponseWriter, request *http.Request) ([]byte, error) {
+	if request == nil {
+		return nil, errors.New("inference request is required")
+	}
+	if body, ok := inferenceRequestBodyFromContext(request.Context()); ok {
+		return body, nil
+	}
+	return io.ReadAll(http.MaxBytesReader(writer, request.Body, maxInferenceBodyBytes))
+}
+
 // ClientAuthMiddleware authenticates a request and attaches only the opaque
 // client-key principal to its context. Bearer credentials take precedence over
 // x-api-key when both are present.
@@ -58,11 +84,12 @@ func clientSecretFromRequest(request *http.Request) string {
 // policy while leaving the request body available to the protocol bridge.
 func ClientModelAuthorizationMiddleware(defaultModel string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
+		body, err := readInferenceRequestBody(writer, request)
 		if err != nil {
 			writeOpenAIErrorCode(writer, http.StatusBadRequest, "invalid_request", "Invalid request body")
 			return
 		}
+		request = request.WithContext(withInferenceRequestBody(request.Context(), body))
 		request.Body = io.NopCloser(bytes.NewReader(body))
 		var envelope struct {
 			Model string `json:"model"`
@@ -212,16 +239,17 @@ type ClientInferenceAccess interface {
 }
 
 // ClientInferenceMiddleware fixes the security order for request-bearing
-// inference endpoints: authenticate, authorize the effective model, consume
-// persisted RPM, then hold a per-key concurrency permit through completion.
+// inference endpoints: authenticate, consume persisted RPM, hold a per-key
+// concurrency permit, then read and authorize one bounded body. The permit is
+// retained while the request uploads, parses, and streams its full response.
 func ClientInferenceMiddleware(access ClientInferenceAccess, defaultModel string, next http.Handler) http.Handler {
 	return ClientAuthMiddleware(
 		access,
-		ClientModelAuthorizationMiddleware(
-			defaultModel,
-			ClientRateLimitMiddleware(
+		ClientRateLimitMiddleware(
+			access,
+			ClientConcurrencyMiddleware(
 				access,
-				ClientConcurrencyMiddleware(access, next),
+				ClientModelAuthorizationMiddleware(defaultModel, next),
 			),
 		),
 	)
