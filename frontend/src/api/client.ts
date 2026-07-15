@@ -145,8 +145,8 @@ async function refreshAccessToken(generation: number): Promise<boolean> {
   return false;
 }
 
-function refreshSingleFlight(): Promise<boolean> {
-  const generation = sessionGeneration;
+function refreshSingleFlight(generation = sessionGeneration): Promise<boolean> {
+  if (generation !== sessionGeneration) return Promise.resolve(false);
   if (refreshFlight?.generation === generation) return refreshFlight.promise;
 
   const promise = refreshAccessToken(generation).finally(() => {
@@ -183,7 +183,7 @@ async function transport(
     response.status === 401 &&
     authenticated &&
     (options.retryUnauthorized ?? true) &&
-    await refreshSingleFlight()
+    await refreshSingleFlight(generation)
   ) {
     const retried = await transport(path, init, { authenticated: true, retryUnauthorized: false });
     if (retried.status === 401) invalidateSession(generation);
