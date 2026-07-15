@@ -22,11 +22,16 @@ import {
 } from "@/lib/importNormalize";
 import { DeviceAuthPanel } from "@/pages/DeviceAuthPanel";
 
+export type ImportWorkspaceMode = "oauth" | "file";
+
 type ImportPageProps = {
   embedded?: boolean;
+  mode?: ImportWorkspaceMode;
 };
 
-export function ImportPage({ embedded = false }: ImportPageProps) {
+export function ImportPage({ embedded = false, mode }: ImportPageProps) {
+  const showOauth = !mode || mode === "oauth";
+  const showFile = !mode || mode === "file";
   const [raw, setRaw] = useState("");
   const [fileMeta, setFileMeta] = useState("数组 / {accounts:[]} / auth.json map");
   const [output, setOutput] = useState("等待操作");
@@ -97,104 +102,108 @@ export function ImportPage({ embedded = false }: ImportPageProps) {
               JSON 批量导入，或使用 Build Device OAuth 单账号授权入库。
             </p>
           </div>
-          <Badge>{fileMeta}</Badge>
+          {showFile ? <Badge>{fileMeta}</Badge> : null}
         </div>
-      ) : (
+      ) : showFile ? (
         <div className="flex justify-end">
           <Badge>{fileMeta}</Badge>
         </div>
-      )}
+      ) : null}
 
-      <DeviceAuthPanel />
+      {showOauth ? <DeviceAuthPanel /> : null}
 
-      <Card className="p-4 sm:p-5">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary">
-              <FileJson className="h-4 w-4" />
-            </div>
-            <div>
-              <CardTitle>凭证文件</CardTitle>
-              <CardDescription className="mt-1">支持数组、accounts 对象及 auth.json map</CardDescription>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-input bg-background px-3 text-xs font-medium hover:bg-secondary">
-              <Upload className="h-3.5 w-3.5" />
-              选择文件
-              <input
-                type="file"
-                accept=".json,.txt,application/json"
-                className="sr-only"
-                onChange={(e) => void onFile(e)}
-              />
-            </label>
-            <Button variant="outline" disabled={!!busy || !raw.trim()} onClick={() => void run(true)}>
-              {busy === "preview" ? "预览中…" : "预览"}
-            </Button>
-            <Button
-              size="sm"
-              disabled={!!busy || !raw.trim()}
-              onClick={() => {
-                if (window.confirm("确认导入？")) void run(false);
-              }}
-            >
-              {busy === "import" ? "导入中…" : "导入"}
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setRaw("");
-                setOutput("等待操作");
-                setLast(null);
-                setError(null);
-              }}
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              清空
-            </Button>
-          </div>
-        </div>
-        {parsed?.summary ? (
-          <p className="mt-4 text-xs text-muted-foreground">
-            已解析 {parsed.summary.total} 条，其中 {parsed.summary.withRefresh} 条包含 refresh token
-          </p>
-        ) : null}
-        {parsed?.error ? <p className="text-sm text-destructive">{parsed.error}</p> : null}
-        {error ? <p className="text-sm text-destructive">{error}</p> : null}
-      </Card>
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="p-4 sm:p-5">
-          <CardHeader>
-            <CardTitle>输入</CardTitle>
-          </CardHeader>
-          <CardContent className="px-0 pb-0">
-            <textarea
-              className="mono min-h-[420px] w-full resize-y rounded-md border border-input bg-secondary/40 p-3 text-xs leading-5 outline-none focus:bg-background focus:ring-1 focus:ring-ring"
-              value={raw}
-              onChange={(e) => setRaw(e.target.value)}
-              spellCheck={false}
-            />
-          </CardContent>
-        </Card>
-        <Card className="p-4 sm:p-5">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle>结果</CardTitle>
-            {last ? (
-              <div className="flex gap-1">
-                <Badge tone="success">+{last.added}</Badge>
-                <Badge tone="warning">~{last.updated}</Badge>
-                <Badge tone={last.invalid ? "danger" : "success"}>!{last.invalid}</Badge>
+      {showFile ? (
+        <>
+          <Card className="p-4 sm:p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary">
+                  <FileJson className="h-4 w-4" />
+                </div>
+                <div>
+                  <CardTitle>凭证文件</CardTitle>
+                  <CardDescription className="mt-1">支持数组、accounts 对象及 auth.json map</CardDescription>
+                </div>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-input bg-background px-3 text-xs font-medium hover:bg-secondary">
+                  <Upload className="h-3.5 w-3.5" />
+                  选择文件
+                  <input
+                    type="file"
+                    accept=".json,.txt,application/json"
+                    className="sr-only"
+                    onChange={(e) => void onFile(e)}
+                  />
+                </label>
+                <Button variant="outline" disabled={!!busy || !raw.trim()} onClick={() => void run(true)}>
+                  {busy === "preview" ? "预览中…" : "预览"}
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!!busy || !raw.trim()}
+                  onClick={() => {
+                    if (window.confirm("确认导入？")) void run(false);
+                  }}
+                >
+                  {busy === "import" ? "导入中…" : "导入"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setRaw("");
+                    setOutput("等待操作");
+                    setLast(null);
+                    setError(null);
+                  }}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  清空
+                </Button>
+              </div>
+            </div>
+            {parsed?.summary ? (
+              <p className="mt-4 text-xs text-muted-foreground">
+                已解析 {parsed.summary.total} 条，其中 {parsed.summary.withRefresh} 条包含 refresh token
+              </p>
             ) : null}
-          </CardHeader>
-          <CardContent className="px-0 pb-0">
-            <pre className="mono max-h-[462px] min-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-secondary/55 p-3 text-xs leading-5">
-              {output}
-            </pre>
-          </CardContent>
-        </Card>
-      </div>
+            {parsed?.error ? <p className="text-sm text-destructive">{parsed.error}</p> : null}
+            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          </Card>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card className="p-4 sm:p-5">
+              <CardHeader>
+                <CardTitle>输入</CardTitle>
+              </CardHeader>
+              <CardContent className="px-0 pb-0">
+                <textarea
+                  className="mono min-h-[420px] w-full resize-y rounded-md border border-input bg-secondary/40 p-3 text-xs leading-5 outline-none focus:bg-background focus:ring-1 focus:ring-ring"
+                  value={raw}
+                  onChange={(e) => setRaw(e.target.value)}
+                  spellCheck={false}
+                />
+              </CardContent>
+            </Card>
+            <Card className="p-4 sm:p-5">
+              <CardHeader className="flex-row items-center justify-between space-y-0">
+                <CardTitle>结果</CardTitle>
+                {last ? (
+                  <div className="flex gap-1">
+                    <Badge tone="success">+{last.added}</Badge>
+                    <Badge tone="warning">~{last.updated}</Badge>
+                    <Badge tone={last.invalid ? "danger" : "success"}>!{last.invalid}</Badge>
+                  </div>
+                ) : null}
+              </CardHeader>
+              <CardContent className="px-0 pb-0">
+                <pre className="mono max-h-[462px] min-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-secondary/55 p-3 text-xs leading-5">
+                  {output}
+                </pre>
+              </CardContent>
+            </Card>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

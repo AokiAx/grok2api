@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
   Download,
+  FileJson,
   Gauge,
   KeyRound,
   RefreshCw,
@@ -27,7 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
 import { formatAdaptiveRatio } from "@/lib/formatNumber";
-import { ImportPage } from "@/pages/ImportPage";
+import { ImportPage, type ImportWorkspaceMode } from "@/pages/ImportPage";
 
 function formatDate(value?: string) {
   if (!value) return "—";
@@ -40,9 +41,15 @@ function quotaText(item: PublicAccount) {
 }
 
 type AccountsTab = "list" | "import";
+type ImportAction = ImportWorkspaceMode;
 
 export function AccountsPage() {
   const [tab, setTab] = useState<AccountsTab>("list");
+  const [importMode, setImportMode] = useState<ImportAction>("file");
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const importMenuRef = useRef<HTMLDivElement | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
   const [pool, setPool] = useState("all");
   const [qDraft, setQDraft] = useState("");
   const [q, setQ] = useState("");
@@ -59,6 +66,53 @@ export function AccountsPage() {
   const [events, setEvents] = useState<AccountEvent[]>([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [maintenanceBusy, setMaintenanceBusy] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    if (!importMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!importMenuRef.current?.contains(event.target as Node)) {
+        setImportMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImportMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [importMenuOpen]);
+
+  async function exportAllAccounts() {
+    setImportMenuOpen(false);
+    if (!window.confirm("导出全部账号凭据？文件包含 access/refresh token，请妥善保管。")) {
+      return;
+    }
+    setExportBusy(true);
+    setExportProgress({ done: 0, total: 0 });
+    setError(null);
+    try {
+      const result = await adminApi.exportAllAccounts((done, total) => {
+        setExportProgress({ done, total });
+      });
+      if (result.failed > 0) {
+        setError(`已导出 ${result.exported}/${result.total}，失败 ${result.failed}`);
+      }
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "导出全部账号失败");
+    } finally {
+      setExportBusy(false);
+      setExportProgress(null);
+    }
+  }
+
+  function openImportWorkspace(mode: ImportAction) {
+    setImportMode(mode);
+    setTab("import");
+    setImportMenuOpen(false);
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -204,7 +258,9 @@ export function AccountsPage() {
           <h1 className="text-xl font-medium tracking-tight">账号</h1>
           <p className="mt-1 text-xs text-muted-foreground">
             {tab === "import"
-              ? "JSON 批量导入与 Build Device OAuth 入库"
+              ? importMode === "oauth"
+                ? "Build Device OAuth 单账号授权入库"
+                : "JSON 批量导入账号文件"
               : (
                 <>
                   共 <span className="tabular-nums">{data?.total ?? "—"}</span> 条
@@ -214,31 +270,75 @@ export function AccountsPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex shrink-0 rounded-full bg-secondary/60 p-0.5" aria-label="账号分区">
-            <button
-              type="button"
-              className={cn(
-                "h-7 rounded-full px-3 text-[11px] font-medium text-muted-foreground transition-colors",
-                tab === "list" && "bg-primary text-primary-foreground",
-              )}
-              onClick={() => setTab("list")}
+          {tab === "import" ? (
+            <Button variant="outline" size="sm" onClick={() => setTab("list")}>
+              返回列表
+            </Button>
+          ) : null}
+          <div className="relative" ref={importMenuRef}>
+            <Button
+              variant={tab === "import" ? "default" : "outline"}
+              size="sm"
+              disabled={exportBusy}
+              aria-label="导入与导出"
+              aria-haspopup="menu"
+              aria-expanded={importMenuOpen}
+              onClick={() => setImportMenuOpen((open) => !open)}
             >
-              列表
-            </button>
-            <button
-              type="button"
-              className={cn(
-                "inline-flex h-7 items-center gap-1 rounded-full px-3 text-[11px] font-medium text-muted-foreground transition-colors",
-                tab === "import" && "bg-primary text-primary-foreground",
-              )}
-              onClick={() => setTab("import")}
-            >
-              <Upload className="h-3 w-3" />
-              导入
-            </button>
+              <Upload className="h-3.5 w-3.5" />
+              {exportBusy
+                ? exportProgress && exportProgress.total > 0
+                  ? `导出中 ${exportProgress.done}/${exportProgress.total}`
+                  : "导出中…"
+                : "导入"}
+            </Button>
+            {importMenuOpen ? (
+              <div
+                role="menu"
+                aria-label="导入与导出"
+                className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-xl border border-border/80 bg-background p-1 shadow-lg"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-secondary/70"
+                  onClick={() => openImportWorkspace("oauth")}
+                >
+                  <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>
+                    <span className="block font-medium text-foreground">Device OAuth</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">浏览器授权单账号入库</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-secondary/70"
+                  onClick={() => openImportWorkspace("file")}
+                >
+                  <FileJson className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>
+                    <span className="block font-medium text-foreground">导入账号文件</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">JSON / auth.json 批量导入</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-secondary/70"
+                  onClick={() => void exportAllAccounts()}
+                >
+                  <Download className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>
+                    <span className="block font-medium text-foreground">导出所有账号</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">打包下载全部凭据 JSON</span>
+                  </span>
+                </button>
+              </div>
+            ) : null}
           </div>
           {tab === "list" ? (
-            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading || exportBusy}>
               <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
               {loading ? "刷新中" : "刷新"}
             </Button>
@@ -246,7 +346,7 @@ export function AccountsPage() {
         </div>
       </header>
 
-      {tab === "import" ? <ImportPage embedded /> : null}
+      {tab === "import" ? <ImportPage embedded mode={importMode} /> : null}
 
       {tab === "list" ? (
       <>

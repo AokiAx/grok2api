@@ -200,7 +200,7 @@ async function request<T>(
   return parseEnvelope<T>(await transport(path, init, options));
 }
 
-async function downloadAttachment(path: string, fallbackName: string): Promise<void> {
+async function readDownloadResponse(path: string): Promise<Response> {
   const response = await transport(path);
   if (!response.ok) {
     const text = await response.text();
@@ -222,8 +222,10 @@ async function downloadAttachment(path: string, fallbackName: string): Promise<v
       );
     }
   }
+  return response;
+}
 
-  const disposition = response.headers.get("Content-Disposition") || "";
+function filenameFromDisposition(disposition: string, fallbackName: string): string {
   const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
   const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1];
   const plainName = disposition.match(/filename=([^;]+)/i)?.[1]?.trim();
@@ -235,7 +237,11 @@ async function downloadAttachment(path: string, fallbackName: string): Promise<v
       filename = encodedName;
     }
   }
-  const objectURL = URL.createObjectURL(await response.blob());
+  return filename;
+}
+
+function triggerBrowserDownload(blob: Blob, filename: string): void {
+  const objectURL = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = objectURL;
   anchor.download = filename;
@@ -246,6 +252,25 @@ async function downloadAttachment(path: string, fallbackName: string): Promise<v
   } finally {
     anchor.remove();
     URL.revokeObjectURL(objectURL);
+  }
+}
+
+async function downloadAttachment(path: string, fallbackName: string): Promise<void> {
+  const response = await readDownloadResponse(path);
+  const filename = filenameFromDisposition(response.headers.get("Content-Disposition") || "", fallbackName);
+  triggerBrowserDownload(await response.blob(), filename);
+}
+
+/** Credential export endpoint returns raw JSON (not admin envelope). */
+async function fetchCredentialExport(id: string): Promise<CredentialExport> {
+  const response = await readDownloadResponse(
+    `/api/admin/v1/accounts/${encodeURIComponent(id)}/credentials/export`,
+  );
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as CredentialExport;
+  } catch {
+    throw new AdminApiError(response.status, "invalid_json", text || "Invalid credential export");
   }
 }
 
@@ -664,6 +689,56 @@ export const adminApi = {
       `/api/admin/v1/accounts/${encodeURIComponent(id)}/credentials/export`,
       `grok2api-account-${id}.json`,
     ),
+  fetchCredentialExport: (id: string) => fetchCredentialExport(id),
+  exportAllAccounts: async (
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<ExportAllResult> => {
+    const ids: string[] = [];
+    let page = 1;
+    let totalPages = 1;
+    while (page <= totalPages) {
+      const batch = await adminApi.accounts({ page, page_size: 100 });
+      totalPages = Math.max(1, batch.total_pages || 1);
+      for (const item of batch.accounts || []) {
+        if (item.id) ids.push(item.id);
+      }
+      page += 1;
+    }
+
+    const accounts: CredentialExport[] = [];
+    const failures: Array<{ id: string; message: string }> = [];
+    for (let index = 0; index < ids.length; index += 1) {
+      const id = ids[index];
+      try {
+        accounts.push(await fetchCredentialExport(id));
+      } catch (error) {
+        failures.push({
+          id,
+          message: error instanceof AdminApiError ? error.message : String(error),
+        });
+      }
+      onProgress?.(index + 1, ids.length);
+    }
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const payload = {
+      exported_at: new Date().toISOString(),
+      count: accounts.length,
+      failed: failures.length,
+      failures,
+      accounts,
+    };
+    triggerBrowserDownload(
+      new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+      `grok2api-accounts-export-${stamp}.json`,
+    );
+    return {
+      total: ids.length,
+      exported: accounts.length,
+      failed: failures.length,
+      failures,
+    };
+  },
   importPreview: (accounts: ImportAccount[]) =>
     request<ImportResult>("/api/admin/v1/accounts/import/preview", {
       method: "POST",
@@ -749,6 +824,26 @@ export type ImportAccount = {
   oidc_client_id?: string;
   user_id?: string;
   team_id?: string;
+};
+
+/** Raw credential payload from GET .../credentials/export (not admin envelope). */
+export type CredentialExport = {
+  id: string;
+  key: string;
+  refresh_token?: string;
+  expires_at?: string;
+  email?: string;
+  oidc_issuer?: string;
+  oidc_client_id?: string;
+  user_id?: string;
+  team_id?: string;
+};
+
+export type ExportAllResult = {
+  total: number;
+  exported: number;
+  failed: number;
+  failures: Array<{ id: string; message: string }>;
 };
 
 export type ImportItem = {

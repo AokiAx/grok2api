@@ -12,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   refreshCredential: vi.fn(),
   refreshQuota: vi.fn(),
   exportCredential: vi.fn(),
+  exportAllAccounts: vi.fn(),
 }));
 
 vi.mock("@/api/client", async (importOriginal) => {
@@ -94,6 +95,7 @@ describe("AccountsPage batch administration", () => {
     apiMocks.refreshCredential.mockResolvedValue({ id: "a1", pool: "ready" });
     apiMocks.refreshQuota.mockResolvedValue({ account_id: "a1", actual: 1, limit: 100, observed: true });
     apiMocks.exportCredential.mockResolvedValue(undefined);
+    apiMocks.exportAllAccounts.mockResolvedValue({ total: 2, exported: 2, failed: 0, failures: [] });
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -136,5 +138,28 @@ describe("AccountsPage batch administration", () => {
     expect(apiMocks.refreshCredential).toHaveBeenCalledWith("a1");
     expect(apiMocks.refreshQuota).toHaveBeenCalledWith("a1");
     expect(apiMocks.exportCredential).toHaveBeenCalledWith("a1");
+  });
+
+  it("opens import menu actions for oauth, file import, and bulk export", async () => {
+    const user = userEvent.setup();
+    render(<AccountsPage />);
+
+    await screen.findByText("a1@example.test");
+    await user.click(screen.getByRole("button", { name: "导入与导出" }));
+    expect(screen.getByRole("menuitem", { name: /Device OAuth/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /导入账号文件/ })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /导出所有账号/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: /Device OAuth/i }));
+    expect(await screen.findByText("Build Device OAuth")).toBeInTheDocument();
+    expect(screen.queryByText("凭证文件")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "导入与导出" }));
+    await user.click(screen.getByRole("menuitem", { name: /导入账号文件/ }));
+    expect(await screen.findByText("凭证文件")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "导入与导出" }));
+    await user.click(screen.getByRole("menuitem", { name: /导出所有账号/ }));
+    expect(apiMocks.exportAllAccounts).toHaveBeenCalled();
   });
 });
