@@ -22,6 +22,8 @@ type fakeRepo struct {
 	getSessionErr        error
 	rotateCalls          int
 	revokeFamilyCalls    int
+	ipFailureCount       int
+	ipOldestFailure      time.Time
 }
 
 func (f *fakeRepo) CountAdminUsers(context.Context) (int, error)               { return len(f.users), nil }
@@ -106,6 +108,34 @@ func (f *fakeRepo) RecordAdminLoginAttempt(_ context.Context, a adminauth.LoginA
 }
 func (f *fakeRepo) CountRecentAdminLoginFailures(_ context.Context, _ string, _ string, _ time.Time) (int, error) {
 	return len(f.attempts), nil
+}
+func (f *fakeRepo) CountRecentAdminLoginFailuresBySourceIP(_ context.Context, _ string, _ time.Time) (int, error) {
+	return f.ipFailureCount, nil
+}
+func (f *fakeRepo) OldestRecentAdminLoginFailureBySourceIP(_ context.Context, _ string, _ time.Time) (time.Time, bool, error) {
+	return f.ipOldestFailure, !f.ipOldestFailure.IsZero(), nil
+}
+
+func TestLoginRateLimitCannotBeBypassedByRotatingUsername(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
+	cred, _ := security.HashAdminPassword("secret", 4)
+	user, _ := adminauth.NewAdminUser("u1", "admin", cred, now)
+	repo := &fakeRepo{
+		users: map[string]adminauth.AdminUser{user.ID: user}, sessions: map[string]adminauth.Session{},
+		ipFailureCount: 5, ipOldestFailure: now.Add(-4 * time.Minute),
+	}
+	svc := NewService(repo, WithClock(func() time.Time { return now }))
+	_, err := svc.Login(context.Background(), LoginInput{Username: "never-used-name", Password: "bad", SourceIP: "10.0.0.1"})
+	var limited *LoginRateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("login err=%v; want rate limit", err)
+	}
+	if limited.RetryAfter != 11*time.Minute {
+		t.Fatalf("retry after=%v", limited.RetryAfter)
+	}
+	if len(repo.attempts) != 0 {
+		t.Fatalf("rate-limited request persisted an extra attempt: %d", len(repo.attempts))
+	}
 }
 
 func TestLoginPersistsSessionAndSuccessAtomically(t *testing.T) {

@@ -273,6 +273,32 @@ func TestSQLiteLoginFailureTuplePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestSQLiteLoginFailureSourceIPBucketPersistsAcrossReopenAndUsernameRotation(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "login-ip-reopen.db")
+	repo := openSecurityRepo(t, ctx, database)
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	for index, username := range []string{"one", "two", "three", "four", "five"} {
+		attempt := mustLoginAttempt(t, username, "10.0.0.9", false, "invalid_credentials", now.Add(time.Duration(index)*time.Minute))
+		if err := repo.RecordAdminLoginAttempt(ctx, attempt); err != nil {
+			t.Fatalf("record attempt: %v", err)
+		}
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repo = openSecurityRepo(t, ctx, database)
+	defer repo.Close()
+	count, err := repo.CountRecentAdminLoginFailuresBySourceIP(ctx, "10.0.0.9", now.Add(-15*time.Minute))
+	if err != nil || count != 5 {
+		t.Fatalf("source IP failures=%d err=%v", count, err)
+	}
+	oldest, found, err := repo.OldestRecentAdminLoginFailureBySourceIP(ctx, "10.0.0.9", now.Add(-15*time.Minute))
+	if err != nil || !found || !oldest.Equal(now) {
+		t.Fatalf("oldest=%v found=%v err=%v", oldest, found, err)
+	}
+}
+
 func TestSQLiteLoginSuccessTransactionRollsBackAttemptWhenSessionInsertFails(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "login-atomic.db")
