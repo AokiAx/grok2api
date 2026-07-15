@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -650,6 +651,69 @@ func TestCompatibilityRouteErrorBranches(t *testing.T) {
 			t.Fatalf("status = %d", recorder.Code)
 		}
 	})
+}
+
+func TestUnexpectedGatewayErrorsDoNotLeakInternalDetails(t *testing.T) {
+	server := api.NewServer(
+		&fakeGateway{requestErr: errors.New(`dial tcp 10.0.0.8:443: secret upstream path C:\data\grok2api.db`)},
+		fakeStatus{},
+		"",
+	)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/billing", nil))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, leaked := range []string{"10.0.0.8", "secret upstream path", "grok2api.db"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("response leaked %q: %s", leaked, body)
+		}
+	}
+	if !strings.Contains(body, `"code":"502"`) {
+		t.Fatalf("missing stable error code: %s", body)
+	}
+}
+
+func TestUpstreamResponseHeadersUseCompatibilityAllowlist(t *testing.T) {
+	gateway := &fakeGateway{requestResult: service.ChatResult{
+		Status: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":                 []string{"application/json"},
+			"Cache-Control":                []string{"no-cache"},
+			"X-RateLimit-Limit-Tokens":     []string{"1000"},
+			"X-RateLimit-Remaining-Tokens": []string{"900"},
+			"X-Grok-Request-Id":            []string{"req_safe"},
+			"Set-Cookie":                   []string{"upstream_session=secret"},
+			"Connection":                   []string{"keep-alive, X-Remove-Me"},
+			"X-Remove-Me":                  []string{"secret"},
+			"Transfer-Encoding":            []string{"chunked"},
+			"Content-Length":               []string{"999999"},
+			"X-Upstream-Internal":          []string{"10.0.0.8"},
+		},
+		Body: []byte(`{"ok":true}`),
+	}}
+	server := api.NewServer(gateway, fakeStatus{}, "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/billing", nil))
+
+	for name, want := range map[string]string{
+		"Content-Type":                 "application/json",
+		"Cache-Control":                "no-cache",
+		"X-RateLimit-Limit-Tokens":     "1000",
+		"X-RateLimit-Remaining-Tokens": "900",
+		"X-Grok-Request-Id":            "req_safe",
+	} {
+		if got := recorder.Header().Get(name); got != want {
+			t.Fatalf("%s=%q want=%q headers=%v", name, got, want, recorder.Header())
+		}
+	}
+	for _, name := range []string{"Set-Cookie", "Connection", "X-Remove-Me", "Transfer-Encoding", "Content-Length", "X-Upstream-Internal"} {
+		if got := recorder.Header().Get(name); got != "" {
+			t.Fatalf("unsafe upstream header %s=%q", name, got)
+		}
+	}
 }
 
 func TestModelsEnrichesKnownCLIMetadata(t *testing.T) {

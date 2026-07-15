@@ -24,6 +24,7 @@ type fakeAdmin struct {
 	lastQuery           admin.ListAccountsQuery
 	refreshedCredential string
 	refreshedQuota      string
+	statsErr            error
 }
 
 func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (admin.ListAccountsPage, error) {
@@ -73,6 +74,9 @@ func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (
 }
 
 func (a *fakeAdmin) Stats(context.Context) (admin.AccountStats, error) {
+	if a.statsErr != nil {
+		return admin.AccountStats{}, a.statsErr
+	}
 	now := time.Now().UTC()
 	soon := now.Add(time.Hour)
 	stats := admin.AccountStats{

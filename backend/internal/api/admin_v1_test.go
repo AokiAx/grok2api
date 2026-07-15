@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,33 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/api"
 )
+
+func TestAdminInternalErrorsKeepStableCodeWithoutLeakingDetails(t *testing.T) {
+	adminService := &fakeAdmin{statsErr: errors.New(`sqlite read C:\data\grok2api.db failed with secret`)}
+	server := api.NewServer(
+		&fakeGateway{},
+		fakeStatus{},
+		"",
+		api.WithAdmin(adminService, "panel-secret"),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/dashboard", nil)
+	request.Header.Set("Authorization", "Bearer panel-secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"code":"stats_failed"`) {
+		t.Fatalf("missing stable code: %s", body)
+	}
+	for _, leaked := range []string{"sqlite read", "grok2api.db", "secret"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("response leaked %q: %s", leaked, body)
+		}
+	}
+}
 
 func TestAdminV1EnvelopeAndLegacyAlias(t *testing.T) {
 	adminService := &fakeAdmin{accounts: []account.Account{
