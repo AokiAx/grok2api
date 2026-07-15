@@ -1,9 +1,9 @@
 package sqlite_test
 
 import (
-	"database/sql"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"sync/atomic"

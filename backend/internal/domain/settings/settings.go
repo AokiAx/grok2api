@@ -54,7 +54,6 @@ type Proxy struct {
 	Note          string `json:"note,omitempty"`
 }
 
-
 // DeviceAuth is OIDC device-flow configuration for Build Device OAuth import.
 // Values are operator-editable defaults; secrets never live here.
 type DeviceAuth struct {

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/api"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 )
 
 func TestAdminInternalErrorsKeepStableCodeWithoutLeakingDetails(t *testing.T) {

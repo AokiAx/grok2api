@@ -74,9 +74,9 @@ type SeriesPoint struct {
 
 // NamedCount is a ranked aggregation row.
 type NamedCount struct {
-	Name    string
-	Count   int64
-	Tokens  int64
+	Name   string
+	Count  int64
+	Tokens int64
 }
 
 // RecentFailure is a compact failure row for dashboards.

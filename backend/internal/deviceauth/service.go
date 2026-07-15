@@ -91,7 +91,7 @@ func NewService(
 		accounts:  accounts,
 		sink:      sink,
 		now:       time.Now,
-		issuer:   "https://auth.x.ai",
+		issuer:    "https://auth.x.ai",
 		// OAuth public client used by official Grok CLI device flow.
 		// This is NOT the API header x-grok-client-identifier ("grok-cli").
 		clientID: "b1a00492-073a-47ea-816f-4c329264a828",

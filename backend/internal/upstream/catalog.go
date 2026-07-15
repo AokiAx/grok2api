@@ -3,7 +3,7 @@ package upstream
 import "strings"
 
 type ModelInfo struct {
-	ID                      string   `json:"id"`
+	ID string `json:"id"`
 	// UpstreamID is the provider-facing model id. Empty means ID is already upstream.
 	UpstreamID              string   `json:"upstream_id,omitempty"`
 	Name                    string   `json:"name,omitempty"`

@@ -141,8 +141,7 @@ func settingsToMap(doc settings.Document) map[string]any {
 		"audit":       doc.Audit,
 		"proxy":       doc.Proxy,
 		"client_keys": doc.ClientKeys,
-		"device_auth":  doc.DeviceAuth,
+		"device_auth": doc.DeviceAuth,
 		"debug_trace": doc.DebugTrace,
 	}
 }
-

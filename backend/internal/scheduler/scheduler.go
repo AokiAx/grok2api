@@ -104,17 +104,17 @@ const (
 )
 
 type Scheduler struct {
-	mu        sync.Mutex
-	accounts  map[string]*account.Account
-	ready     []string
-	notify    chan struct{}
-	revision  uint64
-	sticky    map[string]stickyEntry
-	stickyTTL time.Duration
-	stickyOn  bool
+	mu         sync.Mutex
+	accounts   map[string]*account.Account
+	ready      []string
+	notify     chan struct{}
+	revision   uint64
+	sticky     map[string]stickyEntry
+	stickyTTL  time.Duration
+	stickyOn   bool
 	quotaRetry time.Duration
-	strategy  Strategy
-	rrCursor  uint64
+	strategy   Strategy
+	rrCursor   uint64
 	// failStreak tracks consecutive account-scoped failures for exponential cooldown.
 	// Process-local only; resets on success or process restart.
 	failStreak map[string]int

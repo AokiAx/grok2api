@@ -505,7 +505,6 @@ func TestRefreshTransientStatusIsNotPermanent(t *testing.T) {
 	}
 }
 
-
 func TestConfigureProxyRoutesHTTPClient(t *testing.T) {
 	var sawProxy atomic.Bool
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

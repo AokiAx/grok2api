@@ -648,7 +648,6 @@ func runExport(
 	return nil
 }
 
-
 // resolveOutboundProxy picks managed settings when enabled; otherwise bootstrap env/file proxy.
 // Managed enabled=false always forces direct (operator explicit). Managed enabled=true uses managed URL.
 // When managed is nil or managed has never enabled proxy and URL empty, bootstrap is used.

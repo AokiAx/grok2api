@@ -99,7 +99,6 @@ func WithPreferResponses(enabled bool) Option {
 	}
 }
 
-
 // ProxyRuntime reports live outbound proxy configuration.
 type ProxyRuntime interface {
 	ProxyRuntimeStatus() (enabled bool, proxyURL string)
