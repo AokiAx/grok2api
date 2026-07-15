@@ -110,3 +110,15 @@ active, max_active, has_refresh_token
 2. Keep the access token in memory only; use the HttpOnly refresh cookie to restore/rotate the session
 3. Prefer `/api/admin/v1/*` only; do not depend on legacy paths
 4. The Docker image serves `/app/frontend/dist` at `/`; bare Go development uses Vite unless `frontend.static_path` is configured
+
+## OpenAPI
+
+Contract source: [`docs/openapi.yaml`](openapi.yaml)
+
+| Path | Notes |
+|------|-------|
+| `GET /openapi.json` | OpenAPI 3 document (JSON) |
+| `GET /openapi.yaml` | Same document as YAML |
+| `GET /docs` | Embedded Swagger UI (CDN) |
+
+The binary embeds a copy under `backend/internal/api/openapi/`. Keep `docs/openapi.yaml` and the embedded copy in sync when changing the contract. Route contract tests assert required paths exist both in the document and on the live mux.

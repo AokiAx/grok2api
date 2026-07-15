@@ -14,6 +14,7 @@ import (
 
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	authservice "github.com/AokiAx/grok2api/backend/internal/adminauth"
+	"github.com/AokiAx/grok2api/backend/internal/api/openapi"
 	"github.com/AokiAx/grok2api/backend/internal/bridge"
 	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/compat"
@@ -235,6 +236,7 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	mux.HandleFunc("GET /health", server.health)
 	mux.HandleFunc("GET /healthz", server.health)
 	mux.HandleFunc("GET /readyz", server.readyz)
+	openapi.Mount(mux)
 	modelsHandler := http.Handler(http.HandlerFunc(server.models))
 	billingHandler := http.Handler(http.HandlerFunc(server.billing))
 	chatHandler := http.Handler(http.HandlerFunc(server.chat))

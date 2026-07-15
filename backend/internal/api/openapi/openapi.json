@@ -1,0 +1,1405 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Grok2API",
+    "version": "1.0.0-go",
+    "description": "Grok CLI credential gateway. Inference endpoints use OpenAI/Anthropic-shaped\nerrors. Admin endpoints use the `{ok,data,error}` envelope.\n"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "health"
+    },
+    {
+      "name": "inference"
+    },
+    {
+      "name": "admin-auth"
+    },
+    {
+      "name": "admin"
+    },
+    {
+      "name": "docs"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Process is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness alias",
+        "operationId": "getHealthz",
+        "responses": {
+          "200": {
+            "description": "Process is up"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness",
+        "operationId": "getReadyz",
+        "responses": {
+          "200": {
+            "description": "Ready for traffic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ready"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "List models",
+        "operationId": "listModels",
+        "security": [
+          {
+            "ClientBearer": []
+          },
+          {
+            "ClientAPIKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAI-style model list"
+          },
+          "401": {
+            "$ref": "#/components/responses/OpenAIUnauthorized"
+          }
+        }
+      }
+    },
+    "/v1/billing": {
+      "get": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Billing probe",
+        "operationId": "getBilling",
+        "security": [
+          {
+            "ClientBearer": []
+          },
+          {
+            "ClientAPIKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Billing payload"
+          },
+          "401": {
+            "$ref": "#/components/responses/OpenAIUnauthorized"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Chat Completions",
+        "operationId": "createChatCompletion",
+        "security": [
+          {
+            "ClientBearer": []
+          },
+          {
+            "ClientAPIKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion or SSE stream"
+          },
+          "401": {
+            "$ref": "#/components/responses/OpenAIUnauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/OpenAIRateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/OpenAIUnavailable"
+          }
+        }
+      }
+    },
+    "/chat/completions": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Chat Completions alias",
+        "operationId": "createChatCompletionAlias",
+        "security": [
+          {
+            "ClientBearer": []
+          },
+          {
+            "ClientAPIKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat completion or SSE stream"
+          }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "OpenAI Responses",
+        "operationId": "createResponse",
+        "security": [
+          {
+            "ClientBearer": []
+          },
+          {
+            "ClientAPIKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Responses payload or SSE stream"
+          },
+          "401": {
+            "$ref": "#/components/responses/OpenAIUnauthorized"
+          }
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Anthropic Messages",
+        "operationId": "createMessage",
+        "security": [
+          {
+            "ClientBearer": []
+          },
+          {
+            "ClientAPIKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Messages payload or SSE stream"
+          },
+          "401": {
+            "$ref": "#/components/responses/OpenAIUnauthorized"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "OpenAPI document (JSON)",
+        "operationId": "getOpenAPIJSON",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3 document"
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Embedded API documentation UI",
+        "operationId": "getDocs",
+        "responses": {
+          "200": {
+            "description": "HTML documentation page"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/system/meta": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Public admin meta",
+        "operationId": "adminMeta",
+        "responses": {
+          "200": {
+            "description": "Meta envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/auth/login": {
+      "post": {
+        "tags": [
+          "admin-auth"
+        ],
+        "summary": "Administrator login",
+        "operationId": "adminLogin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  },
+                  "remember": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Access token + sets refresh cookie"
+          },
+          "401": {
+            "description": "Invalid credentials"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "admin-auth"
+        ],
+        "summary": "Refresh administrator session",
+        "operationId": "adminRefresh",
+        "responses": {
+          "200": {
+            "description": "Rotated tokens"
+          },
+          "401": {
+            "description": "Invalid refresh session"
+          },
+          "409": {
+            "description": "Refresh conflict"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "admin-auth"
+        ],
+        "summary": "Logout administrator",
+        "operationId": "adminLogout",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session revoked"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/auth/me": {
+      "get": {
+        "tags": [
+          "admin-auth"
+        ],
+        "summary": "Current administrator",
+        "operationId": "adminMe",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity"
+          },
+          "401": {
+            "$ref": "#/components/responses/AdminUnauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/dashboard": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Dashboard analytics",
+        "operationId": "adminDashboard",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "period",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "24h",
+                "7d",
+                "30d"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dashboard payload"
+          },
+          "401": {
+            "$ref": "#/components/responses/AdminUnauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/pool": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Account pool status",
+        "operationId": "adminPool",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pool status"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/system": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "System info (no secrets)",
+        "operationId": "adminSystem",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "System info"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List accounts",
+        "operationId": "adminListAccounts",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pool",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account page"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/batch": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Batch account actions",
+        "operationId": "adminBatchAccounts",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ids",
+                  "action"
+                ],
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "enable",
+                      "disable",
+                      "recover",
+                      "delete"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch result"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get account",
+        "operationId": "adminGetAccount",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update account controls",
+        "operationId": "adminPatchAccount",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated account"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete account",
+        "operationId": "adminDeleteAccount",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}/recover": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Recover account",
+        "operationId": "adminRecoverAccount",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recovered account"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}/refresh-token": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Refresh account credential",
+        "operationId": "adminRefreshAccountToken",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refreshed account"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}/refresh-quota": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Refresh account quota",
+        "operationId": "adminRefreshAccountQuota",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Quota refresh result"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}/refresh-billing": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Refresh billing (unsupported for free pool)",
+        "operationId": "adminRefreshAccountBilling",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "Not implemented for free-tier accounts"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}/credentials/export": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Export account credentials",
+        "operationId": "adminExportAccountCredentials",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential export JSON"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/{id}/events": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Account state events timeline",
+        "operationId": "adminAccountEvents",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AccountID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event page"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/import/preview": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Import accounts (dry-run)",
+        "operationId": "adminImportPreview",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preview result"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/accounts/import": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Import accounts",
+        "operationId": "adminImport",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Import result"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/client-keys": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List client keys",
+        "operationId": "adminListClientKeys",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key page"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Create client key",
+        "operationId": "adminCreateClientKey",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created key (secret shown once)"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/client-keys/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get client key",
+        "operationId": "adminGetClientKey",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClientKeyID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key detail"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update client key policy",
+        "operationId": "adminPatchClientKey",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClientKeyID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated key"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/client-keys/{id}/revoke": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Revoke client key",
+        "operationId": "adminRevokeClientKey",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClientKeyID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/models": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List managed models",
+        "operationId": "adminListModels",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_disabled",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model list"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/models/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get model (id or alias)",
+        "operationId": "adminGetModel",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ModelID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Replace model",
+        "operationId": "adminPutModel",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ModelID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved model"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Patch model",
+        "operationId": "adminPatchModel",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ModelID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved model"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/settings": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get versioned settings",
+        "operationId": "adminGetSettings",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Settings document"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update settings (optimistic lock)",
+        "operationId": "adminPutSettings",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer"
+                  },
+                  "pool": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "timeouts": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "audit": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "proxy": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated settings"
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/settings/snapshots": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List settings snapshots",
+        "operationId": "adminListSettingsSnapshots",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshots"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/settings/snapshots/{revision}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get settings snapshot",
+        "operationId": "adminGetSettingsSnapshot",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "revision",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot"
+          }
+        }
+      }
+    },
+    "/api/admin/v1/settings/rollback": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Rollback settings to a snapshot as a new revision",
+        "operationId": "adminRollbackSettings",
+        "security": [
+          {
+            "AdminBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "target_revision"
+                ],
+                "properties": {
+                  "expected_revision": {
+                    "type": "integer"
+                  },
+                  "target_revision": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New settings revision"
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ClientBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Persisted client API key"
+      },
+      "ClientAPIKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key"
+      },
+      "AdminBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Short-lived administrator access token"
+      }
+    },
+    "parameters": {
+      "AccountID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ClientKeyID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ModelID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "OpenAIUnauthorized": {
+        "description": "Invalid client API key",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OpenAIError"
+            }
+          }
+        }
+      },
+      "OpenAIRateLimited": {
+        "description": "Rate limited / quota circuit",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "X-Grok2API-Pool-Reason": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OpenAIError"
+            }
+          }
+        }
+      },
+      "OpenAIUnavailable": {
+        "description": "Pool capacity unavailable",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OpenAIError"
+            }
+          }
+        }
+      },
+      "AdminUnauthorized": {
+        "description": "Administrator authentication required",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminEnvelope"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "account_pool": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Ready": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "process_ready": {
+            "type": "boolean"
+          },
+          "account_pool": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "OpenAIError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "param": {
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "AdminEnvelope": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "data": {
+            "nullable": true
+          },
+          "error": {
+            "nullable": true,
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

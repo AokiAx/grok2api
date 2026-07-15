@@ -1,0 +1,126 @@
+{
+  "/health": [
+    "GET"
+  ],
+  "/healthz": [
+    "GET"
+  ],
+  "/readyz": [
+    "GET"
+  ],
+  "/v1/models": [
+    "GET"
+  ],
+  "/v1/billing": [
+    "GET"
+  ],
+  "/v1/chat/completions": [
+    "POST"
+  ],
+  "/chat/completions": [
+    "POST"
+  ],
+  "/v1/responses": [
+    "POST"
+  ],
+  "/v1/messages": [
+    "POST"
+  ],
+  "/openapi.json": [
+    "GET"
+  ],
+  "/docs": [
+    "GET"
+  ],
+  "/api/admin/v1/system/meta": [
+    "GET"
+  ],
+  "/api/admin/v1/auth/login": [
+    "POST"
+  ],
+  "/api/admin/v1/auth/refresh": [
+    "POST"
+  ],
+  "/api/admin/v1/auth/logout": [
+    "POST"
+  ],
+  "/api/admin/v1/auth/me": [
+    "GET"
+  ],
+  "/api/admin/v1/dashboard": [
+    "GET"
+  ],
+  "/api/admin/v1/pool": [
+    "GET"
+  ],
+  "/api/admin/v1/system": [
+    "GET"
+  ],
+  "/api/admin/v1/accounts": [
+    "GET"
+  ],
+  "/api/admin/v1/accounts/batch": [
+    "POST"
+  ],
+  "/api/admin/v1/accounts/{id}": [
+    "DELETE",
+    "GET",
+    "PATCH"
+  ],
+  "/api/admin/v1/accounts/{id}/recover": [
+    "POST"
+  ],
+  "/api/admin/v1/accounts/{id}/refresh-token": [
+    "POST"
+  ],
+  "/api/admin/v1/accounts/{id}/refresh-quota": [
+    "POST"
+  ],
+  "/api/admin/v1/accounts/{id}/refresh-billing": [
+    "POST"
+  ],
+  "/api/admin/v1/accounts/{id}/credentials/export": [
+    "GET"
+  ],
+  "/api/admin/v1/accounts/{id}/events": [
+    "GET"
+  ],
+  "/api/admin/v1/accounts/import/preview": [
+    "POST"
+  ],
+  "/api/admin/v1/accounts/import": [
+    "POST"
+  ],
+  "/api/admin/v1/client-keys": [
+    "GET",
+    "POST"
+  ],
+  "/api/admin/v1/client-keys/{id}": [
+    "GET",
+    "PATCH"
+  ],
+  "/api/admin/v1/client-keys/{id}/revoke": [
+    "POST"
+  ],
+  "/api/admin/v1/models": [
+    "GET"
+  ],
+  "/api/admin/v1/models/{id}": [
+    "GET",
+    "PATCH",
+    "PUT"
+  ],
+  "/api/admin/v1/settings": [
+    "GET",
+    "PUT"
+  ],
+  "/api/admin/v1/settings/snapshots": [
+    "GET"
+  ],
+  "/api/admin/v1/settings/snapshots/{revision}": [
+    "GET"
+  ],
+  "/api/admin/v1/settings/rollback": [
+    "POST"
+  ]
+}

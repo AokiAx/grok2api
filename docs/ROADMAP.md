@@ -23,6 +23,7 @@
 | 请求审计 Dashboard | `request_audits`/`request_attempts`、窗口成功率/P95/Top 模型账号/最近失败、默认 30 天 prune |
 | 模型注册表 | SQLite `models` seed+managed、别名、启停；`/api/admin/v1/models`；运行时 Catalog facade |
 | 设置中心 | 版本化 pool/timeouts/audit/proxy；乐观锁 revision；快照与回滚；proxy 明确 not_wired |
+| OpenAPI /docs | `docs/openapi.yaml` 契约源；`/openapi.json` `/openapi.yaml` `/docs`；契约路径测试 |
 
 ---
 

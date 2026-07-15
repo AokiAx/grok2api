@@ -61,6 +61,7 @@ func rejectsSPAFallback(rel string) bool {
 		"panel", "manager",
 		"api", "admin", "v1", "chat",
 		"health", "healthz", "readyz",
+		"openapi.json", "openapi.yaml", "docs",
 	} {
 		if rel == prefix || strings.HasPrefix(rel, prefix+"/") {
 			return true
