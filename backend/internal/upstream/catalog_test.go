@@ -32,3 +32,19 @@ func TestCatalogListAndEnrich(t *testing.T) {
 		t.Fatalf("context=%#v", enriched["context_window"])
 	}
 }
+
+func TestResolveUpstream(t *testing.T) {
+	catalog := upstream.NewCatalog([]upstream.ModelInfo{
+		{ID: "grok-fast", UpstreamID: "grok-4.5", APIBackend: upstream.BackendResponses},
+		{ID: "alias-fast", UpstreamID: "grok-4.5", APIBackend: upstream.BackendResponses},
+	})
+	if got := catalog.ResolveUpstream("grok-fast"); got != "grok-4.5" {
+		t.Fatalf("public id: %q", got)
+	}
+	if got := catalog.ResolveUpstream("alias-fast"); got != "grok-4.5" {
+		t.Fatalf("alias: %q", got)
+	}
+	if got := catalog.ResolveUpstream("unknown-model"); got != "unknown-model" {
+		t.Fatalf("unknown: %q", got)
+	}
+}

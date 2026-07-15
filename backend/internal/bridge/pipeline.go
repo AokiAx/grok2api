@@ -15,6 +15,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -118,7 +119,15 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 	if p == nil || p.Gateway == nil {
 		return Result{}, badGateway("gateway unavailable", nil)
 	}
-	upstreamBody, warnings, err := compat.FinalizeResponsesUpstreamDetailed(req.Body, p.hintsFor(req.UpstreamModel))
+	body := req.Body
+	if req.UpstreamModel != "" && req.UpstreamModel != req.Model {
+		rewritten, err := rewriteJSONModel(body, req.UpstreamModel)
+		if err != nil {
+			return Result{}, invalidRequest("Invalid request payload", err)
+		}
+		body = rewritten
+	}
+	upstreamBody, warnings, err := compat.FinalizeResponsesUpstreamDetailed(body, p.hintsFor(req.UpstreamModel))
 	if err != nil {
 		return Result{}, invalidRequest("Invalid request payload", err)
 	}
@@ -140,9 +149,29 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 }
 
 func (p *Pipeline) executeNativeChat(ctx context.Context, req prepared) (Result, error) {
-	result, err := p.Gateway.Chat(ctx, req.ChatBody, req.ClientStream)
+	body := req.ChatBody
+	if req.UpstreamModel != "" && req.UpstreamModel != req.Model {
+		rewritten, err := rewriteJSONModel(body, req.UpstreamModel)
+		if err != nil {
+			return Result{}, invalidRequest("Invalid request payload", err)
+		}
+		body = rewritten
+	}
+	result, err := p.Gateway.Chat(ctx, body, req.ClientStream)
 	if err != nil {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func rewriteJSONModel(payload []byte, model string) ([]byte, error) {
+	if len(payload) == 0 || strings.TrimSpace(model) == "" {
+		return payload, nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, err
+	}
+	body["model"] = model
+	return json.Marshal(body)
 }

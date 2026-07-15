@@ -13,7 +13,7 @@ type prepared struct {
 	// Model is the client-facing model id used in Body and response echo.
 	Model string
 	Body  []byte
-	// UpstreamModel is the model used for catalog hints (same as Model; no aliases).
+	// UpstreamModel is the provider-facing model id (may differ via registry upstream_id).
 	UpstreamModel string
 	ClientStream  bool
 	Format        ClientFormat
@@ -24,6 +24,22 @@ type prepared struct {
 	// Anthropic thinking bridge (CPA-style signature / summary blocks).
 	ThinkingEnabled bool
 	ThinkingDisplay string
+}
+
+func (p *Pipeline) resolveUpstreamModel(public string) string {
+	public = strings.TrimSpace(public)
+	if public == "" {
+		return public
+	}
+	if p == nil || p.Catalog == nil {
+		return public
+	}
+	if resolver, ok := p.Catalog.(interface{ ResolveUpstream(string) string }); ok {
+		if upstream := strings.TrimSpace(resolver.ResolveUpstream(public)); upstream != "" {
+			return upstream
+		}
+	}
+	return public
 }
 
 func (p *Pipeline) useResponses(model string) bool {
@@ -62,7 +78,7 @@ func (p *Pipeline) prepareChat(body []byte) (prepared, error) {
 	}
 	return prepared{
 		Model:         model,
-		UpstreamModel: model,
+		UpstreamModel: p.resolveUpstreamModel(model),
 		Body:          responsesBody,
 		ClientStream:  stream,
 		Format:        FormatChat,
@@ -88,7 +104,7 @@ func (p *Pipeline) prepareAnthropic(body []byte, convID string) (prepared, error
 	thinkingEnabled, thinkingDisplay := compat.AnthropicThinkingBridge(body)
 	return prepared{
 		Model:           model,
-		UpstreamModel:   model,
+		UpstreamModel:   p.resolveUpstreamModel(model),
 		Body:            responsesBody,
 		ClientStream:    stream,
 		Format:          FormatAnthropic,
@@ -110,7 +126,7 @@ func (p *Pipeline) prepareResponses(body []byte) (prepared, error) {
 	}
 	return prepared{
 		Model:         model,
-		UpstreamModel: model,
+		UpstreamModel: p.resolveUpstreamModel(model),
 		Body:          responsesBody,
 		ClientStream:  stream,
 		Format:        FormatResponses,

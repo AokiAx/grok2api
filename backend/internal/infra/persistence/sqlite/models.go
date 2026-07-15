@@ -287,6 +287,7 @@ func CatalogFromRegistry(models []modelreg.Model) *upstream.Catalog {
 		}
 		info := upstream.ModelInfo{
 			ID:                      model.ID,
+			UpstreamID:              model.ResolveUpstream(),
 			Name:                    model.Name,
 			APIBackend:              model.APIBackend,
 			ContextWindow:           model.ContextWindow,
@@ -301,6 +302,7 @@ func CatalogFromRegistry(models []modelreg.Model) *upstream.Catalog {
 		for _, alias := range model.Aliases {
 			aliasInfo := info
 			aliasInfo.ID = alias
+			// Keep UpstreamID pointing at the provider id, not the public alias.
 			items = append(items, aliasInfo)
 		}
 	}

@@ -4,6 +4,8 @@ import "strings"
 
 type ModelInfo struct {
 	ID                      string   `json:"id"`
+	// UpstreamID is the provider-facing model id. Empty means ID is already upstream.
+	UpstreamID              string   `json:"upstream_id,omitempty"`
 	Name                    string   `json:"name,omitempty"`
 	APIBackend              string   `json:"api_backend"`
 	ContextWindow           int      `json:"context_window,omitempty"`
@@ -76,6 +78,21 @@ func (c *Catalog) Get(model string) (ModelInfo, bool) {
 	}
 	item, ok := c.models[strings.ToLower(strings.TrimSpace(model))]
 	return item, ok
+}
+
+// ResolveUpstream maps a public model id or alias to the provider model id.
+func (c *Catalog) ResolveUpstream(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if item, ok := c.Get(model); ok {
+		if upstream := strings.TrimSpace(item.UpstreamID); upstream != "" {
+			return upstream
+		}
+		return strings.TrimSpace(item.ID)
+	}
+	return model
 }
 
 func (c *Catalog) List() []ModelInfo {

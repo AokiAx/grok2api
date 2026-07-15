@@ -246,7 +246,7 @@ func (s *Server) refreshModelCatalog(ctx context.Context) {
 			continue
 		}
 		info := upstream.ModelInfo{
-			ID: model.ID, Name: model.Name, APIBackend: model.APIBackend, ContextWindow: model.ContextWindow,
+			ID: model.ID, UpstreamID: model.ResolveUpstream(), Name: model.Name, APIBackend: model.APIBackend, ContextWindow: model.ContextWindow,
 			SupportsReasoningEffort: model.SupportsReasoningEffort, ReasoningEfforts: append([]string(nil), model.ReasoningEfforts...),
 			SupportsBackendSearch: model.SupportsBackendSearch, OwnedBy: model.OwnedBy,
 		}
