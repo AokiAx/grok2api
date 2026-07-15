@@ -56,18 +56,27 @@ type UsageSummary struct {
 	SuccessRate   float64
 }
 
+// SeriesModelUsage is per-model token volume inside one series bucket.
+type SeriesModelUsage struct {
+	Model  string
+	Tokens int64
+}
+
 // SeriesPoint is a time-bucketed counter.
 type SeriesPoint struct {
 	BucketStart time.Time
+	BucketEnd   time.Time
 	Requests    int64
 	Failures    int64
 	Tokens      int64
+	Models      []SeriesModelUsage
 }
 
 // NamedCount is a ranked aggregation row.
 type NamedCount struct {
-	Name  string
-	Count int64
+	Name    string
+	Count   int64
+	Tokens  int64
 }
 
 // RecentFailure is a compact failure row for dashboards.

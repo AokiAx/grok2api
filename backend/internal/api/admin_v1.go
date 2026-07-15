@@ -321,24 +321,38 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 		if points, err := s.audits.AuditSeries(request.Context(), from, now, bucket); err == nil {
 			series = make([]any, 0, len(points))
 			for _, p := range points {
+				models := make([]any, 0, len(p.Models))
+				for _, m := range p.Models {
+					models = append(models, map[string]any{
+						"model":  m.Model,
+						"tokens": m.Tokens,
+					})
+				}
+				end := p.BucketEnd
+				if end.IsZero() {
+					end = p.BucketStart.Add(bucket)
+				}
 				series = append(series, map[string]any{
 					"bucketStart": p.BucketStart.Format(time.RFC3339),
+					"start":       p.BucketStart.Format(time.RFC3339),
+					"end":         end.Format(time.RFC3339),
 					"requests":    p.Requests,
 					"failures":    p.Failures,
 					"tokens":      p.Tokens,
+					"models":      models,
 				})
 			}
 		}
 		if rows, err := s.audits.AuditTopModels(request.Context(), from, now, 10); err == nil {
 			topModels = make([]any, 0, len(rows))
 			for _, row := range rows {
-				topModels = append(topModels, map[string]any{"name": row.Name, "count": row.Count})
+				topModels = append(topModels, map[string]any{"name": row.Name, "model": row.Name, "count": row.Count, "requests": row.Count, "tokens": row.Tokens})
 			}
 		}
 		if rows, err := s.audits.AuditTopAccounts(request.Context(), from, now, 10); err == nil {
 			topAccounts = make([]any, 0, len(rows))
 			for _, row := range rows {
-				topAccounts = append(topAccounts, map[string]any{"name": row.Name, "count": row.Count})
+				topAccounts = append(topAccounts, map[string]any{"name": row.Name, "count": row.Count, "requests": row.Count, "tokens": row.Tokens})
 			}
 		}
 		if rows, err := s.audits.AuditRecentFailures(request.Context(), from, now, 20); err == nil {

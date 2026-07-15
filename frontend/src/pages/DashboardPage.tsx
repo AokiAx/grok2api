@@ -252,7 +252,12 @@ export function DashboardPage() {
               </div>
             </CardHeader>
             <CardContent>
-              <UsageTrendChart series={trendSeries} period={period} loading={loading} />
+              <UsageTrendChart
+                series={trendSeries}
+                topModels={topModels}
+                period={period}
+                loading={loading}
+              />
             </CardContent>
           </Card>
 
@@ -371,23 +376,28 @@ function TopList({
   items,
   empty,
 }: {
-  items: Array<{ name?: string; count?: number }>;
+  items: Array<{ name?: string; model?: string; count?: number; requests?: number; tokens?: number }>;
   empty: string;
 }) {
   if (!items.length) {
     return <p className="py-5 text-center text-xs text-muted-foreground">{empty}</p>;
   }
-  const max = Math.max(1, ...items.map((item) => Number(item.count) || 0));
+  const max = Math.max(1, ...items.map((item) => Number(item.requests ?? item.count) || 0));
   return (
     <ul className="space-y-2.5">
       {items.slice(0, 8).map((item, index) => {
-        const count = Number(item.count) || 0;
+        const count = Number(item.requests ?? item.count) || 0;
+        const tokens = Number(item.tokens) || 0;
         const width = `${Math.max(6, (count / max) * 100)}%`;
+        const label = item.model || item.name || "—";
         return (
-          <li key={`${item.name || "item"}-${index}`} className="space-y-1">
+          <li key={`${label}-${index}`} className="space-y-1">
             <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="min-w-0 truncate font-mono text-[11px]">{item.name || "—"}</span>
-              <span className="shrink-0 tabular-nums text-muted-foreground">{n(count)}</span>
+              <span className="min-w-0 truncate font-mono text-[11px]">{label}</span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {n(count)}
+                {tokens > 0 ? ` · ${n(tokens)} tok` : ""}
+              </span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
               <div className="h-full rounded-full bg-foreground/70" style={{ width }} />

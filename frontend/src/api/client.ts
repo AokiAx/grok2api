@@ -340,9 +340,17 @@ export type Dashboard = {
     p95DurationMs?: number;
     successRate?: number;
   };
-  series?: Array<{ bucketStart?: string; requests?: number; failures?: number; tokens?: number }>;
-  topModels?: Array<{ name?: string; count?: number }>;
-  topAccounts?: Array<{ name?: string; count?: number }>;
+  series?: Array<{
+    bucketStart?: string;
+    start?: string;
+    end?: string;
+    requests?: number;
+    failures?: number;
+    tokens?: number;
+    models?: Array<{ model?: string; tokens?: number }>;
+  }>;
+  topModels?: Array<{ name?: string; model?: string; count?: number; requests?: number; tokens?: number }>;
+  topAccounts?: Array<{ name?: string; count?: number; requests?: number; tokens?: number }>;
   recentFailures?: Array<{
     requestId?: string;
     startedAt?: string;

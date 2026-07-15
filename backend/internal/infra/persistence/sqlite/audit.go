@@ -243,11 +243,12 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 	if bucket <= 0 {
 		bucket = time.Hour
 	}
-	// Bucket in seconds for SQLite strftime-free integer math on unix timestamps.
 	step := int64(bucket.Seconds())
 	if step < 60 {
 		step = 60
 	}
+	fromUTC := from.UTC()
+	toUTC := to.UTC()
 	rows, err := r.db.QueryContext(
 		ctx,
 		`SELECT
@@ -259,10 +260,7 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 		WHERE started_at >= ? AND started_at < ?
 		GROUP BY bucket
 		ORDER BY bucket`,
-		step,
-		step,
-		from.UTC().Format(time.RFC3339Nano),
-		to.UTC().Format(time.RFC3339Nano),
+		step, step, fromUTC.Format(time.RFC3339Nano), toUTC.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return nil, err
@@ -276,6 +274,7 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 		}
 		byBucket[bucketUnix] = audit.SeriesPoint{
 			BucketStart: time.Unix(bucketUnix, 0).UTC(),
+			BucketEnd:   time.Unix(bucketUnix+step, 0).UTC(),
 			Requests:    requests,
 			Failures:    failures,
 			Tokens:      tokens,
@@ -284,19 +283,60 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Fill empty buckets so dashboards always render a continuous trend line.
-	start := from.UTC().Unix()
-	end := to.UTC().Unix()
-	if start%step != 0 {
-		start = start - (start % step)
+
+	modelRows, err := r.db.QueryContext(
+		ctx,
+		`SELECT
+			(CAST(strftime('%s', replace(substr(started_at,1,19),'T',' ')) AS INTEGER) / ?) * ? AS bucket,
+			CASE WHEN TRIM(model)='' THEN '(unknown)' ELSE model END AS name,
+			COALESCE(SUM(total_tokens), 0) AS tokens
+		FROM request_audits
+		WHERE started_at >= ? AND started_at < ?
+		GROUP BY bucket, name
+		ORDER BY bucket, tokens DESC, name`,
+		step, step, fromUTC.Format(time.RFC3339Nano), toUTC.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, err
 	}
-	out := make([]audit.SeriesPoint, 0, int((end-start)/step)+1)
-	for ts := start; ts < end; ts += step {
-		if point, ok := byBucket[ts]; ok {
-			out = append(out, point)
+	defer modelRows.Close()
+	modelsByBucket := make(map[int64][]audit.SeriesModelUsage)
+	for modelRows.Next() {
+		var bucketUnix, tokens int64
+		var name string
+		if err := modelRows.Scan(&bucketUnix, &name, &tokens); err != nil {
+			return nil, err
+		}
+		if len(modelsByBucket[bucketUnix]) >= 8 {
 			continue
 		}
-		out = append(out, audit.SeriesPoint{BucketStart: time.Unix(ts, 0).UTC()})
+		modelsByBucket[bucketUnix] = append(modelsByBucket[bucketUnix], audit.SeriesModelUsage{
+			Model:  name,
+			Tokens: tokens,
+		})
+	}
+	if err := modelRows.Err(); err != nil {
+		return nil, err
+	}
+
+	startUnix := fromUTC.Unix()
+	endUnix := toUTC.Unix()
+	if startUnix%step != 0 {
+		startUnix = startUnix - (startUnix % step)
+	}
+	out := make([]audit.SeriesPoint, 0, int((endUnix-startUnix)/step)+1)
+	for ts := startUnix; ts < endUnix; ts += step {
+		point, ok := byBucket[ts]
+		if !ok {
+			point = audit.SeriesPoint{
+				BucketStart: time.Unix(ts, 0).UTC(),
+				BucketEnd:   time.Unix(ts+step, 0).UTC(),
+			}
+		} else if point.BucketEnd.IsZero() {
+			point.BucketEnd = time.Unix(ts+step, 0).UTC()
+		}
+		point.Models = modelsByBucket[ts]
+		out = append(out, point)
 	}
 	return out, nil
 }
@@ -317,11 +357,13 @@ func (r *SQLite) auditTop(ctx context.Context, from, to time.Time, limit int, co
 		return nil, fmt.Errorf("unsupported top column")
 	}
 	query := fmt.Sprintf(
-		`SELECT CASE WHEN TRIM(%s)='' THEN '(unknown)' ELSE %s END AS name, COUNT(*) AS c
+		`SELECT CASE WHEN TRIM(%s)='' THEN '(unknown)' ELSE %s END AS name,
+		        COUNT(*) AS c,
+		        COALESCE(SUM(total_tokens), 0) AS tokens
 		 FROM request_audits
 		 WHERE started_at >= ? AND started_at < ?
 		 GROUP BY name
-		 ORDER BY c DESC
+		 ORDER BY c DESC, tokens DESC, name ASC
 		 LIMIT ?`, column, column,
 	)
 	rows, err := r.db.QueryContext(ctx, query, from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), limit)
@@ -332,7 +374,7 @@ func (r *SQLite) auditTop(ctx context.Context, from, to time.Time, limit int, co
 	var out []audit.NamedCount
 	for rows.Next() {
 		var item audit.NamedCount
-		if err := rows.Scan(&item.Name, &item.Count); err != nil {
+		if err := rows.Scan(&item.Name, &item.Count, &item.Tokens); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
