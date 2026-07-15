@@ -332,6 +332,123 @@ func TestSQLiteLoginSuccessTransactionRollsBackAttemptWhenSessionInsertFails(t *
 	}
 }
 
+func TestSQLitePruneAdminAuthHistoryIsAtomicAndConcurrentSafe(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 15, 6, 0, 0, 0, time.UTC)
+	t.Run("rollback", func(t *testing.T) {
+		database := filepath.Join(t.TempDir(), "auth-prune-rollback.db")
+		repo := openSecurityRepo(t, ctx, database)
+		defer repo.Close()
+		user := createStoredAdmin(t, ctx, repo, "prune-admin", "prune", now.Add(-4*time.Hour))
+		expired := newStoredSession(t, "expired", "expired-family", user.ID, "expired", now.Add(-2*time.Hour-time.Second))
+		if err := repo.CreateAdminSession(ctx, expired); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RecordAdminLoginAttempt(ctx, mustLoginAttempt(t, "prune", "10.0.0.1", false, "invalid_credentials", now.Add(-2*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+		raw := openRawSQLite(t, database)
+		defer raw.Close()
+		if _, err := raw.ExecContext(ctx, `CREATE TRIGGER fail_auth_prune BEFORE DELETE ON admin_sessions BEGIN SELECT RAISE(ABORT, 'forced prune failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		_, err := repo.PruneAdminAuthHistory(ctx, repository.AdminAuthRetentionCutoffs{
+			LoginAttemptsBefore: now.Add(-time.Hour), InactiveSessionsBefore: now.Add(-time.Hour),
+		})
+		if err == nil {
+			t.Fatal("prune should fail")
+		}
+		var attempts, sessions int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts`).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_sessions`).Scan(&sessions); err != nil {
+			t.Fatal(err)
+		}
+		if attempts != 1 || sessions != 1 {
+			t.Fatalf("partial prune attempts=%d sessions=%d", attempts, sessions)
+		}
+	})
+
+	t.Run("concurrent idempotence and boundaries", func(t *testing.T) {
+		database := filepath.Join(t.TempDir(), "auth-prune-concurrent.db")
+		repo := openSecurityRepo(t, ctx, database)
+		defer repo.Close()
+		user := createStoredAdmin(t, ctx, repo, "prune-admin", "prune", now.Add(-4*time.Hour))
+		expired := newStoredSession(t, "expired", "expired-family", user.ID, "expired", now.Add(-2*time.Hour-time.Second))
+		revoked := newStoredSession(t, "revoked", "revoked-family", user.ID, "revoked", now.Add(-3*time.Hour))
+		recentlyRevoked := newStoredSession(t, "recent-revoked", "recent-family", user.ID, "recent", now.Add(-30*time.Minute))
+		active := newStoredSession(t, "active", "active-family", user.ID, "active", now)
+		for _, session := range []adminauth.Session{expired, revoked, recentlyRevoked, active} {
+			if err := repo.CreateAdminSession(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := repo.RevokeAdminSession(ctx, revoked.ID, now.Add(-2*time.Hour), adminauth.RevocationLogout); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RevokeAdminSession(ctx, recentlyRevoked.ID, now.Add(-10*time.Minute), adminauth.RevocationLogout); err != nil {
+			t.Fatal(err)
+		}
+		for _, at := range []time.Time{now.Add(-2 * time.Hour), now.Add(-time.Hour), now.Add(-10 * time.Minute)} {
+			if err := repo.RecordAdminLoginAttempt(ctx, mustLoginAttempt(t, "prune", "10.0.0.1", false, "invalid_credentials", at)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cutoffs := repository.AdminAuthRetentionCutoffs{LoginAttemptsBefore: now.Add(-time.Hour), InactiveSessionsBefore: now.Add(-time.Hour)}
+		const workers = 8
+		start := make(chan struct{})
+		results := make(chan repository.AdminAuthPruneResult, workers)
+		errs := make(chan error, workers)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				result, err := repo.PruneAdminAuthHistory(ctx, cutoffs)
+				if err != nil {
+					errs <- err
+					return
+				}
+				results <- result
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent prune: %v", err)
+		}
+		var attemptsDeleted, sessionsDeleted int64
+		for result := range results {
+			attemptsDeleted += result.LoginAttemptsDeleted
+			sessionsDeleted += result.SessionsDeleted
+		}
+		if attemptsDeleted != 1 || sessionsDeleted != 2 {
+			t.Fatalf("deleted attempts=%d sessions=%d", attemptsDeleted, sessionsDeleted)
+		}
+		raw := openRawSQLite(t, database)
+		defer raw.Close()
+		var attempts, sessions int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts`).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_sessions`).Scan(&sessions); err != nil {
+			t.Fatal(err)
+		}
+		if attempts != 2 || sessions != 2 {
+			t.Fatalf("remaining attempts=%d sessions=%d", attempts, sessions)
+		}
+		for _, id := range []string{recentlyRevoked.ID, active.ID} {
+			if _, found, err := repo.GetAdminSession(ctx, id); err != nil || !found {
+				t.Fatalf("survivor %s found=%v err=%v", id, found, err)
+			}
+		}
+	})
+}
+
 func TestSQLiteRPMReadsPersistedPolicyAndInactiveFailuresDoNotCreateWindows(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "rpm-policy.db")
