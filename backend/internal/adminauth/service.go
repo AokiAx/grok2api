@@ -139,14 +139,11 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	session.SourceIP = ip
 	session.UserAgent = in.UserAgent
 	session.Remember = in.Remember
-	if err := s.repo.CreateAdminSession(ctx, session); err != nil {
+	success, err := domain.NewLoginAttempt(username, ip, true, "", now)
+	if err != nil {
 		return LoginOutput{}, err
 	}
-	if err := s.recordAttempt(ctx, username, ip, true, "", now); err != nil {
-		revokeErr := s.repo.RevokeAdminSession(ctx, session.ID, now, domain.RevocationLogout)
-		if revokeErr != nil {
-			return LoginOutput{}, errors.Join(err, revokeErr)
-		}
+	if err := s.repo.CreateAdminSessionWithLoginSuccess(ctx, session, success); err != nil {
 		return LoginOutput{}, err
 	}
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt, Remember: session.Remember}, nil
@@ -216,6 +213,13 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 	if !old.Active(now) {
 		return LoginOutput{}, ErrInvalidRefresh
 	}
+	u, ok, e := s.repo.GetAdminUserByID(ctx, old.AdminUserID)
+	if e != nil {
+		return LoginOutput{}, e
+	}
+	if !ok || !u.CanAuthenticate() {
+		return LoginOutput{}, ErrUnauthorized
+	}
 	access, e := s.randomToken(32)
 	if e != nil {
 		return LoginOutput{}, e
@@ -241,13 +245,6 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 	}
 	if !rotated {
 		return LoginOutput{}, ErrConflict
-	}
-	u, ok, e := s.repo.GetAdminUserByID(ctx, old.AdminUserID)
-	if e != nil {
-		return LoginOutput{}, e
-	}
-	if !ok {
-		return LoginOutput{}, ErrUnauthorized
 	}
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: replacement.AccessExpiresAt, RefreshExpiresAt: replacement.ExpiresAt, Remember: replacement.Remember}, nil
 }

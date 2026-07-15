@@ -96,6 +96,33 @@ func (r *SQLite) CreateAdminSession(ctx context.Context, item adminauth.Session)
 	return nil
 }
 
+func (r *SQLite) CreateAdminSessionWithLoginSuccess(ctx context.Context, session adminauth.Session, attempt adminauth.LoginAttempt) error {
+	if err := validateSession(session); err != nil {
+		return err
+	}
+	if err := attempt.Validate(); err != nil {
+		return fmt.Errorf("validate admin login success: %w", err)
+	}
+	if !attempt.Succeeded {
+		return errors.New("successful admin login attempt is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin admin login success: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertAdminSession(ctx, tx, session); err != nil {
+		return fmt.Errorf("create admin session %s: %w", session.ID, err)
+	}
+	if err := insertAdminLoginAttempt(ctx, tx, attempt); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit admin login success: %w", err)
+	}
+	return nil
+}
+
 func (r *SQLite) GetAdminSession(ctx context.Context, id string) (adminauth.Session, bool, error) {
 	return scanAdminSession(r.db.QueryRowContext(ctx, sessionSelect+` WHERE id=?`, strings.TrimSpace(id)))
 }
@@ -212,7 +239,11 @@ func (r *SQLite) RecordAdminLoginAttempt(ctx context.Context, item adminauth.Log
 	if err := item.Validate(); err != nil {
 		return fmt.Errorf("validate admin login attempt: %w", err)
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO admin_login_attempts(
+	return insertAdminLoginAttempt(ctx, r.db, item)
+}
+
+func insertAdminLoginAttempt(ctx context.Context, execer contextExecer, item adminauth.LoginAttempt) error {
+	_, err := execer.ExecContext(ctx, `INSERT INTO admin_login_attempts(
 		username, source_ip, succeeded, failure_code, created_at
 	) VALUES(?, ?, ?, ?, ?)`,
 		strings.ToLower(strings.TrimSpace(item.Username)),
@@ -237,10 +268,14 @@ func (r *SQLite) CountRecentAdminLoginFailures(
 	}
 	var count int
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts
-		WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?`,
+		WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?
+		AND created_at > COALESCE((SELECT MAX(created_at) FROM admin_login_attempts
+			WHERE username=? AND source_ip=? AND succeeded=1), '')`,
 		strings.ToLower(strings.TrimSpace(username)),
 		strings.TrimSpace(sourceIP),
 		formatTime(since),
+		strings.ToLower(strings.TrimSpace(username)),
+		strings.TrimSpace(sourceIP),
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count recent admin login failures: %w", err)
@@ -250,7 +285,12 @@ func (r *SQLite) CountRecentAdminLoginFailures(
 
 func (r *SQLite) OldestRecentAdminLoginFailure(ctx context.Context, username, sourceIP string, since time.Time) (time.Time, bool, error) {
 	var raw sql.NullString
-	err := r.db.QueryRowContext(ctx, `SELECT MIN(created_at) FROM admin_login_attempts WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?`, strings.ToLower(strings.TrimSpace(username)), strings.TrimSpace(sourceIP), formatTime(since)).Scan(&raw)
+	err := r.db.QueryRowContext(ctx, `SELECT MIN(created_at) FROM admin_login_attempts
+		WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?
+		AND created_at > COALESCE((SELECT MAX(created_at) FROM admin_login_attempts
+			WHERE username=? AND source_ip=? AND succeeded=1), '')`,
+		strings.ToLower(strings.TrimSpace(username)), strings.TrimSpace(sourceIP), formatTime(since),
+		strings.ToLower(strings.TrimSpace(username)), strings.TrimSpace(sourceIP)).Scan(&raw)
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("oldest admin login failure: %w", err)
 	}

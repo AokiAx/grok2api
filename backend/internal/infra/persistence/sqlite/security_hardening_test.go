@@ -273,6 +273,32 @@ func TestSQLiteLoginFailureTuplePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestSQLiteLoginSuccessTransactionRollsBackAttemptWhenSessionInsertFails(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "login-atomic.db")
+	repo := openSecurityRepo(t, ctx, database)
+	defer repo.Close()
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	user := createStoredAdmin(t, ctx, repo, "atomic-admin", "atomic", now)
+	session := newStoredSession(t, "duplicate-session", "atomic-family", user.ID, "atomic", now)
+	if err := repo.CreateAdminSession(ctx, session); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	success := mustLoginAttempt(t, "atomic", "10.0.0.1", true, "", now.Add(time.Minute))
+	if err := repo.CreateAdminSessionWithLoginSuccess(ctx, session, success); err == nil {
+		t.Fatal("duplicate session should fail transaction")
+	}
+	raw := openRawSQLite(t, database)
+	defer raw.Close()
+	var successes int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts WHERE succeeded=1`).Scan(&successes); err != nil {
+		t.Fatalf("count success attempts: %v", err)
+	}
+	if successes != 0 {
+		t.Fatalf("success attempts=%d; want rollback", successes)
+	}
+}
+
 func TestSQLiteRPMReadsPersistedPolicyAndInactiveFailuresDoNotCreateWindows(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "rpm-policy.db")

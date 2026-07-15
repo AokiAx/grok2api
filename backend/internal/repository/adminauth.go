@@ -16,6 +16,7 @@ type AdminUserStore interface {
 
 type AdminSessionStore interface {
 	CreateAdminSession(context.Context, adminauth.Session) error
+	CreateAdminSessionWithLoginSuccess(context.Context, adminauth.Session, adminauth.LoginAttempt) error
 	GetAdminSession(context.Context, string) (adminauth.Session, bool, error)
 	FindAdminSessionByAccessHash(context.Context, [32]byte) (adminauth.Session, bool, error)
 	RotateAdminSession(context.Context, string, [32]byte, adminauth.Session, time.Time) (bool, error)

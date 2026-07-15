@@ -25,6 +25,9 @@ func (adminAuthContractRepository) GetAdminUserByUsername(context.Context, strin
 func (adminAuthContractRepository) CreateAdminSession(context.Context, adminauth.Session) error {
 	return nil
 }
+func (adminAuthContractRepository) CreateAdminSessionWithLoginSuccess(context.Context, adminauth.Session, adminauth.LoginAttempt) error {
+	return nil
+}
 func (adminAuthContractRepository) GetAdminSession(context.Context, string) (adminauth.Session, bool, error) {
 	return adminauth.Session{}, false, nil
 }
