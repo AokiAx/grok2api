@@ -268,20 +268,37 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 		return nil, err
 	}
 	defer rows.Close()
-	var out []audit.SeriesPoint
+	byBucket := make(map[int64]audit.SeriesPoint)
 	for rows.Next() {
 		var bucketUnix, requests, failures, tokens int64
 		if err := rows.Scan(&bucketUnix, &requests, &failures, &tokens); err != nil {
 			return nil, err
 		}
-		out = append(out, audit.SeriesPoint{
+		byBucket[bucketUnix] = audit.SeriesPoint{
 			BucketStart: time.Unix(bucketUnix, 0).UTC(),
 			Requests:    requests,
 			Failures:    failures,
 			Tokens:      tokens,
-		})
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Fill empty buckets so dashboards always render a continuous trend line.
+	start := from.UTC().Unix()
+	end := to.UTC().Unix()
+	if start%step != 0 {
+		start = start - (start % step)
+	}
+	out := make([]audit.SeriesPoint, 0, int((end-start)/step)+1)
+	for ts := start; ts < end; ts += step {
+		if point, ok := byBucket[ts]; ok {
+			out = append(out, point)
+			continue
+		}
+		out = append(out, audit.SeriesPoint{BucketStart: time.Unix(ts, 0).UTC()})
+	}
+	return out, nil
 }
 
 func (r *SQLite) AuditTopModels(ctx context.Context, from, to time.Time, limit int) ([]audit.NamedCount, error) {

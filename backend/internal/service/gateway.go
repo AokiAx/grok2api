@@ -1,6 +1,8 @@
 package service
 
 import (
+	"strconv"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -29,6 +31,10 @@ type ChatResult struct {
 	Header http.Header
 	Body   []byte
 	Stream io.ReadCloser
+	// Optional per-request token usage extracted from upstream bodies when available.
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
 }
 
 // AuditSink records gateway request outcomes without storing payloads/secrets.
@@ -199,18 +205,17 @@ func (g *Gateway) Request(
 			Success:      success,
 			ErrorType:    errorType,
 			ErrorCode:    errorCode,
-			InputTokens:  0,
-			OutputTokens: 0,
-			TotalTokens:  0,
+			InputTokens:  result.InputTokens,
+			OutputTokens: result.OutputTokens,
+			TotalTokens:  result.TotalTokens,
 			AttemptCount: len(attempts),
 			Stream:       stream,
 		}
-		// Best-effort token estimates from rate-limit headers on success.
-		if success && result.Header != nil {
-			if usage := upstream.ParseRateLimitHeaders(result.Header); usage.Present() {
-				// Free-tier counters are cumulative actual/limit, not per-request.
-				// Keep token fields zero rather than inventing deltas.
-			}
+		// Prefer body-derived usage. If missing, leave zeros rather than inventing
+		// deltas from free-tier cumulative rate-limit headers.
+		if item.TotalTokens == 0 && item.InputTokens == 0 && item.OutputTokens == 0 && len(result.Body) > 0 {
+			inT, outT, totT := extractBodyUsage(result.Body)
+			item.InputTokens, item.OutputTokens, item.TotalTokens = inT, outT, totT
 		}
 		_ = g.auditor.RecordRequestAudit(context.WithoutCancel(ctx), item, attempts)
 	}()
@@ -354,10 +359,14 @@ func (g *Gateway) Request(
 			})
 			statusCode = response.StatusCode
 			success = true
+			inT, outT, totT := extractBodyUsage(body)
 			return ChatResult{
-				Status: response.StatusCode,
-				Header: response.Header.Clone(),
-				Body:   body,
+				Status:       response.StatusCode,
+				Header:       response.Header.Clone(),
+				Body:         body,
+				InputTokens:  inT,
+				OutputTokens: outT,
+				TotalTokens:  totT,
 			}, nil
 		}
 
@@ -796,4 +805,50 @@ func (g *Gateway) runtimeSnapshot() (quotaRetry, rateRetry, acquireTimeout time.
 	g.runtimeMu.RLock()
 	defer g.runtimeMu.RUnlock()
 	return g.quotaRetry, g.rateRetry, g.acquireTimeout, g.maxAttempts
+}
+
+func extractBodyUsage(raw []byte) (input, output, total int64) {
+	if len(raw) == 0 {
+		return 0, 0, 0
+	}
+	// Lightweight scans for OpenAI/Anthropic/Responses style usage fields.
+	// Prefer last match (completed event often near the end).
+	lastInt := func(key string) int64 {
+		needle := []byte("\"" + key + "\"")
+		idx := -1
+		for i := 0; i+len(needle) < len(raw); i++ {
+			if bytes.Equal(raw[i:i+len(needle)], needle) {
+				idx = i + len(needle)
+			}
+		}
+		if idx < 0 {
+			return 0
+		}
+		// skip : and spaces
+		for idx < len(raw) && (raw[idx] == ':' || raw[idx] == ' ' || raw[idx] == '	') {
+			idx++
+		}
+		start := idx
+		for idx < len(raw) && raw[idx] >= '0' && raw[idx] <= '9' {
+			idx++
+		}
+		if start == idx {
+			return 0
+		}
+		n, _ := strconv.ParseInt(string(raw[start:idx]), 10, 64)
+		return n
+	}
+	input = lastInt("input_tokens")
+	if input == 0 {
+		input = lastInt("prompt_tokens")
+	}
+	output = lastInt("output_tokens")
+	if output == 0 {
+		output = lastInt("completion_tokens")
+	}
+	total = lastInt("total_tokens")
+	if total == 0 && (input > 0 || output > 0) {
+		total = input + output
+	}
+	return input, output, total
 }

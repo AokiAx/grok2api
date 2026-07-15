@@ -45,6 +45,13 @@ function buildPath(values: number[], width: number, height: number, max: number)
     .join(" ");
 }
 
+function buildArea(values: number[], width: number, height: number, max: number): string {
+  const line = buildPath(values, width, height, max);
+  if (!line || !values.length) return "";
+  const lastX = values.length === 1 ? width / 2 : width;
+  return `${line} L${lastX.toFixed(2)},${height.toFixed(2)} L0,${height.toFixed(2)} Z`;
+}
+
 export function UsageTrendChart({
   series,
   className,
@@ -56,20 +63,27 @@ export function UsageTrendChart({
     const points = (series || []).filter((item) => item && item.bucketStart);
     const width = 720;
     const height = 180;
-    const padX = 8;
-    const padY = 8;
+    const padX = 36;
+    const padY = 10;
     const innerW = width - padX * 2;
     const innerH = height - padY * 2;
 
-    const maxRequests = Math.max(1, ...points.map((p) => Math.max(valueOf(p, "requests"), valueOf(p, "failures"))));
+    const maxRequests = Math.max(
+      1,
+      ...points.map((p) => Math.max(valueOf(p, "requests"), valueOf(p, "failures"))),
+    );
     const maxTokens = Math.max(1, ...points.map((p) => valueOf(p, "tokens")));
+    const hasAny =
+      points.some((p) => valueOf(p, "requests") > 0 || valueOf(p, "failures") > 0 || valueOf(p, "tokens") > 0);
 
     const paths = SERIES.map((spec) => {
       const values = points.map((p) => valueOf(p, spec.key));
       const max = spec.key === "tokens" ? maxTokens : maxRequests;
       return {
         ...spec,
+        values,
         path: buildPath(values, innerW, innerH, max),
+        area: buildArea(values, innerW, innerH, max),
         max,
         total: values.reduce((sum, v) => sum + v, 0),
       };
@@ -83,13 +97,25 @@ export function UsageTrendChart({
       right: formatAxis(maxTokens * ratio),
     }));
 
-    return { points, paths, labels, ticks, width, height, padX, padY, innerW, innerH, maxRequests, maxTokens };
+    return {
+      points,
+      paths,
+      labels,
+      ticks,
+      width,
+      height,
+      padX,
+      padY,
+      innerW,
+      innerH,
+      hasAny,
+    };
   }, [series]);
 
   if (!chart.points.length) {
     return (
       <div className={cn("flex h-56 items-center justify-center text-xs text-muted-foreground", className)}>
-        暂无趋势数据（需要请求审计）
+        暂无趋势数据（需要先有网关请求审计）
       </div>
     );
   }
@@ -110,6 +136,12 @@ export function UsageTrendChart({
         ))}
       </div>
 
+      {!chart.hasAny ? (
+        <div className="rounded-lg border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground">
+          窗口内暂无请求；有流量后会自动填充曲线
+        </div>
+      ) : null}
+
       <div className="relative">
         <svg
           viewBox={`0 0 ${chart.width} ${chart.height}`}
@@ -127,11 +159,11 @@ export function UsageTrendChart({
                 stroke="currentColor"
                 strokeOpacity={0.08}
               />
-              <text x={0} y={tick.y + 3} className="fill-muted-foreground text-[10px]">
+              <text x={2} y={tick.y + 3} className="fill-muted-foreground text-[10px]">
                 {tick.left}
               </text>
               <text
-                x={chart.width}
+                x={chart.width - 2}
                 y={tick.y + 3}
                 textAnchor="end"
                 className="fill-muted-foreground text-[10px]"
@@ -143,17 +175,22 @@ export function UsageTrendChart({
 
           <g transform={`translate(${chart.padX}, ${chart.padY})`}>
             {chart.paths.map((item) =>
+              item.area && item.key === "requests" ? (
+                <path key={`${item.key}-area`} d={item.area} fill="currentColor" opacity={0.06} />
+              ) : null,
+            )}
+            {chart.paths.map((item) =>
               item.path ? (
                 <path
                   key={item.key}
                   d={item.path}
                   fill="none"
                   stroke={item.color}
-                  strokeWidth={item.key === "tokens" ? 2 : 1.8}
+                  strokeWidth={item.key === "tokens" ? 2.2 : 1.8}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   strokeDasharray={item.key === "failures" ? "4 3" : undefined}
-                  opacity={item.key === "tokens" ? 0.9 : 1}
+                  opacity={item.key === "tokens" ? 0.95 : 1}
                 />
               ) : null,
             )}
