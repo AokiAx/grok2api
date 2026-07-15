@@ -527,6 +527,13 @@ func (s *Server) writeGatewayError(writer http.ResponseWriter, err error) {
 
 func (s *Server) writeResult(writer http.ResponseWriter, result service.ChatResult) {
 	copyCompatibleUpstreamHeaders(writer.Header(), result.Header)
+	if result.Status >= http.StatusInternalServerError {
+		if result.Stream != nil {
+			_ = result.Stream.Close()
+		}
+		writeOpenAIError(writer, result.Status, publicServerErrorMessage(result.Status))
+		return
+	}
 	writer.WriteHeader(result.Status)
 	if result.Stream != nil {
 		defer result.Stream.Close()
