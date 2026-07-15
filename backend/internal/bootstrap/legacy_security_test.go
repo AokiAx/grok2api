@@ -203,7 +203,7 @@ func TestLegacySecurityBootstrapMarkersAreIndependentAndTransactionFailureDoesNo
 	raw = openBootstrapRaw(t, database)
 	assertMarker(t, raw, bootstrap.AdminBootstrapMarker, "1")
 	assertMarkerMissing(t, raw, bootstrap.ClientKeyBootstrapMarker)
-	assertMarker(t, raw, "client_auth_required", "0")
+	assertMarker(t, raw, "client_auth_required", "1")
 	var clients int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM client_keys`).Scan(&clients); err != nil || clients != 0 {
 		t.Fatalf("client count=%d err=%v", clients, err)

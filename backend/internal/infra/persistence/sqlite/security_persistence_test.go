@@ -73,7 +73,7 @@ func TestV4SchemaUpgradesToV5WithoutLosingAccountsEventsOrMetadata(t *testing.T)
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key='custom_meta'`).Scan(&custom); err != nil || custom != "preserved" {
 		t.Fatalf("custom metadata = %q err=%v", custom, err)
 	}
-	if err := raw.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key='client_auth_required'`).Scan(&authRequired); err != nil || authRequired != "0" {
+	if err := raw.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key='client_auth_required'`).Scan(&authRequired); err != nil || authRequired != "1" {
 		t.Fatalf("client_auth_required = %q err=%v", authRequired, err)
 	}
 	for _, table := range []string{
@@ -252,7 +252,7 @@ func TestSQLiteClientKeyPersistenceScopesAndStickyAuthMarker(t *testing.T) {
 	}
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
 	required, err := repo.ClientAuthRequired(ctx)
-	if err != nil || required {
+	if err != nil || !required {
 		t.Fatalf("initial auth required=%v err=%v", required, err)
 	}
 	hash := sha256.Sum256([]byte("client-secret"))

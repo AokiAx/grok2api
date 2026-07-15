@@ -154,3 +154,38 @@ func TestServerMetaRequiresAdminSetupWithoutLegacyOpenMode(t *testing.T) {
 		t.Fatalf("meta status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestFreshInstallRequiresClientKeyForEveryClientEndpoint(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, t.TempDir()+"/fresh-client-auth.db")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	server := api.NewServer(
+		&fakeGateway{},
+		fakeStatus{},
+		"",
+		api.WithClientAccess(service.NewClientAccess(repo)),
+	)
+	for _, test := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/v1/models"},
+		{method: http.MethodGet, path: "/v1/billing"},
+		{method: http.MethodPost, path: "/v1/chat/completions", body: `{}`},
+		{method: http.MethodPost, path: "/chat/completions", body: `{}`},
+		{method: http.MethodPost, path: "/v1/responses", body: `{}`},
+		{method: http.MethodPost, path: "/v1/messages", body: `{}`},
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), `"code":"invalid_api_key"`) {
+			t.Fatalf("%s %s status=%d body=%s", test.method, test.path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
