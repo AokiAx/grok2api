@@ -3,11 +3,12 @@ package intercept
 import (
 	"bufio"
 	"bytes"
-	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 )
 
 // Middleware wraps an HTTP handler and records client request/response bodies
@@ -22,25 +23,9 @@ func Middleware(tracer *Tracer, next http.Handler) http.Handler {
 			return
 		}
 
-		body, err := io.ReadAll(io.LimitReader(request.Body, 32<<20))
-		_ = request.Body.Close()
-		if err != nil {
-			next.ServeHTTP(writer, request)
-			return
-		}
-		request.Body = io.NopCloser(bytes.NewReader(body))
-
 		ctx, span := tracer.Start(request.Context(), request.URL.Path, request.Method)
+		ctx, cache := requestctx.WithBodyCache(ctx)
 		request = request.WithContext(ctx)
-
-		span.Event("client_request", map[string]any{
-			"method":       request.Method,
-			"path":         request.URL.Path,
-			"query":        request.URL.RawQuery,
-			"content_type": request.Header.Get("Content-Type"),
-			"stream_hint":  strings.Contains(strings.ToLower(string(body)), `"stream":true`),
-			"body":         tracer.BodyPreview(body),
-		})
 
 		recorder := &responseRecorder{
 			ResponseWriter: writer,
@@ -50,6 +35,16 @@ func Middleware(tracer *Tracer, next http.Handler) http.Handler {
 		}
 		start := time.Now()
 		next.ServeHTTP(recorder, request)
+		body, bodyAvailable := cache.Snapshot()
+		span.Event("client_request", map[string]any{
+			"method":         request.Method,
+			"path":           request.URL.Path,
+			"query":          request.URL.RawQuery,
+			"content_type":   request.Header.Get("Content-Type"),
+			"stream_hint":    strings.Contains(strings.ToLower(string(body)), `"stream":true`),
+			"body_available": bodyAvailable,
+			"body":           tracer.BodyPreview(body),
+		})
 
 		fields := map[string]any{
 			"status":       recorder.status,

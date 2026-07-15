@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,33 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/api"
 )
+
+func TestAdminInternalErrorsKeepStableCodeWithoutLeakingDetails(t *testing.T) {
+	adminService := &fakeAdmin{statsErr: errors.New(`sqlite read C:\data\grok2api.db failed with secret`)}
+	server := api.NewServer(
+		&fakeGateway{},
+		fakeStatus{},
+		"",
+		api.WithAdmin(adminService, "panel-secret"),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/dashboard", nil)
+	request.Header.Set("Authorization", "Bearer panel-secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"code":"stats_failed"`) {
+		t.Fatalf("missing stable code: %s", body)
+	}
+	for _, leaked := range []string{"sqlite read", "grok2api.db", "secret"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("response leaked %q: %s", leaked, body)
+		}
+	}
+}
 
 func TestAdminV1EnvelopeAndLegacyAlias(t *testing.T) {
 	adminService := &fakeAdmin{accounts: []account.Account{
@@ -181,5 +209,85 @@ func TestAdminV1UnauthorizedEnvelope(t *testing.T) {
 	}
 	if body.OK || body.Error.Code != "unauthorized" {
 		t.Fatalf("body=%#v", body)
+	}
+}
+
+func TestAdminV1AccountAdministrationEndpoints(t *testing.T) {
+	adminService := &fakeAdmin{accounts: []account.Account{{
+		ID: "a1", Email: "a1@example.test", Pool: account.PoolReady, Priority: 5, MaxActive: 2,
+	}}}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(adminService, "secret"))
+	authorized := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := authorized(http.MethodGet, "/api/admin/v1/accounts/a1", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"priority":5`) {
+		t.Fatalf("detail status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"access_token":`) || strings.Contains(rec.Body.String(), `"refresh_token":`) {
+		t.Fatalf("detail leaked credentials: %s", rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPatch, "/api/admin/v1/accounts/a1", `{"enabled":false,"priority":30,"max_active":4}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"priority":30`) || !strings.Contains(rec.Body.String(), `"max_active":4`) {
+		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPost, "/api/admin/v1/accounts/batch", `{"ids":["a1"],"action":"disable"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"updated":1`) {
+		t.Fatalf("batch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = authorized(http.MethodGet, "/api/admin/v1/accounts/a1/events?page=1&page_size=20", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"event_type":"state_transition"`) {
+		t.Fatalf("events status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminV1AccountMaintenanceAndCredentialExport(t *testing.T) {
+	adminService := &fakeAdmin{accounts: []account.Account{{
+		ID: "a1", AccessToken: "access-secret", RefreshToken: "refresh-secret", Pool: account.PoolReady, MaxActive: 1,
+	}}}
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "", api.WithAdmin(adminService, "secret"))
+	authorized := func(method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := authorized(http.MethodPost, "/api/admin/v1/accounts/a1/refresh-token")
+	if rec.Code != http.StatusOK || adminService.refreshedCredential != "a1" {
+		t.Fatalf("refresh token status=%d body=%s called=%q", rec.Code, rec.Body.String(), adminService.refreshedCredential)
+	}
+	if strings.Contains(rec.Body.String(), "rotated-secret") {
+		t.Fatalf("refresh response leaked credential: %s", rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPost, "/api/admin/v1/accounts/a1/refresh-quota")
+	if rec.Code != http.StatusOK || adminService.refreshedQuota != "a1" || !strings.Contains(rec.Body.String(), `"observed":true`) {
+		t.Fatalf("refresh quota status=%d body=%s called=%q", rec.Code, rec.Body.String(), adminService.refreshedQuota)
+	}
+
+	rec = authorized(http.MethodGet, "/api/admin/v1/accounts/a1/credentials/export")
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Disposition") != `attachment; filename="grok2api-account-a1.json"` {
+		t.Fatalf("export status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" || !strings.Contains(rec.Body.String(), `"key":"access-secret"`) || !strings.Contains(rec.Body.String(), `"refresh_token":"refresh-secret"`) {
+		t.Fatalf("export headers=%v body=%s", rec.Header(), rec.Body.String())
+	}
+
+	rec = authorized(http.MethodPost, "/api/admin/v1/accounts/a1/refresh-billing")
+	if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), `"code":"billing_unsupported"`) {
+		t.Fatalf("billing diagnostic status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

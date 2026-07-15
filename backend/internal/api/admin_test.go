@@ -13,14 +13,18 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/api"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
 type fakeAdmin struct {
-	accounts  []account.Account
-	request   admin.ImportRequest
-	deleted   string
-	recovered string
-	lastQuery admin.ListAccountsQuery
+	accounts            []account.Account
+	request             admin.ImportRequest
+	deleted             string
+	recovered           string
+	lastQuery           admin.ListAccountsQuery
+	refreshedCredential string
+	refreshedQuota      string
+	statsErr            error
 }
 
 func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (admin.ListAccountsPage, error) {
@@ -70,6 +74,9 @@ func (a *fakeAdmin) ListPage(_ context.Context, query admin.ListAccountsQuery) (
 }
 
 func (a *fakeAdmin) Stats(context.Context) (admin.AccountStats, error) {
+	if a.statsErr != nil {
+		return admin.AccountStats{}, a.statsErr
+	}
 	now := time.Now().UTC()
 	soon := now.Add(time.Hour)
 	stats := admin.AccountStats{
@@ -150,6 +157,79 @@ func (a *fakeAdmin) Delete(_ context.Context, id string) error {
 func (a *fakeAdmin) Recover(_ context.Context, id string) (account.Account, error) {
 	a.recovered = id
 	return account.Account{ID: id, Pool: account.PoolReady}, nil
+}
+
+func (a *fakeAdmin) Get(_ context.Context, id string) (account.Account, error) {
+	for _, item := range a.accounts {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return account.Account{}, admin.ErrAccountNotFound
+}
+
+func (a *fakeAdmin) Update(_ context.Context, id string, request admin.UpdateAccountRequest) (account.Account, error) {
+	for index := range a.accounts {
+		if a.accounts[index].ID != id {
+			continue
+		}
+		if request.Enabled != nil && !*request.Enabled {
+			a.accounts[index].DisableByAdmin(time.Now().UTC())
+		}
+		if request.Priority != nil {
+			a.accounts[index].Priority = *request.Priority
+		}
+		if request.MaxActive != nil {
+			a.accounts[index].MaxActive = *request.MaxActive
+		}
+		return a.accounts[index], nil
+	}
+	return account.Account{}, admin.ErrAccountNotFound
+}
+
+func (a *fakeAdmin) Batch(_ context.Context, request admin.BatchAccountRequest) (admin.BatchAccountResult, error) {
+	result := admin.BatchAccountResult{IDs: request.IDs}
+	if request.Action == admin.BatchActionDelete {
+		result.Deleted = len(request.IDs)
+	} else {
+		result.Updated = len(request.IDs)
+	}
+	return result, nil
+}
+
+func (a *fakeAdmin) Events(_ context.Context, id string, page, pageSize int) (repository.ListAccountEventsResult, error) {
+	if _, err := a.Get(context.Background(), id); err != nil {
+		return repository.ListAccountEventsResult{}, err
+	}
+	return repository.ListAccountEventsResult{
+		Items: []repository.AccountEvent{{ID: 1, AccountID: id, Type: repository.AccountEventStateTransition, ToPool: account.PoolReady, CreatedAt: time.Now().UTC()}},
+		Total: 1, Page: page, PageSize: pageSize,
+	}, nil
+}
+
+func (a *fakeAdmin) RefreshCredential(_ context.Context, id string) (account.Account, error) {
+	a.refreshedCredential = id
+	item, err := a.Get(context.Background(), id)
+	if err != nil {
+		return account.Account{}, err
+	}
+	item.AccessToken = "rotated-secret"
+	return item, nil
+}
+
+func (a *fakeAdmin) RefreshQuota(_ context.Context, id string) (admin.QuotaRefreshResult, error) {
+	a.refreshedQuota = id
+	if _, err := a.Get(context.Background(), id); err != nil {
+		return admin.QuotaRefreshResult{}, err
+	}
+	return admin.QuotaRefreshResult{AccountID: id, Actual: 25, Limit: 100, Observed: true}, nil
+}
+
+func (a *fakeAdmin) ExportCredential(_ context.Context, id string) (admin.CredentialExport, error) {
+	if _, err := a.Get(context.Background(), id); err != nil {
+		return admin.CredentialExport{}, err
+	}
+	return admin.CredentialExport{ID: id, Key: "access-secret", RefreshToken: "refresh-secret"}, nil
 }
 
 func TestAdminListNeverReturnsTokens(t *testing.T) {

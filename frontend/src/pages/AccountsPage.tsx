@@ -3,6 +3,9 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  Download,
+  Gauge,
+  KeyRound,
   RefreshCw,
   Search,
   Trash2,
@@ -13,6 +16,7 @@ import {
   adminApi,
   AdminApiError,
   type AccountsPage as PageData,
+  type AccountEvent,
   type PublicAccount,
 } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +47,13 @@ export function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [selected, setSelected] = useState<PublicAccount | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [priorityDraft, setPriorityDraft] = useState(0);
+  const [maxActiveDraft, setMaxActiveDraft] = useState(1);
+  const [events, setEvents] = useState<AccountEvent[]>([]);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [maintenanceBusy, setMaintenanceBusy] = useState<Set<string>>(() => new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -66,6 +77,24 @@ export function AccountsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!selected) {
+      setEvents([]);
+      return;
+    }
+    setPriorityDraft(selected.priority || 0);
+    setMaxActiveDraft(selected.max_active || 1);
+    let active = true;
+    void adminApi.accountEvents(selected.id).then((result) => {
+      if (active) setEvents(result.items);
+    }).catch(() => {
+      if (active) setEvents([]);
+    });
+    return () => {
+      active = false;
+    };
+  }, [selected]);
 
   async function recover(id: string) {
     setBusyId(id);
@@ -91,6 +120,72 @@ export function AccountsPage() {
       setError(err instanceof AdminApiError ? err.message : "删除失败");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function runBatch(action: "enable" | "disable" | "recover" | "delete") {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    const labels = { enable: "启用", disable: "禁用", recover: "恢复", delete: "删除" } as const;
+    if (!window.confirm(`确认批量${labels[action]} ${ids.length} 个账号？`)) return;
+    setBatchBusy(true);
+    setError(null);
+    try {
+      await adminApi.batchAccounts(ids, action);
+      setSelectedIds(new Set());
+      if (action === "delete" && selected && ids.includes(selected.id)) setSelected(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : `批量${labels[action]}失败`);
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  async function saveSettings() {
+    if (!selected) return;
+    setSettingsBusy(true);
+    setError(null);
+    try {
+      const updated = await adminApi.updateAccount(selected.id, {
+        priority: priorityDraft,
+        max_active: maxActiveDraft,
+      });
+      setSelected(updated);
+      await load();
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "保存账号设置失败");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function runMaintenance(action: "token" | "quota" | "export") {
+    if (!selected) return;
+    const id = selected.id;
+    const key = `${id}:${action}`;
+    const labels = { token: "刷新 Token", quota: "刷新额度", export: "导出凭据" } as const;
+    setMaintenanceBusy((current) => new Set(current).add(key));
+    setError(null);
+    try {
+      if (action === "token") {
+        const updated = await adminApi.refreshCredential(id);
+        setSelected((current) => current?.id === id ? updated : current);
+        await load();
+      } else if (action === "quota") {
+        await adminApi.refreshQuota(id);
+        await load();
+      } else {
+        await adminApi.exportCredential(id);
+      }
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : `${labels[action]}失败`);
+    } finally {
+      setMaintenanceBusy((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     }
   }
 
@@ -183,12 +278,34 @@ export function AccountsPage() {
         </div>
       ) : null}
 
+      {selectedIds.size > 0 ? (
+        <div className="flex flex-col gap-2 rounded-[10px] bg-card px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-xs text-muted-foreground">已选择 <strong className="font-medium text-foreground">{selectedIds.size}</strong> 个账号</span>
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatch("enable")}>批量启用</Button>
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatch("disable")}>批量禁用</Button>
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatch("recover")}>批量恢复</Button>
+            <Button size="sm" variant="destructive" disabled={batchBusy} onClick={() => void runBatch("delete")}>批量删除</Button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
         <Card className="min-w-0 overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left text-xs">
+            <table className="w-full min-w-[960px] text-left text-xs">
               <thead className="border-b border-border/80 bg-background text-[11px] text-muted-foreground">
                 <tr>
+                  <th className="w-10 px-3 py-2.5">
+                    <input
+                      type="checkbox"
+                      aria-label="选择全部账号"
+                      checked={accounts.length > 0 && accounts.every((item) => selectedIds.has(item.id))}
+                      onChange={(event) => {
+                        setSelectedIds(event.target.checked ? new Set(accounts.map((item) => item.id)) : new Set());
+                      }}
+                    />
+                  </th>
                   <th className="w-[250px] px-3 py-2.5 font-medium">账号</th>
                   <th className="px-3 py-2.5 font-medium">状态</th>
                   <th className="px-3 py-2.5 font-medium">不可用原因</th>
@@ -216,6 +333,21 @@ export function AccountsPage() {
                       }
                     }}
                   >
+                    <td className="px-3 py-2.5 align-middle" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`选择账号 ${item.id}`}
+                        checked={selectedIds.has(item.id)}
+                        onChange={(event) => {
+                          setSelectedIds((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) next.add(item.id);
+                            else next.delete(item.id);
+                            return next;
+                          });
+                        }}
+                      />
+                    </td>
                     <td className="px-3 py-2.5 align-middle">
                       <div className="mono max-w-[230px] truncate text-xs text-foreground" title={item.id}>{item.id}</div>
                       <div className="mt-0.5 max-w-[230px] truncate text-[11px] text-muted-foreground" title={item.email || undefined}>
@@ -272,14 +404,14 @@ export function AccountsPage() {
                 ))}
                 {!loading && accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-12 text-center text-xs text-muted-foreground">
+                    <td colSpan={8} className="px-3 py-12 text-center text-xs text-muted-foreground">
                       {q || pool !== "all" ? "没有符合当前筛选条件的账号" : "暂无账号"}
                     </td>
                   </tr>
                 ) : null}
                 {loading && accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-12 text-center text-xs text-muted-foreground">正在加载账号…</td>
+                    <td colSpan={8} className="px-3 py-12 text-center text-xs text-muted-foreground">正在加载账号…</td>
                   </tr>
                 ) : null}
               </tbody>
@@ -359,6 +491,81 @@ export function AccountsPage() {
                     </div>
                   ))}
                 </dl>
+                <div className="mt-4 grid grid-cols-2 gap-2 border-t border-border/70 pt-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-priority">优先级</Label>
+                    <Input
+                      id="account-priority"
+                      type="number"
+                      min={0}
+                      value={priorityDraft}
+                      onChange={(event) => setPriorityDraft(Number(event.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-max-active">最大并发</Label>
+                    <Input
+                      id="account-max-active"
+                      type="number"
+                      min={1}
+                      value={maxActiveDraft}
+                      onChange={(event) => setMaxActiveDraft(Number(event.target.value))}
+                    />
+                  </div>
+                  <Button className="col-span-2" size="sm" disabled={settingsBusy} onClick={() => void saveSettings()}>
+                    {settingsBusy ? "保存中…" : "保存账号设置"}
+                  </Button>
+                </div>
+                <div className="mt-4 border-t border-border/70 pt-4">
+                  <h3 className="text-xs font-medium">维护操作</h3>
+                  <p className="mt-1 text-[11px] text-muted-foreground">手动同步凭据与额度；敏感凭据仅通过下载导出。</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={maintenanceBusy.has(`${selected.id}:token`)}
+                      onClick={() => void runMaintenance("token")}
+                    >
+                      <KeyRound className="h-3.5 w-3.5" />
+                      {maintenanceBusy.has(`${selected.id}:token`) ? "刷新中…" : "刷新 Token"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={maintenanceBusy.has(`${selected.id}:quota`)}
+                      onClick={() => void runMaintenance("quota")}
+                    >
+                      <Gauge className="h-3.5 w-3.5" />
+                      {maintenanceBusy.has(`${selected.id}:quota`) ? "刷新中…" : "刷新额度"}
+                    </Button>
+                    <Button
+                      className="col-span-2"
+                      size="sm"
+                      variant="outline"
+                      disabled={maintenanceBusy.has(`${selected.id}:export`)}
+                      onClick={() => void runMaintenance("export")}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      {maintenanceBusy.has(`${selected.id}:export`) ? "导出中…" : "导出凭据"}
+                    </Button>
+                  </div>
+                </div>
+                <div className="mt-4 border-t border-border/70 pt-4">
+                  <h3 className="text-xs font-medium">状态时间线</h3>
+                  {events.length ? (
+                    <ul className="mt-2 space-y-2">
+                      {events.slice(0, 5).map((event) => (
+                        <li key={event.id} className="rounded-md bg-background px-2.5 py-2 text-[11px]">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium">{event.event_type}</span>
+                            <time className="text-muted-foreground">{formatDate(event.created_at)}</time>
+                          </div>
+                          <p className="mt-1 text-muted-foreground">{event.reason || `${event.from_pool || "new"} → ${event.to_pool}`}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <p className="mt-2 text-[11px] text-muted-foreground">暂无状态事件</p>}
+                </div>
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <Button
                     size="sm"

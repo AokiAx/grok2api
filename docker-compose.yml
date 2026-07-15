@@ -70,7 +70,7 @@ services:
       flaresolverr:
         condition: service_started
     ports:
-      - "${GROK2API_PORT:-8787}:8787"
+      - "127.0.0.1:${GROK2API_PORT:-8787}:8787"
     environment:
       GROK2API_HOST: 0.0.0.0
       GROK2API_PORT: 8787

@@ -30,8 +30,9 @@ npm run build
 
 | 路由 | 说明 |
 |------|------|
-| `/login` | 管理密钥登录 |
+| `/login` | 管理员 session 登录；access token 仅保存在内存，refresh 使用 HttpOnly cookie |
 | `/` | 号池总览 |
 | `/accounts` | 账号列表 / 恢复 / 删除 |
 | `/import` | 导入 preview/commit |
+| `/client-keys` | Client Key 列表、创建、权限编辑与撤销；secret 仅创建后展示一次 |
 | `/system` | 版本信息 |

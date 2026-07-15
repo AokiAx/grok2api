@@ -23,20 +23,24 @@ Inference `/v1/*` keeps OpenAI/Anthropic error shapes — do not mix envelopes.
 
 | Surface | Credential |
 |---------|------------|
-| `/v1/*` | `api_key` (`Authorization: Bearer` or `x-api-key`) |
-| `/api/admin/v1/*` | admin key: `panel_password` → `app_key` → `api_key` |
+| `/v1/*` | persisted client key (`Authorization: Bearer` or `x-api-key`) |
+| `/api/admin/v1/*` | short-lived opaque administrator access token (`Authorization: Bearer`) |
 | Public | meta, health |
 
-Admin requests: `Authorization: Bearer <admin-key>` or `x-api-key: <admin-key>`.
+`POST /api/admin/v1/auth/login` accepts `{ "username": "admin", "password": "...", "remember": false }`. It returns a 5-minute access token in JSON and sets the refresh token only in an `HttpOnly`, `SameSite=Strict` cookie. `remember` controls whether that cookie persists across browser sessions; the server-side refresh session expires after 30 days either way.
 
-`POST /api/admin/v1/auth/login` accepts `{ "password": "..." }` and returns the same secret as `token` (bearer). Future: signed session cookie.
+`POST /api/admin/v1/auth/refresh` rotates both access and refresh credentials. Concurrent use of the previous refresh cookie returns `409 refresh_conflict` without deleting the winner cookie; confirmed replay outside the grace window returns `401 invalid_refresh_session` and revokes the session family. `POST /api/admin/v1/auth/logout` revokes the server-side session and deletes the cookie.
+
+Legacy `panel_password` / `app_key` values are one-time bootstrap inputs only. `api_key` can migrate only to a legacy client key and never grants administrator access.
 
 ## Routes
 
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/api/admin/v1/system/meta` | no | `auth_required`, `api_version`, `version` |
-| POST | `/api/admin/v1/auth/login` | no | body password/token |
+| POST | `/api/admin/v1/auth/login` | no | username, password, remember |
+| POST | `/api/admin/v1/auth/refresh` | refresh cookie | rotate credentials |
+| POST | `/api/admin/v1/auth/logout` | bearer and/or refresh cookie | revoke session and clear cookie |
 | GET | `/api/admin/v1/auth/me` | yes | role probe |
 | GET | `/api/admin/v1/dashboard` | yes | summary + pool + circuit |
 | GET | `/api/admin/v1/pool` | yes | ready/unavailable/reasons |
@@ -46,6 +50,29 @@ Admin requests: `Authorization: Bearer <admin-key>` or `x-api-key: <admin-key>`.
 | POST | `/api/admin/v1/accounts/{id}/recover` | yes | |
 | POST | `/api/admin/v1/accounts/import/preview` | yes | dry-run import |
 | POST | `/api/admin/v1/accounts/import` | yes | commit import |
+| GET/POST | `/api/admin/v1/client-keys` | yes | list/create; secret is shown only on create |
+| GET/PATCH | `/api/admin/v1/client-keys/{id}` | yes | inspect/update policy |
+| POST | `/api/admin/v1/client-keys/{id}/revoke` | yes | irreversible revoke |
+
+### Create client key
+
+`POST /api/admin/v1/client-keys` requires all three policy fields to be present: `model_policy`, `rpm_limit`, and `max_concurrent`. Omitting any of them returns `400 invalid_request`; the server does not interpret missing fields as unlimited access.
+
+```json
+{
+  "name": "automation",
+  "model_policy": "allowlist",
+  "model_scopes": ["grok-4.5"],
+  "rpm_limit": 60,
+  "max_concurrent": 2,
+  "expires_at": null
+}
+```
+
+- `model_policy`: `all` or `allowlist`; an allowlist requires at least one `model_scopes` entry.
+- `rpm_limit`: integer `>= 0`; `0` explicitly means unlimited requests per minute.
+- `max_concurrent`: integer `>= 0`; `0` explicitly means unlimited concurrent requests for that key.
+- `secret` is returned only by the successful create response and is never returned by list, detail, or update responses.
 
 ### Health aliases
 
@@ -80,6 +107,6 @@ active, max_active, has_refresh_token
 ## Frontend cutover notes
 
 1. Dev proxy: Vite → `http://127.0.0.1:8787`
-2. Store admin token from login; send Bearer on all v1 calls
+2. Keep the access token in memory only; use the HttpOnly refresh cookie to restore/rotate the session
 3. Prefer `/api/admin/v1/*` only; do not depend on legacy paths
 4. The Docker image serves `/app/frontend/dist` at `/`; bare Go development uses Vite unless `frontend.static_path` is configured

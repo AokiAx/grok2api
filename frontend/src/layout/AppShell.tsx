@@ -1,4 +1,4 @@
-import { Github, LayoutDashboard, LogOut, Menu, Settings2, Upload, Users, X } from "lucide-react";
+import { Github, KeyRound, LayoutDashboard, LogOut, Menu, Settings2, Upload, Users, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "@/auth/AuthContext";
@@ -9,6 +9,7 @@ import { cn } from "@/lib/cn";
 const navigation = [
   { to: "/", label: "总览", icon: LayoutDashboard, end: true },
   { to: "/accounts", label: "账号", icon: Users, end: false },
+  { to: "/client-keys", label: "客户端密钥", icon: KeyRound, end: false },
   { to: "/import", label: "导入", icon: Upload, end: false },
   { to: "/system", label: "系统", icon: Settings2, end: false },
 ];
@@ -96,7 +97,7 @@ export function AppShell() {
           <button
             type="button"
             className="flex size-10 items-center justify-center rounded-md text-muted-foreground transition-[background-color,color,transform] duration-150 hover:bg-secondary/55 hover:text-foreground active:scale-95"
-            onClick={logout}
+            onClick={() => void logout()}
             aria-label="退出登录"
             title="退出登录"
           >

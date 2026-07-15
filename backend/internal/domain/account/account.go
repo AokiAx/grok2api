@@ -1,6 +1,9 @@
 package account
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type Pool string
 
@@ -42,6 +45,7 @@ type Account struct {
 	AuthenticationFails int
 	Active              int
 	MaxActive           int
+	Priority            int
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -157,6 +161,38 @@ func (a *Account) DisableRevoked(at time.Time, permanentErrorCode string) {
 		permanentErrorCode = "refresh-revoked"
 	}
 	a.MarkUnavailable(ReasonDisabled, normalizeTime(at).Add(revokedRetry), permanentErrorCode, at)
+}
+
+// DisableByAdmin removes an account from scheduling until an administrator
+// explicitly enables it again. Operational counters and runtime configuration
+// are preserved.
+func (a *Account) DisableByAdmin(at time.Time) {
+	a.MarkUnavailable(ReasonDisabled, normalizeTime(at).Add(revokedRetry), "admin-disabled", at)
+}
+
+// EnableByAdmin re-enables only accounts disabled through the administrative
+// control. Authentication failures and revoked credentials must still pass the
+// normal validation/recovery flow.
+func (a *Account) EnableByAdmin(at time.Time) bool {
+	if a.Pool != PoolUnavailable || a.UnavailableReason != ReasonDisabled || a.LastErrorCode != "admin-disabled" {
+		return false
+	}
+	a.MarkReady(at)
+	return true
+}
+
+// ConfigureRuntime updates scheduler-facing account controls.
+func (a *Account) ConfigureRuntime(priority, maxActive int, at time.Time) error {
+	if priority < 0 {
+		return errors.New("priority must be non-negative")
+	}
+	if maxActive < 1 {
+		return errors.New("max_active must be at least 1")
+	}
+	a.Priority = priority
+	a.MaxActive = maxActive
+	a.UpdatedAt = normalizeTime(at)
+	return nil
 }
 
 // ApplyRefreshFailure records a failed token refresh, including its auth-fail

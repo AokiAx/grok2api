@@ -42,6 +42,7 @@ type Client struct {
 	clientIdentifier string
 	userAgent        string
 	httpClient       *http.Client
+	streamHTTPClient *http.Client
 	discoveryMu      sync.Mutex
 	tokenEndpoints   map[string]string
 	identityMu       sync.Mutex
@@ -56,6 +57,8 @@ func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	streamHTTPClient := *httpClient
+	streamHTTPClient.Timeout = 0
 	tokenAuth := strings.TrimSpace(opts.TokenAuth)
 	if tokenAuth == "" {
 		tokenAuth = "xai-grok-cli"
@@ -71,6 +74,7 @@ func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client
 		clientIdentifier: identifier,
 		userAgent:        strings.TrimSpace(opts.UserAgent),
 		httpClient:       httpClient,
+		streamHTTPClient: &streamHTTPClient,
 		tokenEndpoints:   make(map[string]string),
 		identities:       make(map[string]clientIdentity),
 	}
@@ -183,7 +187,11 @@ func (c *Client) Request(
 		request.Header.Set("Accept", "application/json")
 	}
 
-	response, err := c.httpClient.Do(request)
+	client := c.httpClient
+	if stream && c.streamHTTPClient != nil {
+		client = c.streamHTTPClient
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("send upstream %s request: %w", path, err)
 	}

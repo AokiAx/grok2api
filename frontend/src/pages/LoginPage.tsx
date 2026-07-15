@@ -7,11 +7,34 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
+const powershellBootstrapCommand = "$env:ADMIN_PASSWORD | docker compose run --rm -T app bootstrap-admin --password-stdin --config /app/config.json";
+const bashBootstrapCommand = 'printf \'%s\\n\' "$ADMIN_PASSWORD" | docker compose run --rm -T app bootstrap-admin --password-stdin --config /app/config.json';
+
+function loginErrorMessage(error: unknown): string {
+  if (!(error instanceof AdminApiError)) return "登录失败，请检查服务连接后重试";
+  switch (error.code) {
+    case "invalid_credentials":
+      return "管理员密码不正确";
+    case "login_rate_limited": {
+      const seconds = Number(error.retryAfter);
+      return Number.isFinite(seconds) && seconds > 0
+        ? `登录尝试过多，请在 ${Math.ceil(seconds)} 秒后重试`
+        : "登录尝试过多，请稍后重试";
+    }
+    case "setup_required":
+      return "管理员账号尚未初始化，请先运行 bootstrap-admin";
+    case "unauthorized":
+      return "登录会话无效，请重新输入管理员密码";
+    default:
+      return error.message || "登录失败，请稍后重试";
+  }
+}
+
 export function LoginPage() {
-  const { ready, meta, login } = useAuth();
+  const { ready, meta, error: metaError, login, refreshMeta } = useAuth();
   const authed = useIsAuthenticated();
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -24,7 +47,7 @@ export function LoginPage() {
     try {
       await login(password, remember);
     } catch (err) {
-      setError(err instanceof AdminApiError ? err.message : "登录失败");
+      setError(loginErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -58,18 +81,48 @@ export function LoginPage() {
             <div className="mb-6">
               <h1 className="text-xl font-medium">登录</h1>
               <p className="mt-2 text-xs leading-5 text-muted-foreground text-pretty lg:hidden">
-                使用管理密钥进入面板
+                使用管理员密码进入面板
               </p>
             </div>
 
             {!ready ? (
               <p className="text-sm text-muted-foreground" role="status">加载中…</p>
+            ) : metaError && !meta ? (
+              <div className="space-y-3 rounded-lg border border-destructive/20 bg-destructive/8 p-3">
+                <p className="text-xs leading-5 text-destructive" role="alert">
+                  无法加载服务状态：{metaError}
+                </p>
+                <Button type="button" variant="outline" size="sm" onClick={() => void refreshMeta()}>
+                  重试
+                </Button>
+              </div>
             ) : meta && !meta.auth_required ? (
-              <p className="text-sm text-muted-foreground" role="status">未配置管理密钥，将直接进入。</p>
+              <p className="text-sm text-muted-foreground" role="status">当前实例未启用管理员认证，将直接进入。</p>
+            ) : meta?.setup_required ? (
+              <div className="space-y-3" role="status">
+                <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                  管理员账号尚未初始化。请在服务端设置 <code className="font-mono">ADMIN_PASSWORD</code> 后运行 bootstrap-admin：
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">PowerShell</p>
+                  <code className="block overflow-x-auto rounded-md bg-secondary/60 p-3 font-mono text-[11px] leading-5 text-foreground">
+                    {powershellBootstrapCommand}
+                  </code>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">Bash</p>
+                  <code className="block overflow-x-auto rounded-md bg-secondary/60 p-3 font-mono text-[11px] leading-5 text-foreground">
+                    {bashBootstrapCommand}
+                  </code>
+                </div>
+                <Button type="button" variant="outline" size="sm" onClick={() => void refreshMeta()}>
+                  初始化完成后重试
+                </Button>
+              </div>
             ) : (
               <form className="space-y-4" onSubmit={onSubmit}>
                 <div className="space-y-2">
-                  <Label htmlFor="password">管理密钥</Label>
+                  <Label htmlFor="password">管理员密码</Label>
                   <Input
                     id="password"
                     className="bg-secondary/55"
@@ -78,7 +131,7 @@ export function LoginPage() {
                     autoFocus
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="panel_password / app_key / api_key"
+                    placeholder="输入管理员密码"
                     required
                   />
                 </div>

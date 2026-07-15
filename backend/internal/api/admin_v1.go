@@ -1,15 +1,20 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/admin"
+	authservice "github.com/AokiAx/grok2api/backend/internal/adminauth"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
@@ -25,6 +30,20 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	// Health aliases (k8s-friendly).
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.readyz)
+	if s.adminAuth != nil {
+		RegisterAdminAuthRoutes(mux, s.adminAuth, s.adminAuthOptions)
+	} else if s.admin != nil {
+		mux.HandleFunc("POST /api/admin/v1/auth/login", s.adminV1Login)
+		mux.HandleFunc("POST /api/admin/v1/auth/logout", s.adminV1Logout)
+		mux.HandleFunc("POST /api/admin/v1/auth/refresh", s.adminV1Refresh)
+		mux.HandleFunc("GET /api/admin/v1/auth/me", s.adminV1Me)
+		mux.HandleFunc("GET /api/admin/v1/me", s.adminV1Me)
+	}
+	if s.clientKeys != nil {
+		RegisterClientKeyAdminRoutes(mux, s.clientKeys, func(request *http.Request) bool {
+			return s.adminAuthenticationError(request) == nil
+		})
+	}
 
 	if s.admin == nil {
 		return
@@ -38,18 +57,21 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/api/accounts/import", s.adminImport)
 
 	// ---- versioned management API contract ----
-	mux.HandleFunc("POST /api/admin/v1/auth/login", s.adminV1Login)
-	mux.HandleFunc("POST /api/admin/v1/auth/logout", s.adminV1Logout)
-	mux.HandleFunc("POST /api/admin/v1/auth/refresh", s.adminV1Refresh)
-	mux.HandleFunc("GET /api/admin/v1/auth/me", s.adminV1Me)
-	mux.HandleFunc("GET /api/admin/v1/me", s.adminV1Me)
 	mux.HandleFunc("GET /api/admin/v1/dashboard", s.adminV1Dashboard)
 	mux.HandleFunc("GET /api/admin/v1/pool", s.adminV1Pool)
 	mux.HandleFunc("GET /api/admin/v1/system", s.adminV1System)
 	mux.HandleFunc("GET /api/admin/v1/accounts", s.adminV1List)
 	mux.HandleFunc("GET /api/admin/v1/accounts/summary", s.adminV1AccountsSummary)
+	mux.HandleFunc("POST /api/admin/v1/accounts/batch", s.adminV1BatchAccounts)
+	mux.HandleFunc("GET /api/admin/v1/accounts/{id}", s.adminV1GetAccount)
+	mux.HandleFunc("PATCH /api/admin/v1/accounts/{id}", s.adminV1UpdateAccount)
+	mux.HandleFunc("GET /api/admin/v1/accounts/{id}/events", s.adminV1AccountEvents)
 	mux.HandleFunc("DELETE /api/admin/v1/accounts/{id}", s.adminV1Delete)
 	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/recover", s.adminV1Recover)
+	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/refresh-token", s.adminV1RefreshCredential)
+	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/refresh-quota", s.adminV1RefreshQuota)
+	mux.HandleFunc("POST /api/admin/v1/accounts/{id}/refresh-billing", s.adminV1RefreshBilling)
+	mux.HandleFunc("GET /api/admin/v1/accounts/{id}/credentials/export", s.adminV1ExportCredential)
 	mux.HandleFunc("POST /api/admin/v1/accounts/import/preview", s.adminV1ImportPreview)
 	mux.HandleFunc("POST /api/admin/v1/accounts/import", s.adminV1Import)
 }
@@ -88,6 +110,10 @@ func writeAdminError(writer http.ResponseWriter, status int, code, message strin
 	if code == "" {
 		code = "error"
 	}
+	if status >= http.StatusInternalServerError {
+		slog.Error("admin api request failed", "status", status, "code", code, "error", message)
+		message = publicAdminErrorMessage(status)
+	}
 	writeJSON(writer, status, map[string]any{
 		"ok":   false,
 		"data": nil,
@@ -98,22 +124,71 @@ func writeAdminError(writer http.ResponseWriter, status int, code, message strin
 	})
 }
 
+func publicAdminErrorMessage(status int) string {
+	switch status {
+	case http.StatusBadGateway:
+		return "Upstream operation failed"
+	case http.StatusServiceUnavailable:
+		return "Service temporarily unavailable"
+	default:
+		return "Internal server error"
+	}
+}
+
 func (s *Server) requireAdmin(writer http.ResponseWriter, request *http.Request) bool {
-	if authorizedWithKey(request, s.adminKey) {
+	err := s.adminAuthenticationError(request)
+	if err == nil {
 		return true
 	}
-	writeAdminError(writer, http.StatusUnauthorized, "unauthorized", "Invalid admin key")
+	if errors.Is(err, authservice.ErrUnauthorized) {
+		writer.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
+		message := "Administrator authentication is required"
+		if s.adminAuth == nil {
+			message = "Invalid admin key"
+		}
+		writeAdminError(writer, http.StatusUnauthorized, "unauthorized", message)
+		return false
+	}
+	writeAdminError(writer, http.StatusInternalServerError, "internal_error", "Administrator authentication failed")
 	return false
+}
+
+func (s *Server) adminAuthenticationError(request *http.Request) error {
+	if s.adminAuth == nil {
+		if authorizedWithKey(request, s.adminKey) {
+			return nil
+		}
+		return authservice.ErrUnauthorized
+	}
+	parts := strings.Fields(request.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return authservice.ErrUnauthorized
+	}
+	_, _, err := s.adminAuth.AuthenticateAccess(request.Context(), parts[1])
+	return err
+}
+
+func (s *Server) adminSetupRequired(ctx context.Context) (bool, error) {
+	if s.adminAuth == nil {
+		return false, nil
+	}
+	return s.adminAuth.SetupRequired(ctx)
 }
 
 // --- v1 handlers ------------------------------------------------------------
 
-func (s *Server) adminV1Meta(writer http.ResponseWriter, _ *http.Request) {
+func (s *Server) adminV1Meta(writer http.ResponseWriter, request *http.Request) {
+	setupRequired, err := s.adminSetupRequired(request.Context())
+	if err != nil {
+		writeAdminError(writer, http.StatusInternalServerError, "internal_error", "Failed to read administrator setup state")
+		return
+	}
 	writeAdminOK(writer, http.StatusOK, map[string]any{
-		"auth_required": s.adminKey != "",
-		"version":       "1.0.0-go",
-		"api_version":   adminAPIVersion,
-		"panel_paths":   []string{"/"},
+		"auth_required":  s.adminAuth != nil || s.adminKey != "",
+		"setup_required": setupRequired,
+		"version":        "1.0.0-go",
+		"api_version":    adminAPIVersion,
+		"panel_paths":    []string{"/"},
 	})
 }
 
@@ -336,6 +411,108 @@ func (s *Server) adminV1AccountsSummary(writer http.ResponseWriter, request *htt
 	})
 }
 
+func (s *Server) adminV1GetAccount(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	item, err := s.admin.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminServiceError(writer, err, "get_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1UpdateAccount(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	var body admin.UpdateAccountRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid account update payload")
+		return
+	}
+	if body.Enabled == nil && body.Priority == nil && body.MaxActive == nil {
+		writeAdminError(writer, http.StatusUnprocessableEntity, "empty_update", "At least one account field is required")
+		return
+	}
+	item, err := s.admin.Update(request.Context(), request.PathValue("id"), body)
+	if err != nil {
+		writeAdminServiceError(writer, err, "update_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1BatchAccounts(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	var body admin.BatchAccountRequest
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 2<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid account batch payload")
+		return
+	}
+	if len(body.IDs) == 0 || len(body.IDs) > 1000 {
+		writeAdminError(writer, http.StatusUnprocessableEntity, "invalid_ids", "ids must contain between 1 and 1000 accounts")
+		return
+	}
+	result, err := s.admin.Batch(request.Context(), body)
+	if err != nil {
+		writeAdminServiceError(writer, err, "batch_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, result)
+}
+
+func (s *Server) adminV1AccountEvents(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	page, _ := strconv.Atoi(strings.TrimSpace(request.URL.Query().Get("page")))
+	pageSize, _ := strconv.Atoi(strings.TrimSpace(request.URL.Query().Get("page_size")))
+	result, err := s.admin.Events(request.Context(), request.PathValue("id"), page, pageSize)
+	if err != nil {
+		writeAdminServiceError(writer, err, "events_failed")
+		return
+	}
+	items := make([]map[string]any, 0, len(result.Items))
+	for _, item := range result.Items {
+		items = append(items, publicAccountEvent(item))
+	}
+	writeAdminOK(writer, http.StatusOK, map[string]any{
+		"items": items, "total": result.Total, "page": result.Page, "page_size": result.PageSize,
+	})
+}
+
+func publicAccountEvent(item repository.AccountEvent) map[string]any {
+	return map[string]any{
+		"id": item.ID, "account_id": item.AccountID, "event_type": item.Type,
+		"from_pool": item.FromPool, "to_pool": item.ToPool, "reason": item.Reason,
+		"error_code": item.ErrorCode, "details": item.Details, "created_at": item.CreatedAt,
+	}
+}
+
+func writeAdminServiceError(writer http.ResponseWriter, err error, fallbackCode string) {
+	status := http.StatusInternalServerError
+	code := fallbackCode
+	switch {
+	case errors.Is(err, admin.ErrAccountNotFound):
+		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, admin.ErrInvalidAccountState):
+		status, code = http.StatusConflict, "invalid_account_state"
+	case errors.Is(err, admin.ErrInvalidBatchAction):
+		status, code = http.StatusUnprocessableEntity, "invalid_batch_action"
+	case strings.Contains(err.Error(), "priority"), strings.Contains(err.Error(), "max_active"):
+		status, code = http.StatusUnprocessableEntity, "validation_error"
+	}
+	writeAdminError(writer, status, code, err.Error())
+}
+
 func (s *Server) adminV1Delete(writer http.ResponseWriter, request *http.Request) {
 	if !s.requireAdmin(writer, request) {
 		return
@@ -370,6 +547,87 @@ func (s *Server) adminV1Recover(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1RefreshCredential(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	item, err := s.admin.RefreshCredential(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminMaintenanceError(writer, err, "refresh_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, publicAccount(item))
+}
+
+func (s *Server) adminV1RefreshQuota(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	result, err := s.admin.RefreshQuota(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminMaintenanceError(writer, err, "quota_refresh_failed")
+		return
+	}
+	writeAdminOK(writer, http.StatusOK, result)
+}
+
+func (s *Server) adminV1RefreshBilling(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	if _, err := s.admin.Get(request.Context(), request.PathValue("id")); err != nil {
+		writeAdminServiceError(writer, err, "get_failed")
+		return
+	}
+	writeAdminError(writer, http.StatusNotImplemented, "billing_unsupported", "Free-tier accounts do not expose a reliable billing query; use refresh-quota for observed capacity")
+}
+
+func (s *Server) adminV1ExportCredential(writer http.ResponseWriter, request *http.Request) {
+	if !s.requireAdmin(writer, request) {
+		return
+	}
+	exported, err := s.admin.ExportCredential(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeAdminServiceError(writer, err, "credential_export_failed")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.Header().Set("Content-Disposition", `attachment; filename="grok2api-account-`+safeDownloadName(exported.ID)+`.json"`)
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Pragma", "no-cache")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(writer).Encode(exported)
+}
+
+func writeAdminMaintenanceError(writer http.ResponseWriter, err error, fallbackCode string) {
+	if errors.Is(err, admin.ErrAccountNotFound) {
+		writeAdminError(writer, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	if errors.Is(err, admin.ErrMaintenanceUnavailable) {
+		writeAdminError(writer, http.StatusServiceUnavailable, "maintenance_unavailable", err.Error())
+		return
+	}
+	writeAdminError(writer, http.StatusBadGateway, fallbackCode, err.Error())
+}
+
+func safeDownloadName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "account"
+	}
+	var result strings.Builder
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.' {
+			result.WriteRune(char)
+		} else {
+			result.WriteByte('_')
+		}
+	}
+	return result.String()
 }
 
 func (s *Server) adminV1ImportPreview(writer http.ResponseWriter, request *http.Request) {

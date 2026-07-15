@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth, useIsAuthenticated } from "@/auth/AuthContext";
 import { AppShell } from "@/layout/AppShell";
 import { AccountsPage } from "@/pages/AccountsPage";
+import { ClientKeysPage } from "@/pages/ClientKeysPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { ImportPage } from "@/pages/ImportPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -35,6 +36,7 @@ export function App() {
       >
         <Route index element={<DashboardPage />} />
         <Route path="accounts" element={<AccountsPage />} />
+        <Route path="client-keys" element={<ClientKeysPage />} />
         <Route path="import" element={<ImportPage />} />
         <Route path="system" element={<SystemPage />} />
       </Route>

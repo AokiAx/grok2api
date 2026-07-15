@@ -26,6 +26,12 @@ func StickyKeyFromRequest(request *http.Request) string {
 			return header + ":" + value
 		}
 	}
+	if grant, ok := ClientGrantFromContext(request.Context()); ok && grant.Authenticated {
+		expected := "client-key:" + strings.TrimSpace(grant.KeyID)
+		if grant.Principal != "" && grant.Principal == expected && expected != "client-key:" {
+			return expected
+		}
+	}
 	token := request.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if len(token) >= len(prefix) && strings.EqualFold(token[:len(prefix)], prefix) {

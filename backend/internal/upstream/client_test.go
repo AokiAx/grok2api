@@ -125,6 +125,54 @@ func TestClientSendsGrokCLIHeaders(t *testing.T) {
 	}
 }
 
+func TestStreamingRequestIsNotCancelledByNonStreamingTotalTimeout(t *testing.T) {
+	releaseBody := make(chan struct{})
+	requestCancelled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.WriteHeader(http.StatusOK)
+		writer.(http.Flusher).Flush()
+		select {
+		case <-request.Context().Done():
+			close(requestCancelled)
+			return
+		case <-releaseBody:
+			_, _ = writer.Write([]byte("data: done\n\n"))
+		}
+	}))
+	defer server.Close()
+
+	baseClient := server.Client()
+	baseClient.Timeout = 25 * time.Millisecond
+	client := upstream.NewClient(server.URL, "0.2.93", baseClient)
+	response, err := client.Request(
+		context.Background(),
+		account.Account{ID: "stream-account", AccessToken: "token"},
+		http.MethodPost,
+		"/responses",
+		[]byte(`{"model":"grok-4.5","stream":true}`),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("start stream: %v", err)
+	}
+	defer response.Body.Close()
+
+	select {
+	case <-requestCancelled:
+		t.Fatal("stream was cancelled by the non-streaming total timeout")
+	case <-time.After(75 * time.Millisecond):
+	}
+	close(releaseBody)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if string(body) != "data: done\n\n" {
+		t.Fatalf("body=%q", body)
+	}
+}
+
 func TestClientStableIdentityAndStreamEncoding(t *testing.T) {
 	var firstAgent, firstSession, secondAgent, secondSession string
 	var acceptEncoding string

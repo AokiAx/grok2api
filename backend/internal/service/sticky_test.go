@@ -29,6 +29,53 @@ func TestStickyKeyFromRequest(t *testing.T) {
 	}
 }
 
+func TestStickyKeyFromAuthenticatedClientPreservesExplicitTenantIsolation(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer raw-bearer-secret")
+	req.Header.Set("x-api-key", "raw-header-secret")
+	req.Header.Set("X-Grok2API-Sticky", "caller-controlled")
+	req = req.WithContext(service.WithClientGrant(req.Context(), service.ClientGrant{
+		Authenticated: true,
+		KeyID:         "ck_123",
+		Principal:     "client-key:ck_123",
+	}))
+	got := service.StickyKeyFromRequest(req)
+	if got != "X-Grok2API-Sticky:caller-controlled" {
+		t.Fatalf("authenticated sticky=%q", got)
+	}
+	if strings.Contains(got, "raw-bearer-secret") || strings.Contains(got, "raw-header-secret") {
+		t.Fatalf("authenticated sticky leaked raw secret: %q", got)
+	}
+
+	// An anonymous or malformed grant must not suppress the established
+	// explicit-header fallback contract.
+	req = req.WithContext(service.WithClientGrant(req.Context(), service.ClientGrant{
+		Authenticated: false,
+		Principal:     "client-key:untrusted",
+	}))
+	if got := service.StickyKeyFromRequest(req); got != "X-Grok2API-Sticky:caller-controlled" {
+		t.Fatalf("anonymous fallback=%q", got)
+	}
+}
+
+func TestStickyKeyFromAuthenticatedClientReplacesRawAuthFallback(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer raw-bearer-secret")
+	req.Header.Set("x-api-key", "raw-header-secret")
+	req = req.WithContext(service.WithClientGrant(req.Context(), service.ClientGrant{
+		Authenticated: true,
+		KeyID:         "ck_123",
+		Principal:     "client-key:ck_123",
+	}))
+	got := service.StickyKeyFromRequest(req)
+	if got != "client-key:ck_123" {
+		t.Fatalf("authenticated auth fallback=%q", got)
+	}
+	if strings.Contains(got, "raw-bearer-secret") || strings.Contains(got, "raw-header-secret") {
+		t.Fatalf("auth fallback leaked raw secret: %q", got)
+	}
+}
+
 func TestPayloadAffinityKeyAndCompose(t *testing.T) {
 	if got := service.PayloadAffinityKey(nil); got != "" {
 		t.Fatalf("nil payload: %q", got)

@@ -57,18 +57,27 @@ type Validator interface {
 	Validate(context.Context, account.Account) (account.UnavailableReason, string, error)
 }
 
+// Maintenance performs explicit, operator-triggered upstream account checks.
+// It is injected separately from Validator so administrative actions remain
+// testable without depending on the concrete upstream client.
+type Maintenance interface {
+	Refresh(context.Context, account.Account) (account.Account, error)
+	ProbeFreeQuotaUsage(context.Context, account.Account) (account.UnavailableReason, string, int64, int64, bool, error)
+}
+
 type AccountSink interface {
 	Upsert(account.Account)
 	Delete(string) bool
 }
 
 type Service struct {
-	repository repository.AccountRepository
-	validator  Validator
-	sink       AccountSink
-	now        func() time.Time
-	quotaRetry time.Duration
-	rateRetry  time.Duration
+	repository  repository.AccountRepository
+	validator   Validator
+	maintenance Maintenance
+	sink        AccountSink
+	now         func() time.Time
+	quotaRetry  time.Duration
+	rateRetry   time.Duration
 }
 
 type Option func(*Service)
@@ -76,6 +85,20 @@ type Option func(*Service)
 func WithSink(sink AccountSink) Option {
 	return func(service *Service) {
 		service.sink = sink
+	}
+}
+
+func WithMaintenance(maintenance Maintenance) Option {
+	return func(service *Service) {
+		service.maintenance = maintenance
+	}
+}
+
+func WithClock(now func() time.Time) Option {
+	return func(service *Service) {
+		if now != nil {
+			service.now = now
+		}
 	}
 }
 
@@ -93,7 +116,62 @@ func NewService(repository repository.AccountRepository, validator Validator, op
 	return service
 }
 
-var ErrAccountNotFound = errors.New("account not found")
+var (
+	ErrAccountNotFound        = errors.New("account not found")
+	ErrInvalidAccountState    = errors.New("invalid account state")
+	ErrInvalidBatchAction     = errors.New("invalid batch action")
+	ErrMaintenanceUnavailable = errors.New("account maintenance unavailable")
+)
+
+// QuotaRefreshResult reports the observation used to update one account.
+type QuotaRefreshResult struct {
+	AccountID string                    `json:"account_id"`
+	Reason    account.UnavailableReason `json:"reason,omitempty"`
+	ErrorCode string                    `json:"error_code,omitempty"`
+	Actual    int64                     `json:"actual"`
+	Limit     int64                     `json:"limit"`
+	Observed  bool                      `json:"observed"`
+}
+
+// CredentialExport is intentionally returned only by the explicit export
+// operation. Normal list/detail DTOs must never embed this type.
+type CredentialExport struct {
+	ID           string `json:"id"`
+	Key          string `json:"key"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	Email        string `json:"email,omitempty"`
+	OIDCIssuer   string `json:"oidc_issuer,omitempty"`
+	OIDCClientID string `json:"oidc_client_id,omitempty"`
+	UserID       string `json:"user_id,omitempty"`
+	TeamID       string `json:"team_id,omitempty"`
+}
+
+type UpdateAccountRequest struct {
+	Enabled   *bool `json:"enabled,omitempty"`
+	Priority  *int  `json:"priority,omitempty"`
+	MaxActive *int  `json:"max_active,omitempty"`
+}
+
+type BatchAction string
+
+const (
+	BatchActionEnable  BatchAction = "enable"
+	BatchActionDisable BatchAction = "disable"
+	BatchActionRecover BatchAction = "recover"
+	BatchActionDelete  BatchAction = "delete"
+)
+
+type BatchAccountRequest struct {
+	IDs    []string    `json:"ids"`
+	Action BatchAction `json:"action"`
+}
+
+type BatchAccountResult struct {
+	Updated int      `json:"updated"`
+	Deleted int      `json:"deleted"`
+	IDs     []string `json:"ids"`
+}
 
 type ImportAccount struct {
 	ID           string `json:"id"`
@@ -132,6 +210,245 @@ type ImportResult struct {
 
 func (s *Service) List(ctx context.Context) ([]account.Account, error) {
 	return s.repository.ListAccounts(ctx)
+}
+
+func (s *Service) Get(ctx context.Context, id string) (account.Account, error) {
+	item, found, err := s.repository.GetAccount(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return account.Account{}, fmt.Errorf("get account: %w", err)
+	}
+	if !found {
+		return account.Account{}, ErrAccountNotFound
+	}
+	return item, nil
+}
+
+// RefreshCredential rotates one account's OAuth tokens. A successful token
+// exchange does not implicitly recover an unavailable account: validation or
+// a quota probe must still establish that it is safe to schedule.
+func (s *Service) RefreshCredential(ctx context.Context, id string) (account.Account, error) {
+	item, err := s.Get(ctx, id)
+	if err != nil {
+		return account.Account{}, err
+	}
+	if s.maintenance == nil {
+		return account.Account{}, ErrMaintenanceUnavailable
+	}
+	refreshed, refreshErr := s.maintenance.Refresh(ctx, item)
+	if refreshErr != nil {
+		item.ApplyRefreshFailure(isPermanentRefreshError(refreshErr), s.now().UTC(), 5*time.Minute)
+		if err := s.saveAndPublish(ctx, item); err != nil {
+			return account.Account{}, err
+		}
+		return item, fmt.Errorf("refresh credential %s: %w", item.ID, refreshErr)
+	}
+	refreshed.UpdatedAt = s.now().UTC()
+	if err := s.saveAndPublish(ctx, refreshed); err != nil {
+		return account.Account{}, err
+	}
+	return refreshed, nil
+}
+
+// RefreshQuota probes the same upstream surface used by production traffic,
+// persists observed counters, and updates pool state from the probe result.
+func (s *Service) RefreshQuota(ctx context.Context, id string) (QuotaRefreshResult, error) {
+	item, err := s.Get(ctx, id)
+	if err != nil {
+		return QuotaRefreshResult{}, err
+	}
+	if s.maintenance == nil {
+		return QuotaRefreshResult{}, ErrMaintenanceUnavailable
+	}
+	reason, errorCode, actual, limit, observed, err := s.maintenance.ProbeFreeQuotaUsage(ctx, item)
+	if err != nil {
+		return QuotaRefreshResult{}, fmt.Errorf("refresh quota %s: %w", item.ID, err)
+	}
+	now := s.now().UTC()
+	if observed {
+		item.SetQuota(actual, limit)
+	}
+	if reason == "" {
+		if !observed && item.QuotaExhausted() {
+			item.RecoverQuotaWindow(now)
+		} else {
+			item.MarkReady(now)
+		}
+	} else {
+		item.MarkUnavailable(reason, s.retryAt(reason, item.RetryAt, now), errorCode, now)
+	}
+	if err := s.saveAndPublish(ctx, item); err != nil {
+		return QuotaRefreshResult{}, err
+	}
+	return QuotaRefreshResult{
+		AccountID: item.ID,
+		Reason:    reason,
+		ErrorCode: errorCode,
+		Actual:    actual,
+		Limit:     limit,
+		Observed:  observed,
+	}, nil
+}
+
+func (s *Service) ExportCredential(ctx context.Context, id string) (CredentialExport, error) {
+	item, err := s.Get(ctx, id)
+	if err != nil {
+		return CredentialExport{}, err
+	}
+	expiresAt := ""
+	if !item.ExpiresAt.IsZero() {
+		expiresAt = item.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return CredentialExport{
+		ID:           item.ID,
+		Key:          item.AccessToken,
+		RefreshToken: item.RefreshToken,
+		ExpiresAt:    expiresAt,
+		Email:        item.Email,
+		OIDCIssuer:   item.OIDCIssuer,
+		OIDCClientID: item.OIDCClientID,
+		UserID:       item.UserID,
+		TeamID:       item.TeamID,
+	}, nil
+}
+
+func (s *Service) saveAndPublish(ctx context.Context, item account.Account) error {
+	if err := s.repository.SaveAccount(ctx, item); err != nil {
+		return fmt.Errorf("save maintained account %s: %w", item.ID, err)
+	}
+	if s.sink != nil {
+		s.sink.Upsert(item)
+	}
+	return nil
+}
+
+func isPermanentRefreshError(err error) bool {
+	var permanent interface{ Permanent() bool }
+	return errors.As(err, &permanent) && permanent.Permanent()
+}
+
+func (s *Service) Events(ctx context.Context, id string, page, pageSize int) (repository.ListAccountEventsResult, error) {
+	if _, err := s.Get(ctx, id); err != nil {
+		return repository.ListAccountEventsResult{}, err
+	}
+	return s.repository.ListAccountEvents(ctx, repository.ListAccountEventsQuery{AccountID: strings.TrimSpace(id), Page: page, PageSize: pageSize})
+}
+
+func (s *Service) Update(ctx context.Context, id string, request UpdateAccountRequest) (account.Account, error) {
+	item, err := s.Get(ctx, id)
+	if err != nil {
+		return account.Account{}, err
+	}
+	now := s.now().UTC()
+	if request.Enabled != nil {
+		if *request.Enabled {
+			if item.Pool != account.PoolReady && !item.EnableByAdmin(now) {
+				return account.Account{}, fmt.Errorf("enable account %s: %w", item.ID, ErrInvalidAccountState)
+			}
+		} else {
+			item.DisableByAdmin(now)
+		}
+	}
+	priority := item.Priority
+	if request.Priority != nil {
+		priority = *request.Priority
+	}
+	maxActive := item.MaxActive
+	if maxActive < 1 {
+		maxActive = 1
+	}
+	if request.MaxActive != nil {
+		maxActive = *request.MaxActive
+	}
+	if err := item.ConfigureRuntime(priority, maxActive, now); err != nil {
+		return account.Account{}, fmt.Errorf("configure account %s: %w", item.ID, err)
+	}
+	if err := s.repository.SaveAccounts(ctx, []account.Account{item}); err != nil {
+		return account.Account{}, fmt.Errorf("save account %s: %w", item.ID, err)
+	}
+	if s.sink != nil {
+		s.sink.Upsert(item)
+	}
+	return item, nil
+}
+
+func (s *Service) Batch(ctx context.Context, request BatchAccountRequest) (BatchAccountResult, error) {
+	ids := uniqueAccountIDs(request.IDs)
+	if len(ids) == 0 {
+		return BatchAccountResult{}, ErrAccountNotFound
+	}
+	items := make([]account.Account, 0, len(ids))
+	for _, id := range ids {
+		item, err := s.Get(ctx, id)
+		if err != nil {
+			return BatchAccountResult{}, err
+		}
+		items = append(items, item)
+	}
+	result := BatchAccountResult{IDs: ids}
+	if request.Action == BatchActionDelete {
+		if err := s.repository.DeleteAccounts(ctx, ids); err != nil {
+			return BatchAccountResult{}, fmt.Errorf("delete accounts: %w", err)
+		}
+		for _, id := range ids {
+			if s.sink != nil {
+				s.sink.Delete(id)
+			}
+		}
+		result.Deleted = len(ids)
+		return result, nil
+	}
+
+	now := s.now().UTC()
+	for index := range items {
+		item := &items[index]
+		switch request.Action {
+		case BatchActionDisable:
+			item.DisableByAdmin(now)
+		case BatchActionEnable:
+			if item.Pool != account.PoolReady && !item.EnableByAdmin(now) {
+				return BatchAccountResult{}, fmt.Errorf("enable account %s: %w", item.ID, ErrInvalidAccountState)
+			}
+		case BatchActionRecover:
+			reason, errorCode, err := s.validator.Validate(ctx, *item)
+			if err != nil {
+				return BatchAccountResult{}, fmt.Errorf("validate account %s: %w", item.ID, err)
+			}
+			if reason == "" {
+				item.RecoverValidated(now)
+			} else {
+				item.MarkUnavailable(reason, s.retryAt(reason, item.RetryAt, now), errorCode, now)
+			}
+		default:
+			return BatchAccountResult{}, ErrInvalidBatchAction
+		}
+	}
+	if err := s.repository.SaveAccounts(ctx, items); err != nil {
+		return BatchAccountResult{}, fmt.Errorf("save account batch: %w", err)
+	}
+	for _, item := range items {
+		if s.sink != nil {
+			s.sink.Upsert(item)
+		}
+	}
+	result.Updated = len(items)
+	return result, nil
+}
+
+func uniqueAccountIDs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // ListPage returns one filtered page of accounts without loading the whole table.

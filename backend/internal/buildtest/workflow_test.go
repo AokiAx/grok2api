@@ -201,6 +201,12 @@ func TestLocalDeployVerifiesHealthAndFrontendAsset(t *testing.T) {
 	requireContains(t, script, "/health", "/assets/", "index_html", "frontend asset")
 }
 
+func TestDockerComposeBindsApplicationToLoopbackByDefault(t *testing.T) {
+	compose := readFile(t, "docker-compose.yml")
+	requireContains(t, compose, `127.0.0.1:${GROK2API_PORT:-8787}:8787`)
+	requireNotContains(t, compose, `- "${GROK2API_PORT:-8787}:8787"`)
+}
+
 func TestDeliveryExamplesUseRuntimeFrontendDirectory(t *testing.T) {
 	envExample := readFile(t, ".env.example")
 	configExample := readFile(t, "config.example.json")

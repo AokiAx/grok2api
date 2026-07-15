@@ -56,6 +56,85 @@ func TestFillFirstBurnsOneAccountBeforeNext(t *testing.T) {
 	}
 }
 
+func TestPriorityRoundRobinStaysWithinHighestAvailableTier(t *testing.T) {
+	low := readyAccount("low")
+	low.Priority = 10
+	highA := readyAccount("high-a")
+	highA.Priority = 20
+	highB := readyAccount("high-b")
+	highB.Priority = 20
+
+	s := scheduler.New([]account.Account{low, highA, highB}).
+		WithStrategy(scheduler.StrategyRoundRobin)
+
+	want := []string{"high-a", "high-b", "high-a", "high-b"}
+	for index, expected := range want {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", index, err)
+		}
+		if lease.Account().ID != expected {
+			t.Fatalf("acquire %d = %q; want %q", index, lease.Account().ID, expected)
+		}
+		lease.Release()
+	}
+}
+
+func TestPriorityFillFirstStaysWithinHighestAvailableTier(t *testing.T) {
+	low := readyAccount("a-low")
+	low.Priority = 10
+	highB := readyAccount("b-high")
+	highB.Priority = 20
+	highC := readyAccount("c-high")
+	highC.Priority = 20
+
+	s := scheduler.New([]account.Account{low, highC, highB}).
+		WithStrategy(scheduler.StrategyFillFirst)
+
+	for index := range 4 {
+		lease, err := s.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", index, err)
+		}
+		if lease.Account().ID != "b-high" {
+			t.Fatalf("acquire %d = %q; want b-high", index, lease.Account().ID)
+		}
+		lease.Release()
+	}
+}
+
+func TestPriorityFallsBackWhenHigherTierIsSaturated(t *testing.T) {
+	high := readyAccount("high")
+	high.Priority = 20
+	low := readyAccount("low")
+	low.Priority = 10
+
+	s := scheduler.New([]account.Account{high, low}).
+		WithStrategy(scheduler.StrategyRoundRobin)
+
+	highLease, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire high: %v", err)
+	}
+	if highLease.Account().ID != "high" {
+		t.Fatalf("first acquire = %q; want high", highLease.Account().ID)
+	}
+
+	lowLease, err := s.Acquire(context.Background())
+	if err != nil {
+		highLease.Release()
+		t.Fatalf("acquire fallback: %v", err)
+	}
+	if lowLease.Account().ID != "low" {
+		lowLease.Release()
+		highLease.Release()
+		t.Fatalf("fallback acquire = %q; want low", lowLease.Account().ID)
+	}
+
+	lowLease.Release()
+	highLease.Release()
+}
+
 func TestHotSetCapsConcurrentFanOut(t *testing.T) {
 	// active_size=2, max_active=1: only 2 accounts serve; cold stay unused.
 	s := scheduler.New([]account.Account{
@@ -386,9 +465,11 @@ func TestRecordUsageUpdatesQuotaAndSuccessTime(t *testing.T) {
 	}
 }
 
-func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
+func TestApplyMaxActiveCapsPerAccount(t *testing.T) {
+	base := readyAccount("base")
+	base.MaxActive = 2
 	s := scheduler.New([]account.Account{
-		readyAccount("a"),
+		base,
 		readyAccount("b"),
 	})
 	s.ApplyMaxActive(2)
@@ -397,7 +478,7 @@ func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if first.Account().ID != "a" && first.Account().ID != "b" {
+	if first.Account().ID != "base" && first.Account().ID != "b" {
 		t.Fatalf("unexpected id %q", first.Account().ID)
 	}
 	// Pin sticky-less RR: hold first, acquire until we get same id or prove capacity.
@@ -412,7 +493,9 @@ func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
 	first.Release()
 	second.Release()
 
-	s = scheduler.New([]account.Account{readyAccount("solo")})
+	solo := readyAccount("solo")
+	solo.MaxActive = 2
+	s = scheduler.New([]account.Account{solo})
 	s.ApplyMaxActive(2)
 	l1, err := s.Acquire(context.Background())
 	if err != nil {
@@ -432,6 +515,34 @@ func TestApplyMaxActiveOverridesPerAccount(t *testing.T) {
 	}
 	l1.Release()
 	l2.Release()
+}
+
+func TestApplyMaxActivePreservesPersistedPerAccountLimit(t *testing.T) {
+	perAccount := readyAccount("persisted")
+	perAccount.MaxActive = 2
+	s := scheduler.New([]account.Account{perAccount})
+
+	// The process-wide setting is a cap/default for startup. It must not erase
+	// a persisted account-specific limit when the scheduler is initialized.
+	s.ApplyMaxActive(4)
+	first, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	second, err := s.Acquire(context.Background())
+	if err != nil {
+		first.Release()
+		t.Fatalf("second acquire: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.Acquire(ctx); err == nil {
+		second.Release()
+		first.Release()
+		t.Fatal("third lease should block at persisted max_active=2")
+	}
+	second.Release()
+	first.Release()
 }
 
 func TestActiveByIDReturnsLiveLeaseCounts(t *testing.T) {
