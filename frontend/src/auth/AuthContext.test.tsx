@@ -86,7 +86,7 @@ describe("AuthProvider", () => {
     expect(await screen.findByText("authenticated")).toBeInTheDocument();
   });
 
-  it("waits for backend logout before clearing the authenticated UI state", async () => {
+  it("clears protected UI state before a hanging backend logout completes", async () => {
     let finishLogout!: () => void;
     apiMocks.logout.mockReturnValue(new Promise((resolve) => {
       finishLogout = () => resolve({ loggedOut: true });
@@ -96,10 +96,9 @@ describe("AuthProvider", () => {
     await screen.findByText("authenticated");
 
     await user.click(screen.getByRole("button", { name: "logout" }));
-    expect(screen.getByText("authenticated")).toBeInTheDocument();
+    expect(screen.getByText("anonymous")).toBeInTheDocument();
     finishLogout();
 
-    expect(await screen.findByText("anonymous")).toBeInTheDocument();
     expect(apiMocks.logout).toHaveBeenCalledOnce();
   });
 
