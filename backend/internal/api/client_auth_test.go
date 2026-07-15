@@ -6,10 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
@@ -152,6 +155,57 @@ func TestClientModelsScopeMiddlewareFiltersCatalog(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"id":"grok-3"`) || strings.Count(rec.Body.String(), "grok-4.5") != 2 {
 		t.Fatalf("filtered catalog=%s", rec.Body.String())
+	}
+}
+
+type fakeRateConsumer struct {
+	decision repository.RateLimitDecision
+	err      error
+	grants   []service.ClientGrant
+}
+
+func (f *fakeRateConsumer) ConsumeRPM(_ context.Context, grant service.ClientGrant) (repository.RateLimitDecision, error) {
+	f.grants = append(f.grants, grant)
+	return f.decision, f.err
+}
+
+func TestClientRateLimitMiddlewareReturns429AndRepositoryHeaders(t *testing.T) {
+	reset := time.Date(2026, 7, 15, 5, 31, 0, 0, time.UTC)
+	consumer := &fakeRateConsumer{
+		decision: repository.RateLimitDecision{Allowed: false, Limit: 2, Remaining: 0, ResetAt: reset},
+		err:      service.ErrClientRateLimited,
+	}
+	handler := ClientRateLimitMiddleware(consumer, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("rate-limited request reached next handler")
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req = req.WithContext(service.WithClientGrant(req.Context(), service.ClientGrant{
+		Authenticated: true, KeyID: "ck_limited", RPMLimit: 999,
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"code":"rate_limit_exceeded"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-RateLimit-Limit-Requests") != "2" || rec.Header().Get("X-RateLimit-Remaining-Requests") != "0" || rec.Header().Get("X-RateLimit-Reset-Requests") != strconv.FormatInt(reset.Unix(), 10) {
+		t.Fatalf("headers=%v", rec.Header())
+	}
+	if len(consumer.grants) != 1 || consumer.grants[0].KeyID != "ck_limited" {
+		t.Fatalf("grants=%+v", consumer.grants)
+	}
+}
+
+func TestClientRateLimitMiddlewareAllowsUnlimitedDecision(t *testing.T) {
+	consumer := &fakeRateConsumer{decision: repository.RateLimitDecision{Allowed: true, Limit: 0}}
+	handler := ClientRateLimitMiddleware(consumer, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req = req.WithContext(service.WithClientGrant(req.Context(), service.ClientGrant{Authenticated: true, KeyID: "ck_unlimited"}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || len(consumer.grants) != 1 {
+		t.Fatalf("status=%d grants=%+v body=%s", rec.Code, consumer.grants, rec.Body.String())
 	}
 }
 

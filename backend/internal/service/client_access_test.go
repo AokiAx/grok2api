@@ -12,9 +12,12 @@ import (
 )
 
 type clientAccessRepository struct {
-	required bool
-	items    map[[32]byte]clientkey.Credential
-	lookup   [32]byte
+	required  bool
+	items     map[[32]byte]clientkey.Credential
+	lookup    [32]byte
+	decision  repository.RateLimitDecision
+	consumed  []string
+	consumeAt []time.Time
 }
 
 func (r *clientAccessRepository) ClientAuthRequired(context.Context) (bool, error) {
@@ -27,8 +30,10 @@ func (r *clientAccessRepository) FindClientKeyByHash(_ context.Context, hash [32
 	return item, found, nil
 }
 
-func (r *clientAccessRepository) ConsumeClientKeyRPM(context.Context, string, time.Time) (repository.RateLimitDecision, error) {
-	panic("not used by authentication tests")
+func (r *clientAccessRepository) ConsumeClientKeyRPM(_ context.Context, id string, at time.Time) (repository.RateLimitDecision, error) {
+	r.consumed = append(r.consumed, id)
+	r.consumeAt = append(r.consumeAt, at)
+	return r.decision, nil
 }
 
 func accessCredential(t *testing.T, id, secret string, now time.Time, mutate func(*clientkey.ClientKey)) clientkey.Credential {
@@ -146,5 +151,46 @@ func TestClientGrantFiltersModelCatalogByScope(t *testing.T) {
 	all := ClientGrant{Authenticated: true, ModelPolicy: clientkey.ModelPolicyAll}
 	if got := all.FilterModelIDs([]string{"a", "b"}); len(got) != 2 {
 		t.Fatalf("all-policy filter=%#v", got)
+	}
+}
+
+func TestClientAccessConsumesRepositoryRPMWithoutCallerSuppliedLimit(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 30, 0, 0, time.UTC)
+	reset := now.Truncate(time.Minute).Add(time.Minute)
+	repo := &clientAccessRepository{decision: repository.RateLimitDecision{
+		Allowed: true, Limit: 10, Remaining: 9, ResetAt: reset,
+	}}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+	grant := ClientGrant{Authenticated: true, KeyID: "ck_limited", RPMLimit: 9999}
+	decision, err := access.ConsumeRPM(context.Background(), grant)
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if len(repo.consumed) != 1 || repo.consumed[0] != "ck_limited" || !repo.consumeAt[0].Equal(now) {
+		t.Fatalf("repository calls ids=%#v at=%#v", repo.consumed, repo.consumeAt)
+	}
+	if decision.Limit != 10 || decision.Remaining != 9 || !decision.ResetAt.Equal(reset) {
+		t.Fatalf("decision=%+v", decision)
+	}
+
+	// Even when the grant says 0, the repository is still authoritative and
+	// returns the unlimited decision atomically with current persisted policy.
+	repo.decision = repository.RateLimitDecision{Allowed: true, Limit: 0, ResetAt: reset}
+	grant.RPMLimit = 0
+	decision, err = access.ConsumeRPM(context.Background(), grant)
+	if err != nil || !decision.Allowed || decision.Limit != 0 || len(repo.consumed) != 2 {
+		t.Fatalf("unlimited decision=%+v err=%v calls=%#v", decision, err, repo.consumed)
+	}
+}
+
+func TestClientAccessReturnsRateLimitedDecision(t *testing.T) {
+	now := time.Date(2026, 7, 15, 5, 30, 0, 0, time.UTC)
+	repo := &clientAccessRepository{decision: repository.RateLimitDecision{
+		Allowed: false, Limit: 2, Remaining: 0, ResetAt: now.Add(30 * time.Second),
+	}}
+	access := NewClientAccess(repo, WithClientAccessClock(func() time.Time { return now }))
+	decision, err := access.ConsumeRPM(context.Background(), ClientGrant{Authenticated: true, KeyID: "ck_limited"})
+	if !errors.Is(err, ErrClientRateLimited) || decision.Allowed || decision.Limit != 2 {
+		t.Fatalf("decision=%+v err=%v", decision, err)
 	}
 }
