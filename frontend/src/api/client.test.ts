@@ -234,21 +234,25 @@ describe("admin authentication transport", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:credential");
   });
 
-  it("calls logout before clearing the in-memory bearer token", async () => {
+  it("clears the bearer token before a hanging logout request while preserving its captured header", async () => {
+    const logoutResponse = deferred<Response>();
     const calls: Array<{ path: string; authorization: string | null }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       calls.push({ path, authorization: new Headers(init?.headers).get("Authorization") });
       if (path.endsWith("/auth/login")) return envelope({ tokens: { accessToken: "active" } });
-      if (path.endsWith("/auth/logout")) return envelope({ loggedOut: true });
+      if (path.endsWith("/auth/logout")) return logoutResponse.promise;
       return envelope({ id: "admin-1", username: "admin" });
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const { adminApi } = await loadClient();
     await adminApi.login("secret", true);
-    await adminApi.logout();
+    const pendingLogout = adminApi.logout();
+    await Promise.resolve();
     await adminApi.me();
+    logoutResponse.resolve(envelope({ loggedOut: true }));
+    await pendingLogout;
 
     expect(calls.find((call) => call.path.endsWith("/auth/logout"))?.authorization).toBe("Bearer active");
     expect(calls.at(-1)).toEqual({ path: "/api/admin/v1/auth/me", authorization: null });
