@@ -54,6 +54,26 @@ Legacy `panel_password` / `app_key` values are one-time bootstrap inputs only. `
 | GET/PATCH | `/api/admin/v1/client-keys/{id}` | yes | inspect/update policy |
 | POST | `/api/admin/v1/client-keys/{id}/revoke` | yes | irreversible revoke |
 
+### Create client key
+
+`POST /api/admin/v1/client-keys` requires all three policy fields to be present: `model_policy`, `rpm_limit`, and `max_concurrent`. Omitting any of them returns `400 invalid_request`; the server does not interpret missing fields as unlimited access.
+
+```json
+{
+  "name": "automation",
+  "model_policy": "allowlist",
+  "model_scopes": ["grok-4.5"],
+  "rpm_limit": 60,
+  "max_concurrent": 2,
+  "expires_at": null
+}
+```
+
+- `model_policy`: `all` or `allowlist`; an allowlist requires at least one `model_scopes` entry.
+- `rpm_limit`: integer `>= 0`; `0` explicitly means unlimited requests per minute.
+- `max_concurrent`: integer `>= 0`; `0` explicitly means unlimited concurrent requests for that key.
+- `secret` is returned only by the successful create response and is never returned by list, detail, or update responses.
+
 ### Health aliases
 
 | Path | Behavior |

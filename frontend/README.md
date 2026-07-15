@@ -34,4 +34,5 @@ npm run build
 | `/` | 号池总览 |
 | `/accounts` | 账号列表 / 恢复 / 删除 |
 | `/import` | 导入 preview/commit |
+| `/client-keys` | Client Key 列表、创建、权限编辑与撤销；secret 仅创建后展示一次 |
 | `/system` | 版本信息 |

@@ -49,7 +49,7 @@ Copy-Item config.example.json config.json
 docker compose up -d
 ```
 
-默认对外提供 `8787`，管理面板：
+Compose 默认仅将 `8787` 绑定到宿主机回环地址，管理面板：
 
 ```text
 http://127.0.0.1:8787/
@@ -101,6 +101,8 @@ Remove-Item Env:GROK2API_ADMIN_PASSWORD
 
 `bootstrap-admin` 不读取 `panel_password` / `app_key`，也不会导入旧账号或迁移 `api_key`。已存在管理员或已完成初始化时不会覆盖。
 
+新数据库默认要求 Client Key 才能调用 `/v1/*` 推理接口。完成管理员初始化并登录后，在管理面板的「Client Keys」页面显式选择模型权限、RPM 与最大并发，再创建调用密钥；密钥明文只在创建成功后展示一次。
+
 ## 管理面板
 
 路径：`/`。正式 Docker 镜像将 SPA 放在 `/app/frontend/dist`，并通过 `GROK2API_FRONTEND_STATIC_PATH` 让 Go 服务从运行时文件系统挂载。
@@ -125,6 +127,7 @@ Remove-Item Env:GROK2API_ADMIN_PASSWORD
 | 总览 | 号池汇总、额度、并发、到期/待恢复、错误码 Top |
 | 账号 | 分页列表、搜索、筛选、删除 / 恢复验证 |
 | 导入 | JSON / auth.json 预览与验证写入 |
+| Client Keys | 客户端密钥列表、筛选、创建、权限编辑与撤销；密钥明文仅创建时展示一次 |
 | 注册 | 指向外部 `grok-register` 的说明（本服务不再内嵌注册机） |
 
 ### 总览统计
@@ -329,7 +332,7 @@ Windows 需使用 WSL 或 Git Bash。
 | `pool` | `ready` / `unavailable` / 空=全部 |
 | `q` | 搜索 id / email / reason / error code |
 
-配置管理密钥后，管理端需 Bearer 或 `x-api-key`。三个密钥都为空时管理 API 和面板无认证，只适合回环监听或受信网络。
+版本化管理 API 仅接受管理员 session 的短期 Bearer token；推理接口接受持久化 Client Key（`Authorization: Bearer` 或 `x-api-key`）。新数据库默认 fail-closed，没有有效 Client Key 时 `/v1/*` 返回 401。
 
 ### 协议兼容范围
 
@@ -420,7 +423,7 @@ curl http://127.0.0.1:8787/v1/chat/completions `
 
 ## Docker / GHCR
 
-> 安全提示：`config.example.json` 默认不创建管理员或客户端密钥，而 Compose 默认把宿主 8787 端口发布到所有接口。暴露到局域网或公网前，请先用 `bootstrap-admin --password-stdin` 创建管理员，再通过管理 API 创建客户端密钥；仅本机使用时可把端口映射改为 `127.0.0.1:8787:8787`。HTTPS/TLS 反代还应设置 `admin_secure_cookies=true`。
+> 安全提示：`config.example.json` 默认不创建管理员或客户端密钥。Compose 默认绑定 `127.0.0.1:8787`，不会直接监听宿主机所有网卡；如需暴露到局域网或公网，请先用 `bootstrap-admin --password-stdin` 创建管理员，再从管理面板创建客户端密钥，并在外部 TLS 边缘之后发布服务。HTTPS/TLS 反代还应设置 `admin_secure_cookies=true`。
 
 镜像：
 
