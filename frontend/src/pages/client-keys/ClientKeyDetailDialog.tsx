@@ -40,6 +40,8 @@ export function ClientKeyDetailDialog({
       if (!active) return;
       setDetail(loaded);
       setDraft(draftFromClientKey(loaded));
+      setUnlimitedRPM(loaded.rpm_limit === 0);
+      setUnlimitedConcurrent(loaded.max_concurrent === 0);
     }).catch((failure) => {
       if (active) setError(clientKeyErrorMessage(failure, "加载密钥详情失败"));
     }).finally(() => {
