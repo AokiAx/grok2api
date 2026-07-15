@@ -15,6 +15,12 @@ func StickyKeyFromRequest(request *http.Request) string {
 	if request == nil {
 		return ""
 	}
+	if grant, ok := ClientGrantFromContext(request.Context()); ok && grant.Authenticated {
+		expected := "client-key:" + strings.TrimSpace(grant.KeyID)
+		if grant.Principal != "" && grant.Principal == expected && expected != "client-key:" {
+			return expected
+		}
+	}
 	for _, header := range []string{
 		"X-Grok2API-Sticky",
 		"X-User-Id",
