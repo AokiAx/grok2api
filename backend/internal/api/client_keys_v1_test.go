@@ -16,6 +16,7 @@ import (
 
 type fakeClientKeyLifecycle struct {
 	created clientkeys.CreateRequest
+	creates int
 	updated clientkeys.UpdateRequest
 	id      string
 	revoked bool
@@ -23,6 +24,7 @@ type fakeClientKeyLifecycle struct {
 }
 
 func (f *fakeClientKeyLifecycle) Create(_ context.Context, request clientkeys.CreateRequest) (clientkeys.Result, error) {
+	f.creates++
 	f.created = request
 	return clientkeys.Result{
 		Key: clientkey.ClientKey{
@@ -66,6 +68,51 @@ func (f *fakeClientKeyLifecycle) Revoke(_ context.Context, id string) (clientkey
 }
 
 var apiTestTime = time.Date(2026, 7, 15, 4, 0, 0, 0, time.UTC)
+
+func TestClientKeyAdminCreateRequiresExplicitPolicyAndLimits(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "model policy", body: `{"name":"production","rpm_limit":60,"max_concurrent":2}`},
+		{name: "rpm limit", body: `{"name":"production","model_policy":"all","max_concurrent":2}`},
+		{name: "max concurrent", body: `{"name":"production","model_policy":"all","rpm_limit":60}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeClientKeyLifecycle{}
+			handler := NewClientKeyAdminHandler(service, func(*http.Request) bool { return true })
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/client-keys", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"invalid_request"`) {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if service.creates != 0 {
+				t.Fatalf("service create calls=%d", service.creates)
+			}
+		})
+	}
+}
+
+func TestClientKeyAdminCreateAcceptsExplicitUnlimitedLimits(t *testing.T) {
+	service := &fakeClientKeyLifecycle{}
+	handler := NewClientKeyAdminHandler(service, func(*http.Request) bool { return true })
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/client-keys", strings.NewReader(`{
+		"name":"explicit-unlimited","model_policy":"all","rpm_limit":0,"max_concurrent":0
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusCreated || service.creates != 1 {
+		t.Fatalf("status=%d creates=%d body=%s", recorder.Code, service.creates, recorder.Body.String())
+	}
+	if service.created.ModelPolicy != clientkey.ModelPolicyAll || service.created.RPMLimit != 0 || service.created.MaxConcurrent != 0 {
+		t.Fatalf("create request=%+v", service.created)
+	}
+}
 
 func TestClientKeyAdminCreateReturnsSecretOnceAndDisablesCaching(t *testing.T) {
 	service := &fakeClientKeyLifecycle{}
