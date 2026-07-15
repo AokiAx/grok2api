@@ -18,16 +18,24 @@ type AdminAuthHandlerOptions struct {
 }
 
 func NewAdminAuthHandler(service *auth.Service, opts AdminAuthHandlerOptions) http.Handler {
+	mux := http.NewServeMux()
+	RegisterAdminAuthRoutes(mux, service, opts)
+	return mux
+}
+
+func RegisterAdminAuthRoutes(mux *http.ServeMux, service *auth.Service, opts AdminAuthHandlerOptions) {
+	if mux == nil {
+		return
+	}
 	if opts.Clock == nil {
 		opts.Clock = time.Now
 	}
-	mux := http.NewServeMux()
 	h := &adminAuthHandler{service: service, opts: opts}
 	mux.HandleFunc("POST /api/admin/v1/auth/login", h.login)
 	mux.HandleFunc("POST /api/admin/v1/auth/refresh", h.refresh)
 	mux.HandleFunc("POST /api/admin/v1/auth/logout", h.logout)
 	mux.HandleFunc("GET /api/admin/v1/auth/me", h.me)
-	return mux
+	mux.HandleFunc("GET /api/admin/v1/me", h.me)
 }
 
 type adminAuthHandler struct {

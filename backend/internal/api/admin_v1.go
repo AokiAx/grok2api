@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	authservice "github.com/AokiAx/grok2api/backend/internal/adminauth"
 	"io"
 	"net/http"
 	"strconv"
@@ -27,6 +29,20 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	// Health aliases (k8s-friendly).
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.readyz)
+	if s.adminAuth != nil {
+		RegisterAdminAuthRoutes(mux, s.adminAuth, s.adminAuthOptions)
+	} else if s.admin != nil {
+		mux.HandleFunc("POST /api/admin/v1/auth/login", s.adminV1Login)
+		mux.HandleFunc("POST /api/admin/v1/auth/logout", s.adminV1Logout)
+		mux.HandleFunc("POST /api/admin/v1/auth/refresh", s.adminV1Refresh)
+		mux.HandleFunc("GET /api/admin/v1/auth/me", s.adminV1Me)
+		mux.HandleFunc("GET /api/admin/v1/me", s.adminV1Me)
+	}
+	if s.clientKeys != nil {
+		RegisterClientKeyAdminRoutes(mux, s.clientKeys, func(request *http.Request) bool {
+			return s.adminAuthenticationError(request) == nil
+		})
+	}
 
 	if s.admin == nil {
 		return
@@ -40,11 +56,6 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/api/accounts/import", s.adminImport)
 
 	// ---- versioned management API contract ----
-	mux.HandleFunc("POST /api/admin/v1/auth/login", s.adminV1Login)
-	mux.HandleFunc("POST /api/admin/v1/auth/logout", s.adminV1Logout)
-	mux.HandleFunc("POST /api/admin/v1/auth/refresh", s.adminV1Refresh)
-	mux.HandleFunc("GET /api/admin/v1/auth/me", s.adminV1Me)
-	mux.HandleFunc("GET /api/admin/v1/me", s.adminV1Me)
 	mux.HandleFunc("GET /api/admin/v1/dashboard", s.adminV1Dashboard)
 	mux.HandleFunc("GET /api/admin/v1/pool", s.adminV1Pool)
 	mux.HandleFunc("GET /api/admin/v1/system", s.adminV1System)
@@ -109,21 +120,59 @@ func writeAdminError(writer http.ResponseWriter, status int, code, message strin
 }
 
 func (s *Server) requireAdmin(writer http.ResponseWriter, request *http.Request) bool {
-	if authorizedWithKey(request, s.adminKey) {
+	err := s.adminAuthenticationError(request)
+	if err == nil {
 		return true
 	}
-	writeAdminError(writer, http.StatusUnauthorized, "unauthorized", "Invalid admin key")
+	if errors.Is(err, authservice.ErrUnauthorized) {
+		writer.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
+		message := "Administrator authentication is required"
+		if s.adminAuth == nil {
+			message = "Invalid admin key"
+		}
+		writeAdminError(writer, http.StatusUnauthorized, "unauthorized", message)
+		return false
+	}
+	writeAdminError(writer, http.StatusInternalServerError, "internal_error", "Administrator authentication failed")
 	return false
+}
+
+func (s *Server) adminAuthenticationError(request *http.Request) error {
+	if s.adminAuth == nil {
+		if authorizedWithKey(request, s.adminKey) {
+			return nil
+		}
+		return authservice.ErrUnauthorized
+	}
+	parts := strings.Fields(request.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return authservice.ErrUnauthorized
+	}
+	_, _, err := s.adminAuth.AuthenticateAccess(request.Context(), parts[1])
+	return err
+}
+
+func (s *Server) adminSetupRequired(ctx context.Context) (bool, error) {
+	if s.adminAuth == nil {
+		return false, nil
+	}
+	return s.adminAuth.SetupRequired(ctx)
 }
 
 // --- v1 handlers ------------------------------------------------------------
 
-func (s *Server) adminV1Meta(writer http.ResponseWriter, _ *http.Request) {
+func (s *Server) adminV1Meta(writer http.ResponseWriter, request *http.Request) {
+	setupRequired, err := s.adminSetupRequired(request.Context())
+	if err != nil {
+		writeAdminError(writer, http.StatusInternalServerError, "internal_error", "Failed to read administrator setup state")
+		return
+	}
 	writeAdminOK(writer, http.StatusOK, map[string]any{
-		"auth_required": s.adminKey != "",
-		"version":       "1.0.0-go",
-		"api_version":   adminAPIVersion,
-		"panel_paths":   []string{"/"},
+		"auth_required":  s.adminAuth != nil || s.adminKey != "",
+		"setup_required": setupRequired,
+		"version":        "1.0.0-go",
+		"api_version":    adminAPIVersion,
+		"panel_paths":    []string{"/"},
 	})
 }
 

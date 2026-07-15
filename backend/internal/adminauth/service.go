@@ -63,6 +63,17 @@ func NewService(repo repository.AdminAuthRepository, opts ...Option) *Service {
 	return s
 }
 
+func (s *Service) SetupRequired(ctx context.Context) (bool, error) {
+	if s == nil || s.repo == nil {
+		return true, errors.New("admin auth service dependencies are required")
+	}
+	count, err := s.repo.CountAdminUsers(ctx)
+	if err != nil {
+		return true, err
+	}
+	return count == 0, nil
+}
+
 type LoginInput struct {
 	Username, Password, SourceIP, UserAgent string
 	Remember                                bool

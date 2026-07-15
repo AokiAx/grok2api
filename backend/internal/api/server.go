@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/admin"
+	authservice "github.com/AokiAx/grok2api/backend/internal/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/bridge"
+	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/compat"
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
@@ -45,18 +47,22 @@ type LiveLeaseProvider interface {
 }
 
 type Server struct {
-	gateway         Gateway
-	status          StatusProvider
-	apiKey          string
-	defaultModel    string
-	modelCatalog    *upstream.Catalog
-	preferResponses bool
-	bridge          *bridge.Pipeline
-	tracer          *intercept.Tracer
-	admin           AdminService
-	adminKey        string
-	frontend        fs.FS
-	handler         http.Handler
+	gateway          Gateway
+	status           StatusProvider
+	apiKey           string
+	defaultModel     string
+	modelCatalog     *upstream.Catalog
+	preferResponses  bool
+	bridge           *bridge.Pipeline
+	tracer           *intercept.Tracer
+	admin            AdminService
+	adminKey         string
+	adminAuth        *authservice.Service
+	adminAuthOptions AdminAuthHandlerOptions
+	clientAccess     *service.ClientAccess
+	clientKeys       ClientKeyLifecycle
+	frontend         fs.FS
+	handler          http.Handler
 }
 
 type Option func(*Server)
@@ -110,6 +116,25 @@ func WithAdmin(service AdminService, key string) Option {
 	}
 }
 
+func WithAdminAuth(auth *authservice.Service, options AdminAuthHandlerOptions) Option {
+	return func(server *Server) {
+		server.adminAuth = auth
+		server.adminAuthOptions = options
+	}
+}
+
+func WithClientAccess(access *service.ClientAccess) Option {
+	return func(server *Server) {
+		server.clientAccess = access
+	}
+}
+
+func WithClientKeys(keys *clientkeys.Service) Option {
+	return func(server *Server) {
+		server.clientKeys = keys
+	}
+}
+
 // WithFrontend mounts a pre-validated SPA filesystem at the service root.
 // The filesystem root must contain index.html and any referenced assets.
 func WithFrontend(frontend fs.FS) Option {
@@ -138,12 +163,24 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
-	mux.HandleFunc("GET /v1/models", server.models)
-	mux.HandleFunc("GET /v1/billing", server.billing)
-	mux.HandleFunc("POST /v1/chat/completions", server.chat)
-	mux.HandleFunc("POST /chat/completions", server.chat)
-	mux.HandleFunc("POST /v1/responses", server.responses)
-	mux.HandleFunc("POST /v1/messages", server.messages)
+	modelsHandler := http.Handler(http.HandlerFunc(server.models))
+	billingHandler := http.Handler(http.HandlerFunc(server.billing))
+	chatHandler := http.Handler(http.HandlerFunc(server.chat))
+	responsesHandler := http.Handler(http.HandlerFunc(server.responses))
+	messagesHandler := http.Handler(http.HandlerFunc(server.messages))
+	if server.clientAccess != nil {
+		modelsHandler = ClientModelsMiddleware(server.clientAccess, modelsHandler)
+		billingHandler = ClientAuthMiddleware(server.clientAccess, billingHandler)
+		chatHandler = ClientInferenceMiddleware(server.clientAccess, server.defaultModel, chatHandler)
+		responsesHandler = ClientInferenceMiddleware(server.clientAccess, server.defaultModel, responsesHandler)
+		messagesHandler = ClientInferenceMiddleware(server.clientAccess, server.defaultModel, messagesHandler)
+	}
+	mux.Handle("GET /v1/models", modelsHandler)
+	mux.Handle("GET /v1/billing", billingHandler)
+	mux.Handle("POST /v1/chat/completions", chatHandler)
+	mux.Handle("POST /chat/completions", chatHandler)
+	mux.Handle("POST /v1/responses", responsesHandler)
+	mux.Handle("POST /v1/messages", messagesHandler)
 	if server.frontend != nil {
 		server.registerSPARoutes(mux)
 	}
@@ -157,16 +194,17 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	return server
 }
 
-func (s *Server) panelMeta(writer http.ResponseWriter, _ *http.Request) {
+func (s *Server) panelMeta(writer http.ResponseWriter, request *http.Request) {
+	setupRequired, _ := s.adminSetupRequired(request.Context())
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"auth_required": s.adminKey != "",
-		"version":       "1.0.0-go",
+		"auth_required":  s.adminAuth != nil || s.adminKey != "",
+		"setup_required": setupRequired,
+		"version":        "1.0.0-go",
 	})
 }
 
 func (s *Server) adminList(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+	if !s.requireAdmin(writer, request) {
 		return
 	}
 	payload, err := s.buildAdminListPayload(request)
@@ -214,8 +252,7 @@ func publicAccount(item account.Account) map[string]any {
 }
 
 func (s *Server) adminDelete(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+	if !s.requireAdmin(writer, request) {
 		return
 	}
 	id := request.PathValue("id")
@@ -231,8 +268,7 @@ func (s *Server) adminDelete(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) adminRecover(writer http.ResponseWriter, request *http.Request) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+	if !s.requireAdmin(writer, request) {
 		return
 	}
 	item, err := s.admin.Recover(request.Context(), request.PathValue("id"))
@@ -256,8 +292,7 @@ func (s *Server) adminImport(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) handleAdminImport(writer http.ResponseWriter, request *http.Request, dryRun bool) {
-	if !authorizedWithKey(request, s.adminKey) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid admin key")
+	if !s.requireAdmin(writer, request) {
 		return
 	}
 	var payload admin.ImportRequest
@@ -519,6 +554,9 @@ func (s *Server) writeResult(writer http.ResponseWriter, result service.ChatResu
 }
 
 func (s *Server) authorized(request *http.Request) bool {
+	if s.clientAccess != nil {
+		return true
+	}
 	return authorizedWithKey(request, s.apiKey)
 }
 
