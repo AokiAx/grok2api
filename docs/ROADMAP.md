@@ -100,7 +100,12 @@ frontend/                 # 独立源码包，dist 仅在 Docker/本地构建中
 
 ### Phase D — 凭据加密（可选加固） ✅
 
-已落地：AES-256-GCM、Base64 32 字节密钥、Raw Base64 密文；兼容旧 `enc:v1:` 读路径；空 key=明文。
+已落地：AES-256-GCM、Base64 编码的 32 字节密钥、**显式 `enc:v1:` 信封**落库；空 key=明文。
+
+- 写路径只写 `enc:v1:` + Base64(nonce||ciphertext)
+- `IsEncrypted` 只认信封前缀，**不用长度/Base64 启发式**（避免 OAuth token 被误判为密文）
+- 读路径兼容：信封密文；以及早期构建留下的裸 Base64 密文（有 key 时 GCM 校验通过才当密文，写回时升为信封）
+- 无 key 时：明文照常读；遇到 `enc:v1:` 则 fail-closed
 
 **原触发条件**：DB 可能离开本机、多租户、或仓库/备份会扩散。  
 单机本机 SQLite 且磁盘已加密时，优先级低于 Phase A/C。
@@ -108,17 +113,17 @@ frontend/                 # 独立源码包，dist 仅在 Docker/本地构建中
 #### 设计要点
 
 ```text
-config.credential_key   # 或 env GROK2API_CREDENTIAL_KEY（32-byte / passphrase→KDF）
-repository:
-  access_token  / refresh_token  列存 ciphertext（前缀 enc:v1:）
-读路径: Decrypt → account.Account 明文（仅内存）
-写路径: Encrypt 后落库
-迁移: schema v4 打开时扫描无前缀行 → 加密写回（事务）
-导出: export 命令输出明文 JSON（需 admin），或可选密文导出
+config.credential_key   # 或 env GROK2API_CREDENTIAL_KEY（Base64 32-byte key）
+repository / sqlite:
+  access_token / refresh_token 列存 enc:v1:<ciphertext>
+读路径: NormalizeStored → domain/account.Account 明文（仅内存）
+写路径: Encrypt 后落库（强制信封）
+打开 DB 时: 扫描未信封行 → 加密/升级写回
+导出: export 输出明文 JSON（需 admin）
 ```
 
-算法建议：AES-GCM + 随机 nonce；密钥用 scrypt/argon2id 从 passphrase 派生。  
-**没有 key 时**：保持现网明文行为（或 fail-closed 由配置 `credential_encryption=required` 决定）。
+算法：AES-256-GCM + 随机 nonce。  
+**没有 key 时**：保持明文行为；已信封数据拒绝读取（需配置 `credential_key`）。
 
 ### Phase E — 明确不做（除非产品变向）
 
@@ -126,6 +131,8 @@ repository:
 - 完整 `/responses/{id}` store ownership（free 池收益低）  
 - Build Device OAuth 单账号自助接入（已进入后续产品计划；不恢复旧批量注册机）
 - 为管理面强行引入 Gin 全家桶  
+- **继续加厚 adminauth / clientkeys 控制面**（登录失败 IP 桶、remember 细节、RPM/model scope UI 等）：已落地部分可修 bug，默认不再加功能；本仓库主业是 2api 网关（协议桥 + 号池 + 上游），不是多租户 IAM 平台  
+- **第二套运行时 Gateway**：`application/gateway` 仅保留契约；在 `service.Gateway` 真正实现并接线前，禁止平行实现
 
 ---
 

@@ -32,8 +32,9 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 }
 
 // OpenSQLiteWithCipher opens the DB and optionally encrypts credentials at rest.
-// When cipher is non-nil, tokens are written as enc:v1:... and plaintext rows are
-// migrated on open (credential encryption is opaque to the schema version).
+// When cipher is non-nil, tokens are written with the security.EnvelopePrefix
+// (enc:v1:) and plaintext or legacy bare-ciphertext rows are migrated on open.
+// Credential encryption is opaque to the schema version.
 func OpenSQLiteWithCipher(ctx context.Context, path string, cipher *security.Cipher) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -78,15 +79,14 @@ func (r *SQLite) openToken(value string) (string, error) {
 		return value, nil
 	}
 	if r.cipher == nil {
-		// Raw Base64 is ambiguous: OAuth refresh tokens can have the same shape as
-		// raw AES-GCM ciphertext. Without a configured key there is no safe
-		// way to distinguish them, so only reject our explicit legacy envelope.
-		if strings.HasPrefix(value, "enc:v1:") {
+		// Without a key only the explicit envelope is rejected. Bare Base64 is
+		// treated as plaintext because OAuth tokens share that shape.
+		if security.IsEncrypted(value) {
 			return "", fmt.Errorf("encrypted credential requires credential_key")
 		}
 		return value, nil
 	}
-	// NormalizeStored handles raw Base64 and legacy enc:v1: rows.
+	// NormalizeStored opens enc:v1: rows and upgrades legacy bare ciphertext.
 	return r.cipher.NormalizeStored(value)
 }
 

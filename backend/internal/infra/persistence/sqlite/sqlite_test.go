@@ -3,12 +3,17 @@ package sqlite_test
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -585,8 +590,8 @@ func TestCredentialEncryptionRoundTrip(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT access_token FROM accounts WHERE id=?`, "enc-1").Scan(&rawAccess); err != nil {
 		t.Fatalf("raw: %v", err)
 	}
-	if !security.IsEncrypted(rawAccess) {
-		t.Fatalf("want encrypted storage, got %q", rawAccess)
+	if !security.IsEncrypted(rawAccess) || !strings.HasPrefix(rawAccess, security.EnvelopePrefix) {
+		t.Fatalf("want enc:v1: storage, got %q", rawAccess)
 	}
 	list, err := repo.ListAccounts(ctx)
 	if err != nil {
@@ -673,6 +678,9 @@ func TestOpeningPlaintextDatabaseWithCredentialKeyEncryptsExistingRows(t *testin
 	}
 	if !security.IsEncrypted(rawAccess) || !security.IsEncrypted(rawRefresh) {
 		t.Fatalf("raw credentials not encrypted: access=%q refresh=%q", rawAccess, rawRefresh)
+	}
+	if !strings.HasPrefix(rawAccess, security.EnvelopePrefix) || !strings.HasPrefix(rawRefresh, security.EnvelopePrefix) {
+		t.Fatalf("want enc:v1: envelopes: access=%q refresh=%q", rawAccess, rawRefresh)
 	}
 	accounts, err := encryptedRepo.ListAccounts(ctx)
 	if err != nil {
@@ -813,5 +821,81 @@ func TestSaveAccountsRollsBackEntireBatch(t *testing.T) {
 	}
 	if _, found, getErr := repo.GetAccount(ctx, "valid"); getErr != nil || found {
 		t.Fatalf("valid row escaped rollback: found=%v err=%v", found, getErr)
+	}
+}
+
+func TestLegacyBareCiphertextIsReadableAndUpgradedOnOpen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "bare-cipher.db")
+	rawKey := bytes.Repeat([]byte{0x44}, 32)
+	keyCipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(rawKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create schema with a plaintext open, then inject bare ciphertext.
+	bootstrap, err := sqlite.OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	block, err := aes.NewCipher(rawKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatal(err)
+	}
+	sealed := aead.Seal(nonce, nonce, []byte("bare-access-token"), nil)
+	bare := base64.RawStdEncoding.EncodeToString(sealed)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO accounts (
+		id, access_token, refresh_token, pool, created_at, updated_at
+	) VALUES (?, ?, '', 'ready', ?, ?)`, "bare-1", bare, now, now); err != nil {
+		t.Fatalf("insert bare ciphertext: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := sqlite.OpenSQLiteWithCipher(ctx, path, keyCipher)
+	if err != nil {
+		t.Fatalf("open with key: %v", err)
+	}
+	defer repo.Close()
+
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].AccessToken != "bare-access-token" {
+		t.Fatalf("decoded bare row = %#v", accounts)
+	}
+
+	// Open-time migration should rewrite the row under enc:v1:.
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+	var rawAccess string
+	if err := rawDB.QueryRowContext(ctx, `SELECT access_token FROM accounts WHERE id=?`, "bare-1").Scan(&rawAccess); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(rawAccess, security.EnvelopePrefix) {
+		t.Fatalf("expected envelope after open migration, got %q", rawAccess)
 	}
 }

@@ -1,5 +1,10 @@
 // Package gateway defines transport-neutral application contracts for account
 // selection and provider execution.
+//
+// Status: contracts only. The live request path still runs through
+// internal/service.Gateway. Do not add a second parallel runtime here until
+// service.Gateway implements these ports and main wires them; otherwise this
+// package becomes a second source of truth.
 package gateway
 
 import (

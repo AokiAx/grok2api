@@ -290,3 +290,94 @@ func assertReady(t *testing.T, item Account, at time.Time) {
 		t.Fatalf("UpdatedAt=%v; want %v", item.UpdatedAt, at.UTC())
 	}
 }
+
+func TestAccountAvailabilityUsesTwoPools(t *testing.T) {
+	now := time.Date(2026, 7, 10, 6, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		account   Account
+		available bool
+	}{
+		{
+			name: "ready account is available",
+			account: Account{
+				ID:        "ready",
+				Pool:      PoolReady,
+				MaxActive: 1,
+			},
+			available: true,
+		},
+		{
+			name: "quota account is unavailable",
+			account: Account{
+				ID:                "quota",
+				Pool:              PoolUnavailable,
+				UnavailableReason: ReasonQuota,
+				RetryAt:           now.Add(-time.Minute),
+				MaxActive:         1,
+			},
+			available: false,
+		},
+		{
+			name: "ready account at concurrency limit is unavailable",
+			account: Account{
+				ID:        "busy",
+				Pool:      PoolReady,
+				Active:    1,
+				MaxActive: 1,
+			},
+			available: false,
+		},
+		{
+			name: "ready account with exhausted free quota is unavailable",
+			account: Account{
+				ID:          "empty",
+				Pool:        PoolReady,
+				MaxActive:   1,
+				QuotaActual: 2000000,
+				QuotaLimit:  2000000,
+			},
+			available: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.account.Available(now); got != tt.available {
+				t.Fatalf("Available() = %v; want %v", got, tt.available)
+			}
+		})
+	}
+}
+
+func TestUnavailableReasonsRemainExplicit(t *testing.T) {
+	reasons := []UnavailableReason{
+		ReasonQuota,
+		ReasonAuth,
+		ReasonCooldown,
+		ReasonValidating,
+		ReasonDisabled,
+	}
+
+	seen := map[UnavailableReason]bool{}
+	for _, reason := range reasons {
+		if reason == "" {
+			t.Fatal("unavailable reason must not be empty")
+		}
+		if seen[reason] {
+			t.Fatalf("duplicate unavailable reason %q", reason)
+		}
+		seen[reason] = true
+	}
+}
+
+func TestAvailableDefaultMaxActive(t *testing.T) {
+	item := Account{Pool: PoolReady, Active: 0, MaxActive: 0}
+	if !item.Available(time.Now()) {
+		t.Fatal("expected available with default max active")
+	}
+	item.Active = 1
+	if item.Available(time.Now()) {
+		t.Fatal("expected unavailable when active reaches default max")
+	}
+}

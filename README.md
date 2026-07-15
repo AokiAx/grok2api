@@ -363,7 +363,7 @@ curl http://127.0.0.1:8787/v1/chat/completions `
 
 ## 配置
 
-复制 [config.example.json](config.example.json) 为 `config.json`。 CLI 指纹相关字段：`client_version` / `client_identifier` / `client_user_agent` / `token_auth`；可选 `credential_key`（AES-GCM 加密落库）；会话粘滞优先请求体 `prompt_cache_key`。配置优先级是：**内置默认值 < JSON 配置文件 < 源码明确支持的进程环境变量**。
+复制 [config.example.json](config.example.json) 为 `config.json`。 CLI 指纹相关字段：`client_version` / `client_identifier` / `client_user_agent` / `token_auth`；可选 `credential_key`（AES-256-GCM，`enc:v1:` 信封落库）；会话粘滞优先请求体 `prompt_cache_key`。配置优先级是：**内置默认值 < JSON 配置文件 < 源码明确支持的进程环境变量**。
 
 程序不会自动加载 `.env`；本地运行需在当前 shell / 服务管理器中设置环境变量。仓库根目录 `.env` 主要用于 Docker Compose 的变量替换。配置文件路径只能通过 `--config` 指定，当前源码不支持 `GROK2API_CONFIG` 或 `GROK2API_AUTO_CLIENT_VERSION`。
 
