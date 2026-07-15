@@ -79,3 +79,23 @@ func TestUnmarshalKeepsExplicitDebugTrace(t *testing.T) {
 		t.Fatalf("debug_trace=%+v", doc.DebugTrace)
 	}
 }
+
+func TestProxyNormalizeDesiredStatus(t *testing.T) {
+	doc := Defaults()
+	doc.Proxy.Enabled = false
+	doc.Proxy.URL = ""
+	if err := doc.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Proxy.RuntimeStatus != "disabled" {
+		t.Fatalf("status=%q", doc.Proxy.RuntimeStatus)
+	}
+	doc.Proxy.Enabled = true
+	doc.Proxy.URL = " http://privoxy:8118 "
+	if err := doc.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Proxy.URL != "http://privoxy:8118" || doc.Proxy.RuntimeStatus != "active" {
+		t.Fatalf("proxy=%+v", doc.Proxy)
+	}
+}

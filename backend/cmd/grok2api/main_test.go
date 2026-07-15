@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/AokiAx/grok2api/backend/internal/domain/settings"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -520,5 +521,32 @@ func TestRunMigrateIsIdempotentAndEncryptsImportedCredentials(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("stored account count = %d; want 2", count)
+	}
+}
+
+func TestResolveOutboundProxy(t *testing.T) {
+	url, on := resolveOutboundProxy("http://bootstrap:1", nil)
+	if !on || url != "http://bootstrap:1" {
+		t.Fatalf("bootstrap only: %v %v", url, on)
+	}
+	managedOn := settings.Proxy{Enabled: true, URL: "http://managed:2"}
+	url, on = resolveOutboundProxy("http://bootstrap:1", &managedOn)
+	if !on || url != "http://managed:2" {
+		t.Fatalf("managed on: %v %v", url, on)
+	}
+	managedOffEmpty := settings.Proxy{Enabled: false, URL: ""}
+	url, on = resolveOutboundProxy("http://bootstrap:1", &managedOffEmpty)
+	if !on || url != "http://bootstrap:1" {
+		t.Fatalf("disabled empty keeps bootstrap: %v %v", url, on)
+	}
+	managedOffURL := settings.Proxy{Enabled: false, URL: "http://stored:3"}
+	url, on = resolveOutboundProxy("http://bootstrap:1", &managedOffURL)
+	if on || url != "http://stored:3" {
+		t.Fatalf("disabled with url: %v %v", url, on)
+	}
+	managedOnEmpty := settings.Proxy{Enabled: true, URL: ""}
+	url, on = resolveOutboundProxy("http://bootstrap:1", &managedOnEmpty)
+	if !on || url != "http://bootstrap:1" {
+		t.Fatalf("enabled empty falls back: %v %v", url, on)
 	}
 }
