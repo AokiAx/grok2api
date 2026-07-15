@@ -19,13 +19,21 @@ func TestStickyKeyFromRequest(t *testing.T) {
 	}
 	req, _ = http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Authorization", "Bearer secret-token")
-	if got := service.StickyKeyFromRequest(req); got != "auth:secret-token" {
-		t.Fatalf("auth: %q", got)
+	gotAuth := service.StickyKeyFromRequest(req)
+	if !strings.HasPrefix(gotAuth, "auth-hash:") || strings.Contains(gotAuth, "secret-token") {
+		t.Fatalf("auth: %q", gotAuth)
 	}
 	req, _ = http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("x-api-key", "key-1")
-	if got := service.StickyKeyFromRequest(req); got != "auth:key-1" {
-		t.Fatalf("api key: %q", got)
+	gotKey := service.StickyKeyFromRequest(req)
+	if !strings.HasPrefix(gotKey, "auth-hash:") || strings.Contains(gotKey, "key-1") {
+		t.Fatalf("api key: %q", gotKey)
+	}
+	// Same secret always maps to the same opaque sticky key.
+	req, _ = http.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	if again := service.StickyKeyFromRequest(req); again != gotAuth {
+		t.Fatalf("auth hash unstable: %q vs %q", again, gotAuth)
 	}
 }
 
@@ -116,7 +124,7 @@ func TestPromptCacheKeyStickyPriority(t *testing.T) {
 		t.Fatalf("extract: %q", got)
 	}
 	// prompt_cache_key wins over affinity when no tenant header.
-	if got := service.ComposeStickyKeyParts("auth:shared", "sess-1", "aff:x"); got != "cache:sess-1" {
+	if got := service.ComposeStickyKeyParts("auth-hash:deadbeef", "sess-1", "aff:x"); got != "cache:sess-1" {
 		t.Fatalf("auth+cache: %q", got)
 	}
 	// tenant header + cache keeps isolation.

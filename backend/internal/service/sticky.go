@@ -40,7 +40,9 @@ func StickyKeyFromRequest(request *http.Request) string {
 		token = strings.TrimSpace(request.Header.Get("x-api-key"))
 	}
 	if token != "" {
-		return "auth:" + token
+		// Never retain raw client secrets in sticky maps, logs, or diagnostics.
+		sum := sha256.Sum256([]byte(token))
+		return "auth-hash:" + hex.EncodeToString(sum[:])
 	}
 	return ""
 }
@@ -164,7 +166,7 @@ func ComposeStickyKeyParts(clientKey, promptCacheKey, affinityKey string) string
 		return ""
 	}
 
-	if promptCacheKey != "" && clientKey != "" && !strings.HasPrefix(clientKey, "auth:") {
+	if promptCacheKey != "" && clientKey != "" && !strings.HasPrefix(clientKey, "auth-hash:") && !strings.HasPrefix(clientKey, "auth:") {
 		return clientKey + "|" + session
 	}
 	if promptCacheKey == "" && clientKey != "" && affinityKey != "" && session == clientKey {
