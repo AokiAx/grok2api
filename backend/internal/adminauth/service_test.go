@@ -18,6 +18,7 @@ type fakeRepo struct {
 	createWithSuccessErr error
 	recordAttemptErr     error
 	getUserByIDErr       error
+	getSessionErr        error
 	rotateCalls          int
 }
 
@@ -51,8 +52,19 @@ func (f *fakeRepo) CreateAdminSessionWithLoginSuccess(_ context.Context, s admin
 	return nil
 }
 func (f *fakeRepo) GetAdminSession(_ context.Context, id string) (adminauth.Session, bool, error) {
+	if f.getSessionErr != nil {
+		return adminauth.Session{}, false, f.getSessionErr
+	}
 	s, ok := f.sessions[id]
 	return s, ok, nil
+}
+
+func TestLogoutReturnsSessionLookupFailure(t *testing.T) {
+	repo := &fakeRepo{users: map[string]adminauth.AdminUser{}, sessions: map[string]adminauth.Session{}, getSessionErr: errors.New("lookup failed")}
+	svc := NewService(repo)
+	if err := svc.Logout(context.Background(), "session.secret"); err == nil || err.Error() != "lookup failed" {
+		t.Fatalf("logout err=%v", err)
+	}
 }
 func (f *fakeRepo) FindAdminSessionByAccessHash(_ context.Context, h [32]byte) (adminauth.Session, bool, error) {
 	for _, s := range f.sessions {

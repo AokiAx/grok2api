@@ -62,3 +62,73 @@ func TestAdminAuthHTTPLoginMeAndLogout(t *testing.T) {
 		t.Fatalf("logout %d %v", lrec.Code, lrec.Header())
 	}
 }
+
+func TestAdminAuthErrorsAreJSONAndNilServiceDoesNotPanic(t *testing.T) {
+	handler := NewAdminAuthHandler(nil, AdminAuthHandlerOptions{})
+	tests := []struct{ method, path, body string }{
+		{http.MethodPost, "/api/admin/v1/auth/login", `{"username":"admin","password":"secret"}`},
+		{http.MethodPost, "/api/admin/v1/auth/refresh", ""},
+		{http.MethodPost, "/api/admin/v1/auth/logout", ""},
+		{http.MethodGet, "/api/admin/v1/auth/me", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path+tc.method, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer token")
+			req.AddCookie(&http.Cookie{Name: "grok2api_admin_refresh", Value: "session.secret"})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("Content-Type") != "application/json" || rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("headers=%v", rec.Header())
+			}
+			if rec.Body.String() != "{\"error\":{\"code\":\"internal_error\",\"message\":\"\"},\"ok\":false}\n" {
+				t.Fatalf("body=%q", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminAuthMalformedAndEmptyLoginRequests(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, t.TempDir()+"/empty-login.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	cred, _ := security.HashAdminPassword("secret", 4)
+	u, _ := domain.NewAdminUser("u1", "admin", cred, now)
+	if err := repo.CreateAdminUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewAdminAuthHandler(service.NewService(repo, service.WithClock(func() time.Time { return now })), AdminAuthHandlerOptions{})
+	for _, body := range []string{"{", `{}`, `{"username":"","password":""}`} {
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/login", strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Fatalf("body=%q status=%d response=%s", body, rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get("Content-Type") != "application/json" {
+			t.Fatalf("content type=%q", rec.Header().Get("Content-Type"))
+		}
+	}
+}
+
+func TestRequestIPSupportsIPv6WithAndWithoutPort(t *testing.T) {
+	for remote, want := range map[string]string{
+		"[2001:db8::1]:443": "2001:db8::1",
+		"2001:db8::1":       "2001:db8::1",
+		"127.0.0.1:8080":    "127.0.0.1",
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = remote
+		if got := requestIP(r); got != want {
+			t.Fatalf("requestIP(%q)=%q want=%q", remote, got, want)
+		}
+	}
+}
