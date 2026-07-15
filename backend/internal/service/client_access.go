@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
@@ -13,9 +14,10 @@ import (
 )
 
 var (
-	ErrClientUnauthorized = errors.New("client credential is invalid")
-	ErrModelNotAllowed    = errors.New("model is not allowed for this client key")
-	ErrClientRateLimited  = errors.New("client key request rate exceeded")
+	ErrClientUnauthorized       = errors.New("client credential is invalid")
+	ErrModelNotAllowed          = errors.New("model is not allowed for this client key")
+	ErrClientRateLimited        = errors.New("client key request rate exceeded")
+	ErrClientConcurrencyLimited = errors.New("client key concurrency exceeded")
 )
 
 type ClientAccessRepository interface {
@@ -83,8 +85,10 @@ func (g ClientGrant) FilterModelIDs(models []string) []string {
 }
 
 type ClientAccess struct {
-	repository ClientAccessRepository
-	now        func() time.Time
+	repository    ClientAccessRepository
+	now           func() time.Time
+	concurrencyMu sync.Mutex
+	activeByKey   map[string]int
 }
 
 type ClientAccessOption func(*ClientAccess)
@@ -98,11 +102,65 @@ func WithClientAccessClock(now func() time.Time) ClientAccessOption {
 }
 
 func NewClientAccess(repository ClientAccessRepository, options ...ClientAccessOption) *ClientAccess {
-	access := &ClientAccess{repository: repository, now: time.Now}
+	access := &ClientAccess{repository: repository, now: time.Now, activeByKey: make(map[string]int)}
 	for _, option := range options {
 		option(access)
 	}
 	return access
+}
+
+type ClientPermit interface {
+	Release()
+}
+
+type clientPermit struct {
+	access *ClientAccess
+	keyID  string
+	once   sync.Once
+}
+
+func (p *clientPermit) Release() {
+	if p == nil || p.access == nil || p.keyID == "" {
+		return
+	}
+	p.once.Do(func() {
+		p.access.concurrencyMu.Lock()
+		defer p.access.concurrencyMu.Unlock()
+		active := p.access.activeByKey[p.keyID]
+		if active <= 1 {
+			delete(p.access.activeByKey, p.keyID)
+			return
+		}
+		p.access.activeByKey[p.keyID] = active - 1
+	})
+}
+
+type unlimitedClientPermit struct{}
+
+func (unlimitedClientPermit) Release() {}
+
+// AcquireConcurrency reserves one in-memory slot for the authenticated key.
+// A zero limit is explicitly unlimited and returns a no-op permit.
+func (a *ClientAccess) AcquireConcurrency(grant ClientGrant) (ClientPermit, error) {
+	if !grant.Authenticated || grant.MaxConcurrent == 0 {
+		return unlimitedClientPermit{}, nil
+	}
+	if grant.KeyID == "" || grant.MaxConcurrent < 0 {
+		return nil, ErrClientUnauthorized
+	}
+	if a == nil {
+		return nil, errors.New("client access is required")
+	}
+	a.concurrencyMu.Lock()
+	defer a.concurrencyMu.Unlock()
+	if a.activeByKey == nil {
+		a.activeByKey = make(map[string]int)
+	}
+	if a.activeByKey[grant.KeyID] >= grant.MaxConcurrent {
+		return nil, ErrClientConcurrencyLimited
+	}
+	a.activeByKey[grant.KeyID]++
+	return &clientPermit{access: a, keyID: grant.KeyID}, nil
 }
 
 func (a *ClientAccess) Authenticate(ctx context.Context, secret string) (ClientGrant, error) {

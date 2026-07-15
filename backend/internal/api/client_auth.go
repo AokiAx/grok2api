@@ -200,3 +200,32 @@ func writeRateLimitHeaders(header http.Header, decision repository.RateLimitDeci
 		header.Set("X-RateLimit-Reset-Requests", strconv.FormatInt(decision.ResetAt.UTC().Unix(), 10))
 	}
 }
+
+type ClientConcurrencyLimiter interface {
+	AcquireConcurrency(service.ClientGrant) (service.ClientPermit, error)
+}
+
+// ClientConcurrencyMiddleware holds the permit until the wrapped handler has
+// fully returned. Since the existing streaming handlers return only after the
+// response stream reaches EOF or disconnects, streaming permits cover the full
+// response lifetime.
+func ClientConcurrencyMiddleware(limiter ClientConcurrencyLimiter, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if limiter == nil {
+			writeOpenAIErrorCode(writer, http.StatusInternalServerError, "concurrency_unavailable", "Concurrency limiting is unavailable")
+			return
+		}
+		grant, _ := service.ClientGrantFromContext(request.Context())
+		permit, err := limiter.AcquireConcurrency(grant)
+		if errors.Is(err, service.ErrClientConcurrencyLimited) {
+			writeOpenAIErrorCode(writer, http.StatusTooManyRequests, "concurrent_limit_exceeded", "Concurrent request limit exceeded for this API key")
+			return
+		}
+		if err != nil {
+			writeOpenAIErrorCode(writer, http.StatusInternalServerError, "concurrency_failed", "Concurrency check failed")
+			return
+		}
+		defer permit.Release()
+		next.ServeHTTP(writer, request)
+	})
+}
