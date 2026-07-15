@@ -24,6 +24,7 @@
 | 模型注册表 | SQLite `models` seed+managed、别名、启停；`/api/admin/v1/models`；运行时 Catalog facade |
 | 设置中心 | 版本化 pool/timeouts/audit/proxy；乐观锁 revision；快照与回滚；proxy 明确 not_wired |
 | OpenAPI /docs | `docs/openapi.yaml` 契约源；`/openapi.json` `/openapi.yaml` `/docs`；契约路径测试 |
+| Build Device OAuth | `device_auth_sessions`；admin start/get/cancel/poll；后台轮询；成功入库；device_code/token 不回前端 |
 
 ---
 

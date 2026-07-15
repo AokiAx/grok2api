@@ -420,6 +420,83 @@ export type ClientKeyInput = {
   expires_at: string | null;
 };
 
+export type ManagedModel = {
+  id: string;
+  upstream_id: string;
+  name: string;
+  api_backend: string;
+  context_window: number;
+  supports_reasoning_effort: boolean;
+  reasoning_efforts: string[];
+  supports_backend_search: boolean;
+  owned_by: string;
+  enabled: boolean;
+  aliases: string[];
+  source: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ModelsList = {
+  count: number;
+  enabled: number;
+  models: ManagedModel[];
+};
+
+export type SettingsDocument = {
+  revision: number;
+  updated_at: string;
+  updated_by?: string;
+  pool: {
+    max_concurrent: number;
+    max_attempts: number;
+    strategy: string;
+    active_size: number;
+    sticky: boolean;
+    sticky_ttl_minutes: number;
+    quota_retry_minutes: number;
+    rate_retry_seconds: number;
+  };
+  timeouts: {
+    request_timeout_sec: number;
+    acquire_timeout_sec: number;
+  };
+  audit: {
+    retention_days: number;
+  };
+  proxy: {
+    url: string;
+    enabled: boolean;
+    runtime_status: string;
+    note?: string;
+  };
+};
+
+export type SettingsSnapshot = {
+  revision: number;
+  created_at: string;
+  created_by: string;
+  reason: string;
+  document: SettingsDocument;
+};
+
+export type DeviceAuthSession = {
+  id: string;
+  status: string;
+  issuer: string;
+  client_id: string;
+  scope?: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  interval_sec: number;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+  last_error?: string;
+  account_id?: string;
+};
 
 function normalizeAccountItem(item: any): PublicAccount {
   // Normalize alternate AccountDTO fields into PublicAccount.
@@ -479,7 +556,13 @@ export const adminApi = {
       { retryUnauthorized: false },
     );
   },
-  me: () => request<AdminIdentity>("/api/admin/v1/auth/me"),
+  me: () => request<AdminIdentity>(
+    "/api/admin/v1/auth/me",
+    {},
+    // Cold start without an in-memory access token should not fire cookie refresh + invalidation noise.
+    // Once login/refresh has populated accessToken, transport can still refresh on later 401s.
+    { retryUnauthorized: Boolean(accessToken) },
+  ),
   dashboard: () => request<Dashboard>("/api/admin/v1/dashboard"),
   pool: () =>
     request<{
@@ -590,6 +673,67 @@ export const adminApi = {
     request<ImportResult>("/api/admin/v1/accounts/import", {
       method: "POST",
       body: JSON.stringify({ accounts, dry_run: false }),
+    }),
+
+  // ---- models registry ----
+  models: (includeDisabled = true) =>
+    request<ModelsList>(
+      `/api/admin/v1/models${includeDisabled ? "?include_disabled=true" : ""}`,
+    ),
+  model: (id: string) =>
+    request<ManagedModel>(`/api/admin/v1/models/${encodeURIComponent(id)}`),
+  putModel: (id: string, body: Partial<ManagedModel> & { enabled?: boolean }) =>
+    request<ManagedModel>(`/api/admin/v1/models/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  patchModel: (id: string, body: Partial<ManagedModel> & { enabled?: boolean }) =>
+    request<ManagedModel>(`/api/admin/v1/models/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  // ---- settings center ----
+  settings: () => request<SettingsDocument>("/api/admin/v1/settings"),
+  putSettings: (body: {
+    expected_revision: number;
+    pool: SettingsDocument["pool"];
+    timeouts: SettingsDocument["timeouts"];
+    audit: SettingsDocument["audit"];
+    proxy: SettingsDocument["proxy"];
+  }) =>
+    request<SettingsDocument>("/api/admin/v1/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  settingsSnapshots: (limit = 20) =>
+    request<{ count: number; snapshots: SettingsSnapshot[] }>(
+      `/api/admin/v1/settings/snapshots?limit=${limit}`,
+    ),
+  rollbackSettings: (expectedRevision: number, targetRevision: number) =>
+    request<SettingsDocument>("/api/admin/v1/settings/rollback", {
+      method: "POST",
+      body: JSON.stringify({
+        expected_revision: expectedRevision,
+        target_revision: targetRevision,
+      }),
+    }),
+
+  // ---- Build Device OAuth ----
+  startDeviceAuth: (input: { issuer?: string; client_id?: string; scope?: string } = {}) =>
+    request<DeviceAuthSession>("/api/admin/v1/device-auth/sessions", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getDeviceAuth: (id: string) =>
+    request<DeviceAuthSession>(`/api/admin/v1/device-auth/sessions/${encodeURIComponent(id)}`),
+  pollDeviceAuth: (id: string) =>
+    request<DeviceAuthSession>(`/api/admin/v1/device-auth/sessions/${encodeURIComponent(id)}/poll`, {
+      method: "POST",
+    }),
+  cancelDeviceAuth: (id: string) =>
+    request<DeviceAuthSession>(`/api/admin/v1/device-auth/sessions/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
     }),
 };
 

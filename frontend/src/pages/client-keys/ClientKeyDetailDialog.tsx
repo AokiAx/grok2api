@@ -29,6 +29,7 @@ export function ClientKeyDetailDialog({
   const [error, setError] = useState<string | null>(null);
   const [unlimitedRPM, setUnlimitedRPM] = useState(false);
   const [unlimitedConcurrent, setUnlimitedConcurrent] = useState(false);
+  const [allModelsConfirmed, setAllModelsConfirmed] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -36,12 +37,15 @@ export function ClientKeyDetailDialog({
     setError(null);
     setUnlimitedRPM(false);
     setUnlimitedConcurrent(false);
+    setAllModelsConfirmed(false);
     void adminApi.clientKey(initial.id).then((loaded) => {
       if (!active) return;
       setDetail(loaded);
       setDraft(draftFromClientKey(loaded));
       setUnlimitedRPM(loaded.rpm_limit === 0);
       setUnlimitedConcurrent(loaded.max_concurrent === 0);
+      // Existing all-policy keys are already confirmed; reconfirm only when switching to all.
+      setAllModelsConfirmed(loaded.model_policy === "all");
     }).catch((failure) => {
       if (active) setError(clientKeyErrorMessage(failure, "加载密钥详情失败"));
     }).finally(() => {
@@ -57,7 +61,7 @@ export function ClientKeyDetailDialog({
     const input = buildClientKeyInput(draft, {
       unlimitedRPM,
       unlimitedConcurrent,
-      allModelsConfirmed: true,
+      allModelsConfirmed: draft.modelPolicy !== "all" || allModelsConfirmed,
     });
     if (typeof input === "string") {
       setError(input);
@@ -72,6 +76,7 @@ export function ClientKeyDetailDialog({
       setDraft(draftFromClientKey(merged));
       setUnlimitedRPM(merged.rpm_limit === 0);
       setUnlimitedConcurrent(merged.max_concurrent === 0);
+      setAllModelsConfirmed(merged.model_policy === "all");
       onChanged(merged);
     } catch (failure) {
       setError(clientKeyErrorMessage(failure, "保存密钥设置失败"));
@@ -125,10 +130,28 @@ export function ClientKeyDetailDialog({
             <form className="space-y-4" onSubmit={save}>
               <ClientKeyFields
                 draft={draft}
-                onChange={setDraft}
+                onChange={(next) => {
+                  setDraft(next);
+                  if (next.modelPolicy !== "all") {
+                    setAllModelsConfirmed(false);
+                  } else if (detail.model_policy === "all" && next.modelPolicy === "all") {
+                    setAllModelsConfirmed(true);
+                  }
+                }}
                 nameLabel="密钥名称"
                 disabled={Boolean(detail.revoked_at)}
               />
+              {draft.modelPolicy === "all" && detail.model_policy !== "all" ? (
+                <label className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/8 p-3 text-xs leading-5">
+                  <input
+                    type="checkbox"
+                    checked={allModelsConfirmed}
+                    disabled={Boolean(detail.revoked_at)}
+                    onChange={(event) => setAllModelsConfirmed(event.target.checked)}
+                  />
+                  我确认将此密钥升级为可访问全部模型
+                </label>
+              ) : null}
               <div className="grid gap-3 sm:grid-cols-2">
                 <LimitDecision
                   id="detail-rpm"

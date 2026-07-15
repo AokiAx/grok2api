@@ -145,6 +145,7 @@ export function LoginPage() {
                   记住登录
                 </label>
                 {error ? <p className="text-sm text-destructive" role="alert">{error}</p> : null}
+                {!error && metaError ? <p className="text-sm text-destructive" role="alert">{metaError}</p> : null}
                 <Button type="submit" size="sm" className="w-full active:scale-[0.98]" disabled={busy}>
                   {busy ? "验证中…" : "进入面板"}
                 </Button>
