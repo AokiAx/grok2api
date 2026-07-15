@@ -497,7 +497,6 @@ func TestPoolUnavailableReasons(t *testing.T) {
 	}
 }
 
-
 type memoryAuditor struct {
 	mu    sync.Mutex
 	items []audit.Request
