@@ -3,19 +3,239 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/AokiAx/grok2api/backend/internal/account"
+	"github.com/AokiAx/grok2api/backend/internal/admin"
+	"github.com/AokiAx/grok2api/backend/internal/api"
+	"github.com/AokiAx/grok2api/backend/internal/config"
+	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/security"
+	"github.com/AokiAx/grok2api/backend/internal/service"
 	_ "modernc.org/sqlite"
 )
+
+func TestRunBootstrapsLegacySecurityBeforeServeAndClearsSecrets(t *testing.T) {
+	tests := []struct {
+		name             string
+		config           map[string]any
+		wantAdminCount   int
+		wantAdminSecret  string
+		wantClientSecret string
+	}{
+		{
+			name: "panel password takes precedence and api key becomes a client key",
+			config: map[string]any{
+				"panel_password": "panel-admin-secret",
+				"app_key":        "app-admin-secret",
+				"api_key":        "legacy-client-secret",
+			},
+			wantAdminCount:   1,
+			wantAdminSecret:  "panel-admin-secret",
+			wantClientSecret: "legacy-client-secret",
+		},
+		{
+			name: "api key alone does not create an administrator",
+			config: map[string]any{
+				"api_key": "client-only-secret",
+			},
+			wantAdminCount:   0,
+			wantClientSecret: "client-only-secret",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			test.config["data_dir"] = dir
+			configData, err := json.Marshal(test.config)
+			if err != nil {
+				t.Fatalf("marshal config: %v", err)
+			}
+			if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			serveCalled := false
+			err = runWithServe(context.Background(), []string{"serve", "--config", configPath}, &bytes.Buffer{}, func(
+				ctx context.Context,
+				settings config.Config,
+				repo runtimeRepository,
+			) error {
+				serveCalled = true
+				if settings.PanelPassword != "" || settings.AppKey != "" || settings.APIKey != "" {
+					t.Fatalf("serve received uncleared secrets: panel=%q app=%q api=%q", settings.PanelPassword, settings.AppKey, settings.APIKey)
+				}
+				adminCount, err := repo.CountAdminUsers(ctx)
+				if err != nil {
+					t.Fatalf("count admins: %v", err)
+				}
+				if adminCount != test.wantAdminCount {
+					t.Fatalf("admin count = %d; want %d", adminCount, test.wantAdminCount)
+				}
+				if test.wantAdminSecret != "" {
+					user, found, err := repo.GetAdminUserByUsername(ctx, "admin")
+					if err != nil || !found || !security.VerifyAdminPassword(user.Password, test.wantAdminSecret) {
+						t.Fatalf("bootstrapped admin found=%v err=%v user=%+v", found, err, user)
+					}
+				}
+				clientHash := sha256.Sum256([]byte(test.wantClientSecret))
+				credential, found, err := repo.FindClientKeyByHash(ctx, clientHash)
+				if err != nil || !found || credential.Key.Name != "legacy" {
+					t.Fatalf("bootstrapped client key found=%v err=%v credential=%+v", found, err, credential.Key)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("run serve: %v", err)
+			}
+			if !serveCalled {
+				t.Fatal("serve was not called after security bootstrap")
+			}
+		})
+	}
+}
+
+func TestNewAPIHandlerWiresPersistentSecurityAndSecureCookies(t *testing.T) {
+	ctx := context.Background()
+	repo, err := sqlite.OpenSQLite(ctx, filepath.Join(t.TempDir(), "runtime-security.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	settings := config.Config{
+		PanelPassword:      "persisted-admin-password",
+		APIKey:             "persisted-client-key",
+		AdminSecureCookies: true,
+		DefaultModel:       "grok-4.5",
+	}
+	if err := bootstrapServeSecurity(ctx, &settings, repo); err != nil {
+		t.Fatalf("bootstrap security: %v", err)
+	}
+	settings.PanelPassword = "constructor-admin-key-must-be-ignored"
+	settings.APIKey = "constructor-client-key-must-be-ignored"
+
+	adminService := admin.NewService(repo, mainTestValidator{})
+	handler := newAPIHandler(
+		settings,
+		repo,
+		mainTestGateway{},
+		mainTestStatus{},
+		adminService,
+		nil,
+		nil,
+	)
+
+	meta := httptest.NewRecorder()
+	handler.ServeHTTP(meta, httptest.NewRequest(http.MethodGet, "/api/admin/v1/system/meta", nil))
+	if meta.Code != http.StatusOK || !strings.Contains(meta.Body.String(), `"setup_required":false`) {
+		t.Fatalf("meta status=%d body=%s", meta.Code, meta.Body.String())
+	}
+
+	loginRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/v1/auth/login",
+		strings.NewReader(`{"username":"admin","password":"persisted-admin-password","remember":true}`),
+	)
+	loginRequest.RemoteAddr = "127.0.0.1:1234"
+	login := httptest.NewRecorder()
+	handler.ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
+	}
+	refreshCookie := responseCookie(t, login.Result(), "grok2api_admin_refresh")
+	if !refreshCookie.HttpOnly || !refreshCookie.Secure || refreshCookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("refresh cookie = %+v", refreshCookie)
+	}
+	var loginEnvelope struct {
+		Data struct {
+			Tokens struct {
+				AccessToken string `json:"accessToken"`
+			} `json:"tokens"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &loginEnvelope); err != nil || loginEnvelope.Data.Tokens.AccessToken == "" {
+		t.Fatalf("login envelope=%+v err=%v", loginEnvelope, err)
+	}
+
+	legacyAdmin := httptest.NewRequest(http.MethodGet, "/api/admin/v1/dashboard", nil)
+	legacyAdmin.Header.Set("Authorization", "Bearer constructor-admin-key-must-be-ignored")
+	legacyAdminResponse := httptest.NewRecorder()
+	handler.ServeHTTP(legacyAdminResponse, legacyAdmin)
+	if legacyAdminResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("constructor admin key status=%d body=%s", legacyAdminResponse.Code, legacyAdminResponse.Body.String())
+	}
+
+	managedAdmin := httptest.NewRequest(http.MethodGet, "/api/admin/v1/client-keys", nil)
+	managedAdmin.Header.Set("Authorization", "Bearer "+loginEnvelope.Data.Tokens.AccessToken)
+	managedAdminResponse := httptest.NewRecorder()
+	handler.ServeHTTP(managedAdminResponse, managedAdmin)
+	if managedAdminResponse.Code != http.StatusOK {
+		t.Fatalf("persistent admin status=%d body=%s", managedAdminResponse.Code, managedAdminResponse.Body.String())
+	}
+
+	constructorClient := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	constructorClient.Header.Set("Authorization", "Bearer constructor-client-key-must-be-ignored")
+	constructorClientResponse := httptest.NewRecorder()
+	handler.ServeHTTP(constructorClientResponse, constructorClient)
+	if constructorClientResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("constructor client key status=%d body=%s", constructorClientResponse.Code, constructorClientResponse.Body.String())
+	}
+
+	persistedClient := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	persistedClient.Header.Set("Authorization", "Bearer persisted-client-key")
+	persistedClientResponse := httptest.NewRecorder()
+	handler.ServeHTTP(persistedClientResponse, persistedClient)
+	if persistedClientResponse.Code != http.StatusOK {
+		t.Fatalf("persistent client key status=%d body=%s", persistedClientResponse.Code, persistedClientResponse.Body.String())
+	}
+}
+
+type mainTestGateway struct{}
+
+func (mainTestGateway) Chat(context.Context, []byte, bool) (service.ChatResult, error) {
+	return service.ChatResult{Status: http.StatusOK, Header: make(http.Header), Body: []byte(`{"ok":true}`)}, nil
+}
+
+func (mainTestGateway) Request(context.Context, string, string, []byte, bool) (service.ChatResult, error) {
+	return service.ChatResult{Status: http.StatusOK, Header: make(http.Header), Body: []byte(`{"ok":true}`)}, nil
+}
+
+type mainTestStatus struct{}
+
+func (mainTestStatus) PoolStatus() api.PoolStatus {
+	return api.PoolStatus{Reasons: map[string]int{}}
+}
+
+type mainTestValidator struct{}
+
+func (mainTestValidator) Validate(context.Context, account.Account) (account.UnavailableReason, string, error) {
+	return "", "", nil
+}
+
+func responseCookie(t *testing.T, response *http.Response, name string) *http.Cookie {
+	t.Helper()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	t.Fatalf("cookie %q not found", name)
+	return nil
+}
 
 func TestRunMigrateImportsLegacyAccountsAndPrintsPoolCounts(t *testing.T) {
 	dir := t.TempDir()
