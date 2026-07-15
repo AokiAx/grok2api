@@ -38,12 +38,12 @@ func (h *adminAuthHandler) login(w http.ResponseWriter, r *http.Request) {
 		h.error(w, http.StatusBadRequest, "invalid_request", "")
 		return
 	}
-	out, err := h.service.Login(r.Context(), auth.LoginInput{Username: in.Username, Password: in.Password, SourceIP: requestIP(r), UserAgent: r.UserAgent()})
+	out, err := h.service.Login(r.Context(), auth.LoginInput{Username: in.Username, Password: in.Password, SourceIP: requestIP(r), UserAgent: r.UserAgent(), Remember: in.Remember})
 	if err != nil {
 		h.writeErr(w, err)
 		return
 	}
-	h.setCookie(w, out.RefreshCookieValue, in.Remember, out.RefreshExpiresAt)
+	h.setCookie(w, out.RefreshCookieValue, out.Remember, out.RefreshExpiresAt)
 	h.ok(w, authDTO(out))
 }
 func (h *adminAuthHandler) refresh(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +57,7 @@ func (h *adminAuthHandler) refresh(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, err)
 		return
 	}
-	h.setCookie(w, out.RefreshCookieValue, c.MaxAge > 0, out.RefreshExpiresAt)
+	h.setCookie(w, out.RefreshCookieValue, out.Remember, out.RefreshExpiresAt)
 	h.ok(w, authDTO(out))
 }
 func (h *adminAuthHandler) logout(w http.ResponseWriter, r *http.Request) {

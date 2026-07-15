@@ -250,7 +250,7 @@ func (r *SQLite) CountRecentAdminLoginFailures(
 
 const sessionSelect = `SELECT
 	id, family_id, admin_user_id, access_token_hash, refresh_secret_hash,
-	source_ip, user_agent, created_at, access_expires_at, expires_at,
+	source_ip, user_agent, remember, created_at, access_expires_at, expires_at,
 	last_seen_at, revoked_at, rotated_at, replaced_by_session_id, revocation_reason
 	FROM admin_sessions`
 
@@ -281,9 +281,9 @@ func validateSession(item adminauth.Session) error {
 func insertAdminSession(ctx context.Context, execer contextExecer, item adminauth.Session) error {
 	_, err := execer.ExecContext(ctx, `INSERT INTO admin_sessions(
 		id, family_id, admin_user_id, access_token_hash, refresh_secret_hash,
-		source_ip, user_agent, created_at, access_expires_at, expires_at,
+		source_ip, user_agent, remember, created_at, access_expires_at, expires_at,
 		last_seen_at, revoked_at, rotated_at, replaced_by_session_id, revocation_reason
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		strings.TrimSpace(item.ID),
 		strings.TrimSpace(item.FamilyID),
 		strings.TrimSpace(item.AdminUserID),
@@ -291,6 +291,7 @@ func insertAdminSession(ctx context.Context, execer contextExecer, item adminaut
 		item.RefreshSecretHash[:],
 		strings.TrimSpace(item.SourceIP),
 		strings.TrimSpace(item.UserAgent),
+		item.Remember,
 		formatTime(item.CreatedAt),
 		formatTime(item.AccessExpiresAt),
 		formatTime(item.ExpiresAt),
@@ -315,6 +316,7 @@ func scanAdminSession(row rowScanner) (adminauth.Session, bool, error) {
 		&refreshHash,
 		&item.SourceIP,
 		&item.UserAgent,
+		&item.Remember,
 		&createdAt,
 		&accessExpiresAt,
 		&expiresAt,

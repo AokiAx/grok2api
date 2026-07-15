@@ -101,6 +101,7 @@ type Session struct {
 	RefreshSecretHash   [32]byte `json:"-"`
 	SourceIP            string
 	UserAgent           string
+	Remember            bool
 	CreatedAt           time.Time
 	AccessExpiresAt     time.Time
 	ExpiresAt           time.Time

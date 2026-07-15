@@ -206,6 +206,7 @@ func (r *SQLite) migrate(ctx context.Context) error {
 			refresh_secret_hash BLOB NOT NULL UNIQUE CHECK(length(refresh_secret_hash) = 32),
 			source_ip TEXT NOT NULL DEFAULT '',
 			user_agent TEXT NOT NULL DEFAULT '',
+			remember INTEGER NOT NULL DEFAULT 0 CHECK(remember IN (0,1)),
 			created_at TEXT NOT NULL,
 			access_expires_at TEXT NOT NULL,
 			expires_at TEXT NOT NULL,
@@ -269,6 +270,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 	if err := r.ensureAccountEventColumns(ctx); err != nil {
 		return err
 	}
+	if err := r.ensureAdminSessionColumns(ctx); err != nil {
+		return err
+	}
 	if err := r.migratePythonV1(ctx); err != nil {
 		return err
 	}
@@ -285,6 +289,33 @@ func (r *SQLite) migrate(ctx context.Context) error {
 		return fmt.Errorf("record schema version: %w", err)
 	}
 	return nil
+}
+
+func (r *SQLite) ensureAdminSessionColumns(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(admin_sessions)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var def any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			return err
+		}
+		if name == "remember" {
+			found = true
+		}
+	}
+	if !found {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE admin_sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 0 CHECK(remember IN (0,1))`); err != nil {
+			return fmt.Errorf("add admin session remember: %w", err)
+		}
+	}
+	return rows.Err()
 }
 
 type pythonV1Account struct {

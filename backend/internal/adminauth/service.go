@@ -58,11 +58,15 @@ func NewService(repo repository.AdminAuthRepository, opts ...Option) *Service {
 	return s
 }
 
-type LoginInput struct{ Username, Password, SourceIP, UserAgent string }
+type LoginInput struct {
+	Username, Password, SourceIP, UserAgent string
+	Remember                                bool
+}
 type LoginOutput struct {
 	Admin                             domain.AdminUser
 	AccessToken, RefreshCookieValue   string
 	AccessExpiresAt, RefreshExpiresAt time.Time
+	Remember                          bool
 }
 
 func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error) {
@@ -118,13 +122,14 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	}
 	session.SourceIP = ip
 	session.UserAgent = in.UserAgent
+	session.Remember = in.Remember
 	if err := s.repo.CreateAdminSession(ctx, session); err != nil {
 		return LoginOutput{}, err
 	}
 	if err := s.recordAttempt(ctx, username, ip, true, "", now); err != nil {
 		return LoginOutput{}, err
 	}
-	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt}, nil
+	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt, Remember: session.Remember}, nil
 }
 
 func (s *Service) recordAttempt(ctx context.Context, u, ip string, ok bool, code string, at time.Time) error {
@@ -200,6 +205,7 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 	}
 	replacement.SourceIP = sourceIP
 	replacement.UserAgent = userAgent
+	replacement.Remember = old.Remember
 	rotated, e := s.repo.RotateAdminSession(ctx, old.ID, sha256.Sum256([]byte(parts[1])), replacement, now)
 	if e != nil {
 		return LoginOutput{}, e
@@ -214,7 +220,7 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 	if !ok {
 		return LoginOutput{}, ErrUnauthorized
 	}
-	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: replacement.AccessExpiresAt, RefreshExpiresAt: replacement.ExpiresAt}, nil
+	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: replacement.AccessExpiresAt, RefreshExpiresAt: replacement.ExpiresAt, Remember: replacement.Remember}, nil
 }
 func (s *Service) Logout(ctx context.Context, cookie string) error {
 	p := strings.SplitN(cookie, ".", 2)
