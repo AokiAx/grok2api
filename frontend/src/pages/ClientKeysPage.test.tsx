@@ -149,4 +149,31 @@ describe("ClientKeysPage", () => {
       max_concurrent: 0,
     }));
   });
+
+  it("preserves persisted unlimited decisions when editing other key fields", async () => {
+    apiMocks.clientKey.mockResolvedValue({
+      ...activeKey,
+      rpm_limit: 0,
+      max_concurrent: 0,
+    });
+    const user = userEvent.setup();
+    render(<ClientKeysPage />);
+
+    await user.click(await screen.findByRole("button", { name: "查看 automation" }));
+    await screen.findByRole("heading", { name: "密钥详情" });
+
+    expect(screen.getByRole("checkbox", { name: "RPM 不限" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "并发不限" })).toBeChecked();
+
+    const name = screen.getByLabelText("密钥名称");
+    await user.clear(name);
+    await user.type(name, "renamed-unlimited");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(apiMocks.updateClientKey).toHaveBeenCalledWith("ck_1", expect.objectContaining({
+      name: "renamed-unlimited",
+      rpm_limit: 0,
+      max_concurrent: 0,
+    }));
+  });
 });
