@@ -21,6 +21,40 @@ type fakeRequestAuthenticator struct {
 	grants  map[string]service.ClientGrant
 }
 
+type orderedInferenceAccess struct {
+	grant  service.ClientGrant
+	events []string
+	permit *orderedPermit
+}
+
+func (a *orderedInferenceAccess) Authenticate(context.Context, string) (service.ClientGrant, error) {
+	a.events = append(a.events, "authenticate")
+	return a.grant, nil
+}
+
+func (a *orderedInferenceAccess) ConsumeRPM(context.Context, service.ClientGrant) (repository.RateLimitDecision, error) {
+	a.events = append(a.events, "rpm")
+	return repository.RateLimitDecision{Allowed: true, Limit: 10, Remaining: 9}, nil
+}
+
+func (a *orderedInferenceAccess) AcquireConcurrency(service.ClientGrant) (service.ClientPermit, error) {
+	a.events = append(a.events, "concurrency")
+	a.permit = &orderedPermit{events: &a.events}
+	return a.permit, nil
+}
+
+type orderedPermit struct {
+	events   *[]string
+	released bool
+}
+
+func (p *orderedPermit) Release() {
+	if !p.released {
+		*p.events = append(*p.events, "release")
+		p.released = true
+	}
+}
+
 func (f *fakeRequestAuthenticator) Authenticate(_ context.Context, secret string) (service.ClientGrant, error) {
 	f.secrets = append(f.secrets, secret)
 	grant, ok := f.grants[secret]
@@ -260,6 +294,54 @@ func TestClientConcurrencyMiddlewareHoldsPermitUntilStreamCompletes(t *testing.T
 	quick.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("after stream status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClientInferenceMiddlewareFixesSecurityCheckOrder(t *testing.T) {
+	access := &orderedInferenceAccess{grant: service.ClientGrant{
+		Authenticated: true, KeyID: "ck_1", Principal: "client-key:ck_1",
+		ModelPolicy: clientkey.ModelPolicyAllowlist, ModelScopes: []string{"grok-4.5"}, MaxConcurrent: 1,
+	}}
+	handler := ClientInferenceMiddleware(access, "grok-4.5", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		access.events = append(access.events, "handler")
+		if model, ok := service.EffectiveModelFromContext(request.Context()); !ok || model != "grok-4.5" {
+			t.Fatalf("effective model=%q ok=%v", model, ok)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer raw-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	want := []string{"authenticate", "rpm", "concurrency", "handler", "release"}
+	if strings.Join(access.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("events=%#v want=%#v", access.events, want)
+	}
+}
+
+func TestClientModelsMiddlewareAuthenticatesThenFiltersWithoutConsumingTrafficLimits(t *testing.T) {
+	access := &orderedInferenceAccess{grant: service.ClientGrant{
+		Authenticated: true, KeyID: "ck_1", Principal: "client-key:ck_1",
+		ModelPolicy: clientkey.ModelPolicyAllowlist, ModelScopes: []string{"grok-4.5"},
+	}}
+	handler := ClientModelsMiddleware(access, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		access.events = append(access.events, "handler")
+		writeJSON(writer, http.StatusOK, map[string]any{"object": "list", "data": []map[string]any{
+			{"id": "grok-3"}, {"id": "grok-4.5"},
+		}})
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("x-api-key", "raw-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "grok-3") || !strings.Contains(rec.Body.String(), "grok-4.5") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Join(access.events, ",") != "authenticate,handler" {
+		t.Fatalf("model-list events=%#v", access.events)
 	}
 }
 
