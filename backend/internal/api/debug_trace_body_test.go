@@ -131,7 +131,8 @@ func TestDebugTraceDoesNotReadRejectedInferenceBody(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			tracer := intercept.New(intercept.Options{Enabled: true, Dir: t.TempDir(), MaxBody: 4096})
+			dir := t.TempDir()
+			tracer := intercept.New(intercept.Options{Enabled: true, Dir: dir, MaxBody: 4096})
 			body := &singlePassBody{payload: []byte(`{"model":"grok-4.5"}`)}
 			handler := intercept.Middleware(tracer, ClientInferenceMiddleware(test.access, "grok-4.5", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				t.Fatal("rejected request reached handler")
@@ -147,6 +148,18 @@ func TestDebugTraceDoesNotReadRejectedInferenceBody(t *testing.T) {
 			}
 			if body.reads != 0 {
 				t.Fatalf("rejected request body reads=%d want=0", body.reads)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("trace entries=%d err=%v", len(entries), err)
+			}
+			trace, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+			if err != nil {
+				t.Fatalf("read trace: %v", err)
+			}
+			text := string(trace)
+			if !strings.Contains(text, `"body_available":false`) || !strings.Contains(text, `"bytes":0`) {
+				t.Fatalf("rejected trace did not mark body unavailable: %s", text)
 			}
 		})
 	}

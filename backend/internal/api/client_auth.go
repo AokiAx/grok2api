@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/AokiAx/grok2api/backend/internal/repository"
+	"github.com/AokiAx/grok2api/backend/internal/requestctx"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
@@ -34,14 +35,19 @@ func inferenceRequestBodyFromContext(ctx context.Context) ([]byte, bool) {
 	return body, ok
 }
 
-func readInferenceRequestBody(writer http.ResponseWriter, request *http.Request) ([]byte, error) {
+func readInferenceRequestBody(_ http.ResponseWriter, request *http.Request) ([]byte, error) {
 	if request == nil {
 		return nil, errors.New("inference request is required")
 	}
 	if body, ok := inferenceRequestBodyFromContext(request.Context()); ok {
 		return body, nil
 	}
-	return io.ReadAll(http.MaxBytesReader(writer, request.Body, maxInferenceBodyBytes))
+	if cache := requestctx.BodyCacheFromContext(request.Context()); cache != nil {
+		return cache.Load(func() ([]byte, error) {
+			return requestctx.ReadBounded(request.Body, maxInferenceBodyBytes)
+		})
+	}
+	return requestctx.ReadBounded(request.Body, maxInferenceBodyBytes)
 }
 
 // ClientAuthMiddleware authenticates a request and attaches only the opaque
