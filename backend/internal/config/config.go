@@ -13,13 +13,14 @@ import (
 // Config holds API server and pool settings only.
 // Account registration lives in the external grok-register project.
 type Config struct {
-	Host          string `json:"host"`
-	Port          int    `json:"port"`
-	APIKey        string `json:"api_key"`
-	AppKey        string `json:"app_key"`
-	PanelPassword string `json:"panel_password"`
-	ProxyBaseURL  string `json:"proxy_base_url"`
-	ClientVersion string `json:"client_version"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	APIKey             string `json:"api_key"`
+	AppKey             string `json:"app_key"`
+	PanelPassword      string `json:"panel_password"`
+	AdminSecureCookies bool   `json:"admin_secure_cookies"`
+	ProxyBaseURL       string `json:"proxy_base_url"`
+	ClientVersion      string `json:"client_version"`
 	// CLI fingerprint for the Grok CLI request surface.
 	ClientIdentifier  string `json:"client_identifier"`
 	ClientUserAgent   string `json:"client_user_agent"`
@@ -198,6 +199,7 @@ func applyEnvironment(config *Config) error {
 	}
 
 	boolValues := map[string]*bool{
+		"GROK2API_ADMIN_SECURE_COOKIES":    &config.AdminSecureCookies,
 		"GROK2API_DEBUG_TRACE":             &config.DebugTrace,
 		"GROK2API_DEBUG_TRACE_ERRORS_ONLY": &config.DebugTraceErrorsOnly,
 		"GROK2API_CLI_POOL_STICKY":         &config.StickyPool,
@@ -228,7 +230,7 @@ func (c Config) RequestTimeout() time.Duration {
 }
 
 func (c Config) AdminKey() string {
-	for _, key := range []string{c.PanelPassword, c.AppKey, c.APIKey} {
+	for _, key := range []string{c.PanelPassword, c.AppKey} {
 		if key = strings.TrimSpace(key); key != "" {
 			return key
 		}

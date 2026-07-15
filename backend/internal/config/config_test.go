@@ -3,7 +3,6 @@ package config_test
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
@@ -47,7 +46,7 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	if got.AppKey != "env-admin" {
 		t.Fatalf("app key = %q", got.AppKey)
 	}
-	if !adminSecureCookies(t, got) {
+	if !got.AdminSecureCookies {
 		t.Fatal("expected AdminSecureCookies from env")
 	}
 	if !got.DebugTrace {
@@ -91,7 +90,7 @@ func TestLoadReadsAdminSecureCookiesFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if !adminSecureCookies(t, got) {
+	if !got.AdminSecureCookies {
 		t.Fatal("expected AdminSecureCookies from config file")
 	}
 }
@@ -147,16 +146,4 @@ func TestLoadUsesSafeDefaultsWhenFileMissing(t *testing.T) {
 	if got.Frontend.StaticPath != "" {
 		t.Fatalf("frontend static path=%q, want disabled by default", got.Frontend.StaticPath)
 	}
-}
-
-func adminSecureCookies(t *testing.T, got config.Config) bool {
-	t.Helper()
-	field := reflect.ValueOf(got).FieldByName("AdminSecureCookies")
-	if !field.IsValid() {
-		t.Fatal("Config.AdminSecureCookies field is missing")
-	}
-	if field.Kind() != reflect.Bool {
-		t.Fatalf("Config.AdminSecureCookies kind = %s; want bool", field.Kind())
-	}
-	return field.Bool()
 }
