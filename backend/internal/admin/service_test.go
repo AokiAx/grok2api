@@ -259,6 +259,27 @@ func TestImportValidAccountEntersReadyPool(t *testing.T) {
 	}
 }
 
+func TestImportDefaultsMaxActiveFromGlobalSetting(t *testing.T) {
+	repository := &memoryRepository{}
+	service := admin.NewService(repository, validator{})
+	service.ConfigureRuntime(0, 0, 4)
+
+	result, err := service.Import(context.Background(), admin.ImportRequest{
+		Accounts: []admin.ImportAccount{{Key: "token-default-max"}},
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, item := range repository.accounts {
+		if item.MaxActive != 4 {
+			t.Fatalf("max_active=%d want 4 from global setting", item.MaxActive)
+		}
+	}
+}
+
 func TestImportAuthenticationFailureEntersUnavailablePool(t *testing.T) {
 	repository := &memoryRepository{}
 	service := admin.NewService(repository, validator{

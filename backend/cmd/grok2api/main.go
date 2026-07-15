@@ -331,6 +331,12 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		admin.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
 		admin.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
 	)
+	// Align import defaults with the current global per-account concurrency.
+	adminService.ConfigureRuntime(
+		time.Duration(settings.QuotaRetryMinutes)*time.Minute,
+		time.Duration(settings.RateRetrySeconds)*time.Second,
+		maxConcurrent,
+	)
 	deviceAuthService := deviceauth.NewService(repo, upstreamClient, upstreamClient, nil, repo, pool)
 	// Registration is an external project (grok-register). This service only
 	// imports credentials via the admin import API / panel.
@@ -653,7 +659,7 @@ func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
 		a.gateway.ConfigureRuntime(quotaRetry, rateRetry, acquireTimeout, a.settings.MaxAttempts)
 	}
 	if a.admin != nil {
-		a.admin.ConfigureRuntime(quotaRetry, rateRetry)
+		a.admin.ConfigureRuntime(quotaRetry, rateRetry, a.settings.MaxConcurrent)
 	}
 	if a.recovery != nil {
 		a.recovery.ConfigureQuotaRetry(quotaRetry)

@@ -72,14 +72,15 @@ type AccountSink interface {
 }
 
 type Service struct {
-	runtimeMu   sync.RWMutex
-	repository  repository.AccountRepository
-	validator   Validator
-	maintenance Maintenance
-	sink        AccountSink
-	now         func() time.Time
-	quotaRetry  time.Duration
-	rateRetry   time.Duration
+	runtimeMu        sync.RWMutex
+	repository       repository.AccountRepository
+	validator        Validator
+	maintenance      Maintenance
+	sink             AccountSink
+	now              func() time.Time
+	quotaRetry       time.Duration
+	rateRetry        time.Duration
+	defaultMaxActive int
 }
 
 type Option func(*Service)
@@ -112,8 +113,9 @@ func WithRateRetry(duration time.Duration) Option {
 	}
 }
 
-// ConfigureRuntime updates maintenance parking backoffs without rebuilding the service.
-func (s *Service) ConfigureRuntime(quotaRetry, rateRetry time.Duration) {
+// ConfigureRuntime updates maintenance parking backoffs and the default
+// per-account concurrency used when imports omit max_active.
+func (s *Service) ConfigureRuntime(quotaRetry, rateRetry time.Duration, defaultMaxActive int) {
 	if s == nil {
 		return
 	}
@@ -125,6 +127,21 @@ func (s *Service) ConfigureRuntime(quotaRetry, rateRetry time.Duration) {
 	if rateRetry > 0 {
 		s.rateRetry = rateRetry
 	}
+	if defaultMaxActive > 0 {
+		s.defaultMaxActive = defaultMaxActive
+	}
+}
+
+func (s *Service) importDefaultMaxActive() int {
+	if s == nil {
+		return 1
+	}
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	if s.defaultMaxActive > 0 {
+		return s.defaultMaxActive
+	}
+	return 1
 }
 
 func WithClock(now func() time.Time) Option {
@@ -137,11 +154,12 @@ func WithClock(now func() time.Time) Option {
 
 func NewService(repository repository.AccountRepository, validator Validator, options ...Option) *Service {
 	service := &Service{
-		repository: repository,
-		validator:  validator,
-		now:        time.Now,
-		quotaRetry: 24 * time.Hour,
-		rateRetry:  45 * time.Second,
+		repository:       repository,
+		validator:        validator,
+		now:              time.Now,
+		quotaRetry:       24 * time.Hour,
+		rateRetry:        45 * time.Second,
+		defaultMaxActive: 1,
 	}
 	for _, option := range options {
 		option(service)
@@ -590,7 +608,9 @@ func (s *Service) Import(ctx context.Context, request ImportRequest) (ImportResu
 			item.ExpiresAt = expiresAt
 		}
 		if item.MaxActive <= 0 {
-			item.MaxActive = 1
+			// Imports without max_active inherit the global pool max-concurrent
+			// setting (hot-updated via ConfigureRuntime).
+			item.MaxActive = s.importDefaultMaxActive()
 		}
 		if item.CreatedAt.IsZero() {
 			item.CreatedAt = now
