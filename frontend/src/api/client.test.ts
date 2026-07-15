@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-function envelope(data: unknown, status = 200): Response {
+function envelope(
+  data: unknown,
+  status = 200,
+  error = { code: "unauthorized", message: "Unauthorized" },
+  headers: Record<string, string> = {},
+): Response {
   return new Response(
     JSON.stringify(
       status >= 400
-        ? { ok: false, data: null, error: { code: "unauthorized", message: "Unauthorized" } }
+        ? { ok: false, data: null, error }
         : { ok: true, data, error: null },
     ),
-    { status, headers: { "Content-Type": "application/json" } },
+    { status, headers: { "Content-Type": "application/json", ...headers } },
   );
 }
 
@@ -111,6 +116,73 @@ describe("admin authentication transport", () => {
     expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith("/auth/refresh"))).toHaveLength(1);
   });
 
+  it("retries one refresh conflict so another tab's winning cookie can restore the session", async () => {
+    let refreshCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const authorization = new Headers(init?.headers).get("Authorization");
+      if (path.endsWith("/auth/login")) return envelope({ tokens: { accessToken: "expired" } });
+      if (path.endsWith("/auth/refresh")) {
+        refreshCalls += 1;
+        if (refreshCalls === 1) {
+          return envelope(null, 409, { code: "refresh_conflict", message: "Refresh already rotated" });
+        }
+        return envelope({ tokens: { accessToken: "winner-token" } });
+      }
+      if (path.endsWith("/auth/me") && authorization === "Bearer expired") return envelope(null, 401);
+      return envelope({ id: "admin-1", username: "admin" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { adminApi } = await loadClient();
+    await adminApi.login("secret", false);
+    await adminApi.me();
+
+    expect(refreshCalls).toBe(2);
+    expect(fetchMock.mock.calls.some(([, init]) => new Headers(init?.headers).get("Authorization") === "Bearer winner-token")).toBe(true);
+  });
+
+  it("stops after one refresh-conflict retry and publishes final session invalidation", async () => {
+    const invalidated = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/auth/login")) return envelope({ tokens: { accessToken: "expired" } });
+      if (path.endsWith("/auth/refresh")) {
+        return envelope(null, 409, { code: "refresh_conflict", message: "Refresh already rotated" });
+      }
+      return envelope(null, 401);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { adminApi, subscribeAdminSessionInvalidated } = await loadClient();
+    const unsubscribe = subscribeAdminSessionInvalidated(invalidated);
+    await adminApi.login("secret", false);
+    await expect(adminApi.me()).rejects.toMatchObject({ status: 401 });
+    unsubscribe();
+
+    expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith("/auth/refresh"))).toHaveLength(2);
+    expect(invalidated).toHaveBeenCalledOnce();
+  });
+
+  it("preserves Retry-After on structured admin API errors", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      envelope(
+        null,
+        429,
+        { code: "login_rate_limited", message: "Too many attempts" },
+        { "Retry-After": "37" },
+      ),
+    ));
+
+    const { adminApi } = await loadClient();
+
+    await expect(adminApi.login("wrong", false)).rejects.toMatchObject({
+      status: 429,
+      code: "login_rate_limited",
+      retryAfter: "37",
+    });
+  });
+
   it("uses the authenticated refresh transport for credential attachment downloads", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -192,5 +264,86 @@ describe("admin authentication transport", () => {
     await adminApi.system();
     expect(calls.filter((call) => call.path.endsWith("/auth/me"))).toHaveLength(1);
     expect(calls.at(-1)).toEqual({ path: "/api/admin/v1/system", authorization: null });
+  });
+});
+
+describe("client-key administration API", () => {
+  it("maps list, create, detail, update, and revoke contracts", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = init?.method || "GET";
+      if (path.includes("/client-keys?") && method === "GET") {
+        return envelope({ items: [], total: 0, page: 1, page_size: 20 });
+      }
+      if (path.endsWith("/client-keys") && method === "POST") {
+        return envelope({
+          id: "ck_1",
+          name: "automation",
+          origin: "managed",
+          key_prefix: "g2a_abcd",
+          model_policy: "all",
+          model_scopes: [],
+          rpm_limit: 0,
+          max_concurrent: 0,
+          secret: "g2a_secret",
+        }, 201);
+      }
+      if (path.endsWith("/client-keys/ck_1/revoke")) {
+        return envelope({ id: "ck_1", name: "automation", revoked_at: "2026-07-15T00:00:00Z" });
+      }
+      if (path.endsWith("/client-keys/ck_1") && method === "PATCH") {
+        return envelope({ id: "ck_1", name: "renamed", model_policy: "allowlist", model_scopes: ["grok-4"] });
+      }
+      return envelope({ id: "ck_1", name: "automation", model_policy: "all", model_scopes: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { adminApi } = await loadClient();
+    await adminApi.clientKeys({ q: "auto", origin: "managed", page: 1, page_size: 20 });
+    await adminApi.createClientKey({
+      name: "automation",
+      model_policy: "all",
+      model_scopes: [],
+      rpm_limit: 0,
+      max_concurrent: 0,
+      expires_at: null,
+    });
+    await adminApi.clientKey("ck_1");
+    await adminApi.updateClientKey("ck_1", {
+      name: "renamed",
+      model_policy: "allowlist",
+      model_scopes: ["grok-4"],
+      rpm_limit: 60,
+      max_concurrent: 2,
+      expires_at: null,
+    });
+    await adminApi.revokeClientKey("ck_1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/v1/client-keys?q=auto&origin=managed&page=1&page_size=20",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/v1/client-keys",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "automation",
+          model_policy: "all",
+          model_scopes: [],
+          rpm_limit: 0,
+          max_concurrent: 0,
+          expires_at: null,
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/v1/client-keys/ck_1",
+      expect.objectContaining({ method: "PATCH" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/v1/client-keys/ck_1/revoke",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

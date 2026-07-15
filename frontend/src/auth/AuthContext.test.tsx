@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider, useAuth, useIsAuthenticated } from "@/auth/AuthContext";
@@ -11,6 +11,13 @@ const apiMocks = vi.hoisted(() => ({
   getStoredToken: vi.fn(() => ""),
   setStoredToken: vi.fn(),
   clearStoredToken: vi.fn(),
+  invalidationListener: undefined as (() => void) | undefined,
+  subscribeAdminSessionInvalidated: vi.fn((listener: () => void) => {
+    apiMocks.invalidationListener = listener;
+    return () => {
+      if (apiMocks.invalidationListener === listener) apiMocks.invalidationListener = undefined;
+    };
+  }),
 }));
 
 vi.mock("@/api/client", async (importOriginal) => {
@@ -20,6 +27,7 @@ vi.mock("@/api/client", async (importOriginal) => {
     getStoredToken: apiMocks.getStoredToken,
     setStoredToken: apiMocks.setStoredToken,
     clearStoredToken: apiMocks.clearStoredToken,
+    subscribeAdminSessionInvalidated: apiMocks.subscribeAdminSessionInvalidated,
     adminApi: {
       ...original.adminApi,
       meta: apiMocks.meta,
@@ -31,13 +39,15 @@ vi.mock("@/api/client", async (importOriginal) => {
 });
 
 function AuthProbe() {
-  const { login, logout } = useAuth();
+  const { error, login, logout, refreshMeta } = useAuth();
   const authenticated = useIsAuthenticated();
   return (
     <div>
       <span>{authenticated ? "authenticated" : "anonymous"}</span>
+      {error ? <span role="alert">{error}</span> : null}
       <button type="button" onClick={() => void login("secret", false)}>login</button>
       <button type="button" onClick={() => void logout()}>logout</button>
+      <button type="button" onClick={() => void refreshMeta()}>retry meta</button>
     </div>
   );
 }
@@ -50,6 +60,7 @@ beforeEach(() => {
     tokens: { accessToken: "memory-only" },
   });
   apiMocks.logout.mockResolvedValue({ loggedOut: true });
+  apiMocks.invalidationListener = undefined;
 });
 
 describe("AuthProvider", () => {
@@ -89,5 +100,26 @@ describe("AuthProvider", () => {
 
     expect(await screen.findByText("anonymous")).toBeInTheDocument();
     expect(apiMocks.logout).toHaveBeenCalledOnce();
+  });
+
+  it("leaves protected state when the API transport reports final session invalidation", async () => {
+    render(<AuthProvider><AuthProbe /></AuthProvider>);
+    await screen.findByText("authenticated");
+
+    act(() => apiMocks.invalidationListener?.());
+
+    expect(await screen.findByText("anonymous")).toBeInTheDocument();
+  });
+
+  it("exposes meta loading failures and retries the complete session probe", async () => {
+    apiMocks.meta.mockRejectedValueOnce(new Error("gateway unavailable"));
+    const user = userEvent.setup();
+    render(<AuthProvider><AuthProbe /></AuthProvider>);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("gateway unavailable");
+    await user.click(screen.getByRole("button", { name: "retry meta" }));
+
+    expect(await screen.findByText("authenticated")).toBeInTheDocument();
+    expect(apiMocks.meta).toHaveBeenCalledTimes(2);
   });
 });
