@@ -359,6 +359,41 @@ export type QuotaRefreshResult = {
   observed: boolean;
 };
 
+export type ClientKeyModelPolicy = "all" | "allowlist";
+
+export type ClientKey = {
+  id: string;
+  name: string;
+  origin: "managed" | "config_api_key";
+  key_prefix: string;
+  model_policy: ClientKeyModelPolicy;
+  model_scopes: string[];
+  rpm_limit: number;
+  max_concurrent: number;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+  secret?: string;
+};
+
+export type ClientKeysPage = {
+  items: ClientKey[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type ClientKeyInput = {
+  name: string;
+  model_policy: ClientKeyModelPolicy;
+  model_scopes: string[];
+  rpm_limit: number;
+  max_concurrent: number;
+  expires_at: string | null;
+};
+
 
 function normalizeAccountItem(item: any): PublicAccount {
   // Normalize alternate AccountDTO fields into PublicAccount.
@@ -487,6 +522,31 @@ export const adminApi = {
     }),
   refreshQuota: (id: string) =>
     request<QuotaRefreshResult>(`/api/admin/v1/accounts/${encodeURIComponent(id)}/refresh-quota`, {
+      method: "POST",
+    }),
+  clientKeys: (params: { q?: string; origin?: string; page?: number; page_size?: number }) => {
+    const query = new URLSearchParams();
+    if (params.q) query.set("q", params.q);
+    if (params.origin) query.set("origin", params.origin);
+    if (params.page) query.set("page", String(params.page));
+    if (params.page_size) query.set("page_size", String(params.page_size));
+    const suffix = query.toString();
+    return request<ClientKeysPage>(`/api/admin/v1/client-keys${suffix ? `?${suffix}` : ""}`);
+  },
+  createClientKey: (input: ClientKeyInput) =>
+    request<ClientKey>("/api/admin/v1/client-keys", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  clientKey: (id: string) =>
+    request<ClientKey>(`/api/admin/v1/client-keys/${encodeURIComponent(id)}`),
+  updateClientKey: (id: string, input: ClientKeyInput) =>
+    request<ClientKey>(`/api/admin/v1/client-keys/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  revokeClientKey: (id: string) =>
+    request<ClientKey>(`/api/admin/v1/client-keys/${encodeURIComponent(id)}/revoke`, {
       method: "POST",
     }),
   exportCredential: (id: string) =>

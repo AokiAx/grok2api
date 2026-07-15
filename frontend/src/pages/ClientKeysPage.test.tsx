@@ -58,8 +58,8 @@ beforeEach(() => {
 describe("ClientKeysPage", () => {
   it("requires explicit model and limit decisions before creating and reveals the secret once", async () => {
     const copy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: copy } });
     const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: copy } });
     render(<ClientKeysPage />);
     await screen.findByText("automation");
 
