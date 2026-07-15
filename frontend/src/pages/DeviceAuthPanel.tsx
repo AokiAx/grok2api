@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { LoaderCircle } from "lucide-react";
 import { adminApi, AdminApiError, type DeviceAuthSession } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AnimatedDialog } from "@/components/ui/AnimatedDialog";
+import { cn } from "@/lib/cn";
 
 const terminal = new Set(["succeeded", "denied", "expired", "cancelled", "failed"]);
 
@@ -13,7 +15,12 @@ const FALLBACK = {
     "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
 };
 
-export function DeviceAuthPanel() {
+type DeviceAuthDialogProps = {
+  open: boolean;
+  onClose: () => void;
+};
+
+export function DeviceAuthDialog({ open, onClose }: DeviceAuthDialogProps) {
   const [config, setConfig] = useState(FALLBACK);
   const [configReady, setConfigReady] = useState(false);
   const [session, setSession] = useState<DeviceAuthSession | null>(null);
@@ -22,7 +29,10 @@ export function DeviceAuthPanel() {
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
+    if (!open) return;
     let active = true;
+    setConfigReady(false);
+    setError(null);
     void adminApi
       .settings()
       .then((settings) => {
@@ -42,7 +52,7 @@ export function DeviceAuthPanel() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [open]);
 
   useEffect(() => {
     return () => {
@@ -51,7 +61,7 @@ export function DeviceAuthPanel() {
   }, []);
 
   useEffect(() => {
-    if (!session || terminal.has(session.status)) {
+    if (!open || !session || terminal.has(session.status)) {
       if (timer.current) {
         window.clearInterval(timer.current);
         timer.current = null;
@@ -66,13 +76,12 @@ export function DeviceAuthPanel() {
     return () => {
       if (timer.current) window.clearInterval(timer.current);
     };
-  }, [session?.id, session?.status, session?.interval_sec]);
+  }, [open, session?.id, session?.status, session?.interval_sec]);
 
   async function start() {
     setBusy(true);
     setError(null);
     try {
-      // Prefer latest settings so operators don't need to reopen the panel after save.
       let nextConfig = config;
       try {
         const settings = await adminApi.settings();
@@ -121,16 +130,23 @@ export function DeviceAuthPanel() {
   }
 
   return (
-    <Card className="p-4 sm:p-5">
-      <CardHeader>
-        <CardTitle>Build Device OAuth</CardTitle>
-        <CardDescription>
-          使用设置中的 OIDC 参数发起 Device Flow。device_code 与 token 只在服务端；Issuer / Client ID / Scope 请到「设置」修改。
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="mt-3 space-y-4">
+    <AnimatedDialog
+      open={open}
+      onClose={onClose}
+      title="Build Device OAuth"
+      description="使用设置中的 OIDC 参数发起 Device Flow。device_code / token 只在服务端。"
+      maxWidthClassName="max-w-xl"
+      contentKey={session?.id || (configReady ? "ready" : "loading")}
+    >
+      <div className="space-y-4">
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        <div className="rounded-lg border border-border/70 bg-background/60 p-3 text-xs">
+
+        <div
+          className={cn(
+            "rounded-lg border border-border/70 bg-background/60 p-3 text-xs transition-opacity duration-200",
+            !configReady && "opacity-70",
+          )}
+        >
           <div className="grid gap-1 sm:grid-cols-[88px_1fr]">
             <span className="text-muted-foreground">Issuer</span>
             <span className="mono break-all">{config.issuer}</span>
@@ -140,12 +156,27 @@ export function DeviceAuthPanel() {
             <span className="break-all text-muted-foreground">{config.scope}</span>
           </div>
           {!configReady ? (
-            <p className="mt-2 text-[11px] text-muted-foreground">正在读取设置…</p>
-          ) : null}
+            <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <LoaderCircle className="size-3 animate-spin" />
+              正在读取设置…
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              配置请到「设置 → Build Device OAuth」修改。
+            </p>
+          )}
         </div>
+
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => void start()} disabled={busy || !configReady}>
-            {busy ? "启动中…" : "开始授权"}
+            {busy ? (
+              <>
+                <LoaderCircle className="size-3.5 animate-spin" />
+                启动中…
+              </>
+            ) : (
+              "开始授权"
+            )}
           </Button>
           {session && !terminal.has(session.status) ? (
             <>
@@ -160,15 +191,26 @@ export function DeviceAuthPanel() {
         </div>
 
         {session ? (
-          <div className="rounded-lg border border-border/70 bg-background/60 p-4 text-sm space-y-2">
+          <div className="dialog-content-enter space-y-2 rounded-lg border border-border/70 bg-background/60 p-4 text-sm">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-muted-foreground">状态</span>
-              <Badge tone={session.status === "succeeded" ? "success" : session.status === "pending" || session.status === "slow_down" ? "default" : "danger"}>
+              <Badge
+                tone={
+                  session.status === "succeeded"
+                    ? "success"
+                    : session.status === "pending" || session.status === "slow_down"
+                      ? "default"
+                      : "danger"
+                }
+              >
                 {session.status}
               </Badge>
+              {(session.status === "pending" || session.status === "slow_down") && (
+                <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" />
+              )}
               <span className="font-mono text-[11px] text-muted-foreground">{session.id}</span>
             </div>
-            <div className="grid gap-1 sm:grid-cols-[120px_1fr] text-xs">
+            <div className="grid gap-1 text-xs sm:grid-cols-[120px_1fr]">
               <span className="text-muted-foreground">User code</span>
               <span className="font-mono text-base font-semibold tracking-wider">{session.user_code}</span>
               <span className="text-muted-foreground">Verification</span>
@@ -205,7 +247,12 @@ export function DeviceAuthPanel() {
             </div>
           </div>
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </AnimatedDialog>
   );
+}
+
+/** @deprecated Prefer DeviceAuthDialog. */
+export function DeviceAuthPanel() {
+  return <DeviceAuthDialog open onClose={() => undefined} />;
 }

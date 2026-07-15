@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -140,7 +140,7 @@ describe("AccountsPage batch administration", () => {
     expect(apiMocks.exportCredential).toHaveBeenCalledWith("a1");
   });
 
-  it("opens import menu actions for oauth, file import, and bulk export", async () => {
+  it("opens import menu actions for oauth dialog, file import, and bulk export", async () => {
     const user = userEvent.setup();
     render(<AccountsPage />);
 
@@ -151,8 +151,14 @@ describe("AccountsPage batch administration", () => {
     expect(screen.getByRole("menuitem", { name: /导出所有账号/ })).toBeInTheDocument();
 
     await user.click(screen.getByRole("menuitem", { name: /Device OAuth/i }));
-    expect(await screen.findByText("Build Device OAuth")).toBeInTheDocument();
-    expect(screen.queryByText("凭证文件")).not.toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Build Device OAuth" })).toBeInTheDocument();
+    // List remains visible under the dialog.
+    expect(screen.getByText("a1@example.test")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Build Device OAuth" })).not.toBeInTheDocument();
+    });
 
     await user.click(screen.getByRole("button", { name: "导入与导出" }));
     await user.click(screen.getByRole("menuitem", { name: /导入账号文件/ }));

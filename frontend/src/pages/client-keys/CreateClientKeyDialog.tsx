@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { X } from "lucide-react";
 import { adminApi, type ClientKey } from "@/api/client";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { AnimatedDialog } from "@/components/ui/AnimatedDialog";
 import { ClientKeyFields, LimitDecision } from "@/pages/client-keys/ClientKeyFields";
 import {
   buildClientKeyInput,
@@ -96,25 +95,13 @@ export function CreateClientKeyDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="create-client-key-title"
+    <AnimatedDialog
+      open
+      onClose={onClose}
+      title="创建密钥"
+      description={<>选择可用模型并确认限额。{defaultsHint}</>}
+      maxWidthClassName="max-w-xl"
     >
-      <Card className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto shadow-2xl">
-        <CardContent className="p-5">
-          <div className="mb-5 flex items-start justify-between gap-4">
-            <div>
-              <h2 id="create-client-key-title" className="text-base font-medium">创建密钥</h2>
-              <p className="mt-1 text-xs text-muted-foreground">
-                选择可用模型并确认限额。{defaultsHint}
-              </p>
-            </div>
-            <Button size="icon" variant="ghost" aria-label="关闭创建密钥" onClick={onClose}>
-              <X className="size-4" />
-            </Button>
-          </div>
           <form className="space-y-4" onSubmit={submit}>
             <ClientKeyFields
               draft={draft}
@@ -148,8 +135,6 @@ export function CreateClientKeyDialog({
               </Button>
             </div>
           </form>
-        </CardContent>
-      </Card>
-    </div>
+    </AnimatedDialog>
   );
 }

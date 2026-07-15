@@ -20,18 +20,17 @@ import {
   normalizeImportAccounts,
   summarizeAccounts,
 } from "@/lib/importNormalize";
-import { DeviceAuthPanel } from "@/pages/DeviceAuthPanel";
 
 export type ImportWorkspaceMode = "oauth" | "file";
 
 type ImportPageProps = {
   embedded?: boolean;
+  /** Kept for compatibility; oauth is handled by DeviceAuthDialog on AccountsPage. */
   mode?: ImportWorkspaceMode;
 };
 
-export function ImportPage({ embedded = false, mode }: ImportPageProps) {
-  const showOauth = !mode || mode === "oauth";
-  const showFile = !mode || mode === "file";
+export function ImportPage({ embedded = false, mode = "file" }: ImportPageProps) {
+  const showFile = mode !== "oauth";
   const [raw, setRaw] = useState("");
   const [fileMeta, setFileMeta] = useState("数组 / {accounts:[]} / auth.json map");
   const [output, setOutput] = useState("等待操作");
@@ -109,8 +108,6 @@ export function ImportPage({ embedded = false, mode }: ImportPageProps) {
           <Badge>{fileMeta}</Badge>
         </div>
       ) : null}
-
-      {showOauth ? <DeviceAuthPanel /> : null}
 
       {showFile ? (
         <>

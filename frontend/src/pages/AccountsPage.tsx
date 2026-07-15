@@ -29,7 +29,8 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/cn";
 import { formatAdaptiveRatio } from "@/lib/formatNumber";
 import { poolLabel, unavailableReasonLabel } from "@/lib/statusLabels";
-import { ImportPage, type ImportWorkspaceMode } from "@/pages/ImportPage";
+import { DeviceAuthDialog } from "@/pages/DeviceAuthPanel";
+import { ImportPage } from "@/pages/ImportPage";
 
 function formatDate(value?: string) {
   if (!value) return "—";
@@ -42,11 +43,10 @@ function quotaText(item: PublicAccount) {
 }
 
 type AccountsTab = "list" | "import";
-type ImportAction = ImportWorkspaceMode;
 
 export function AccountsPage() {
   const [tab, setTab] = useState<AccountsTab>("list");
-  const [importMode, setImportMode] = useState<ImportAction>("file");
+  const [deviceAuthOpen, setDeviceAuthOpen] = useState(false);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
@@ -110,9 +110,13 @@ export function AccountsPage() {
     }
   }
 
-  function openImportWorkspace(mode: ImportAction) {
-    setImportMode(mode);
+  function openImportWorkspace() {
     setTab("import");
+    setImportMenuOpen(false);
+  }
+
+  function openDeviceAuth() {
+    setDeviceAuthOpen(true);
     setImportMenuOpen(false);
   }
 
@@ -273,9 +277,7 @@ export function AccountsPage() {
           <h1 className="text-xl font-medium tracking-tight">账号</h1>
           <p className="mt-1 text-xs text-muted-foreground">
             {tab === "import"
-              ? importMode === "oauth"
-                ? "Build Device OAuth 单账号授权入库"
-                : "JSON 批量导入账号文件"
+              ? "JSON 批量导入账号文件"
               : (
                 <>
                   共 <span className="tabular-nums">{data?.total ?? "—"}</span> 条
@@ -292,7 +294,7 @@ export function AccountsPage() {
           ) : null}
           <div className="relative" ref={importMenuRef}>
             <Button
-              variant={tab === "import" ? "default" : "outline"}
+              variant={tab === "import" || deviceAuthOpen ? "default" : "outline"}
               size="sm"
               disabled={exportBusy}
               aria-label="导入与导出"
@@ -317,7 +319,7 @@ export function AccountsPage() {
                   type="button"
                   role="menuitem"
                   className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-secondary/70"
-                  onClick={() => openImportWorkspace("oauth")}
+                  onClick={openDeviceAuth}
                 >
                   <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>
@@ -329,7 +331,7 @@ export function AccountsPage() {
                   type="button"
                   role="menuitem"
                   className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-xs transition-colors hover:bg-secondary/70"
-                  onClick={() => openImportWorkspace("file")}
+                  onClick={openImportWorkspace}
                 >
                   <FileJson className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>
@@ -361,7 +363,8 @@ export function AccountsPage() {
         </div>
       </header>
 
-      {tab === "import" ? <ImportPage embedded mode={importMode} /> : null}
+      {tab === "import" ? <ImportPage embedded mode="file" /> : null}
+      <DeviceAuthDialog open={deviceAuthOpen} onClose={() => setDeviceAuthOpen(false)} />
 
       {tab === "list" ? (
       <>

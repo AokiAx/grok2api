@@ -1,14 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import {
-  Activity,
-  CircleAlert,
-  Gauge,
-  RefreshCw,
-  RotateCcw,
-  ShieldCheck,
-  Users,
-  Zap,
-} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { CircleAlert, RefreshCw } from "lucide-react";
 import { adminApi, AdminApiError, type Dashboard } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,35 +17,44 @@ function compact(v?: number) {
   return formatAdaptiveNumber(v);
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-  icon,
-  title,
-}: {
+type Metric = {
   label: string;
   value: string | number;
   hint?: string;
-  icon: ReactNode;
   title?: string;
+};
+
+function MetricCell({ label, value, hint, title }: Metric) {
+  return (
+    <div className="min-w-0 space-y-1.5">
+      <p className="text-[11px] text-muted-foreground">{label}</p>
+      <p className="truncate text-xl font-semibold tracking-tight tabular-nums" title={title}>
+        {value}
+      </p>
+      {hint ? <p className="truncate text-[11px] text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}
+
+function MetricGroup({
+  title,
+  description,
+  metrics,
+}: {
+  title: string;
+  description?: string;
+  metrics: Metric[];
 }) {
   return (
     <Card className="min-w-0">
-      <CardContent className="flex items-start justify-between gap-4 p-4">
-        <div className="min-w-0">
-          <p className="text-xs text-muted-foreground">{label}</p>
-          <p
-            className="mt-2 max-w-full truncate text-2xl font-semibold tracking-tight tabular-nums"
-            title={title}
-          >
-            {value}
-          </p>
-          {hint ? <p className="mt-1 truncate text-[11px] text-muted-foreground">{hint}</p> : null}
-        </div>
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground">
-          {icon}
-        </div>
+      <CardHeader className="space-y-0 pb-3">
+        <CardTitle>{title}</CardTitle>
+        {description ? <CardDescription className="mt-0.5">{description}</CardDescription> : null}
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-x-4 gap-y-4 pt-0">
+        {metrics.map((metric) => (
+          <MetricCell key={metric.label} {...metric} />
+        ))}
       </CardContent>
     </Card>
   );
@@ -150,105 +150,97 @@ export function DashboardPage() {
         </div>
       ) : null}
 
-      <section aria-label="核心指标" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Stat
-          label="可用账号"
-          value={n(ready)}
-          hint={total != null ? `账号总数 ${n(total)}` : "当前可用池"}
-          icon={<Users className="h-4 w-4" />}
+      <section aria-label="核心指标" className="grid gap-3 xl:grid-cols-3">
+        <MetricGroup
+          title="号池"
+          description="账号可用性与并发"
+          metrics={[
+            {
+              label: "可用账号",
+              value: n(ready),
+              hint: total != null ? `总数 ${n(total)}` : "当前可用池",
+            },
+            {
+              label: "不可用",
+              value: n(unavailable),
+              hint: "当前不可用池",
+            },
+            {
+              label: "在途并发",
+              value: `${n(s?.active_leases)} / ${n(s?.max_active)}`,
+              hint: "活动租约 / 上限",
+            },
+            {
+              label: "累计请求",
+              value: n(requests),
+              hint: "全部账号总计",
+            },
+          ]}
         />
-        <Stat
-          label="不可用账号"
-          value={n(unavailable)}
-          hint="当前不可用池"
-          icon={<CircleAlert className="h-4 w-4" />}
+        <MetricGroup
+          title="运行"
+          description="额度、恢复与认证"
+          metrics={[
+            {
+              label: "Free 剩余",
+              value: quotaRemaining.display,
+              title: quotaRemaining.exact,
+              hint: s?.quota_limit ? `${quotaUsage.display} 已使用` : "暂无额度观测",
+            },
+            {
+              label: "可自动刷新",
+              value: n(s?.refreshable_accounts),
+              hint: "持有 refresh token",
+            },
+            {
+              label: "待恢复",
+              value: n(s?.retry_due),
+              hint: "已到重试时间",
+            },
+            {
+              label: "认证失败",
+              value: n(s?.auth_fail_accounts),
+              hint: s?.total_auth_fails != null ? `累计 ${n(s.total_auth_fails)} 次` : undefined,
+            },
+          ]}
         />
-        <Stat
-          label="在途并发"
-          value={`${n(s?.active_leases)} / ${n(s?.max_active)}`}
-          hint="活动租约 / 最大并发"
-          icon={<Activity className="h-4 w-4" />}
+        <MetricGroup
+          title="窗口用量"
+          description={periodLabel}
+          metrics={[
+            {
+              label: "请求",
+              value: n(usage?.requests),
+              hint:
+                usage?.successRate != null
+                  ? `成功率 ${Number(usage.successRate).toFixed(1)}%`
+                  : "成功率 —",
+            },
+            {
+              label: "失败",
+              value: n(usage?.failedRequests),
+              hint: periodLabel,
+            },
+            {
+              label: "P95 延迟",
+              value: usage?.p95DurationMs != null ? `${n(usage.p95DurationMs)} ms` : "—",
+              hint: "请求耗时",
+            },
+            {
+              label: "Tokens",
+              value: n(usage?.tokens),
+              hint: "累计 token",
+            },
+          ]}
         />
-        <Stat
-          label="累计请求"
-          value={n(requests)}
-          hint="全部账号请求总计"
-          icon={<Zap className="h-4 w-4" />}
-        />
-      </section>
-
-      <section aria-labelledby="operations-heading">
-        <div className="mb-3 flex items-center justify-between">
-          <div>
-            <h2 id="operations-heading" className="text-sm font-medium">运行指标</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">额度、恢复能力与认证状态</p>
-          </div>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Stat
-            label="Free 剩余"
-            value={quotaRemaining.display}
-            title={quotaRemaining.exact}
-            hint={s?.quota_limit ? `${quotaUsage.display} 已使用` : "暂无额度观测"}
-            icon={<Gauge className="h-4 w-4" />}
-          />
-          <Stat
-            label="可自动刷新"
-            value={n(s?.refreshable_accounts)}
-            hint="持有 refresh token"
-            icon={<RotateCcw className="h-4 w-4" />}
-          />
-          <Stat
-            label="待恢复"
-            value={n(s?.retry_due)}
-            hint="已到重试时间"
-            icon={<Activity className="h-4 w-4" />}
-          />
-          <Stat
-            label="认证失败"
-            value={n(s?.auth_fail_accounts)}
-            hint={s?.total_auth_fails != null ? `累计 ${n(s.total_auth_fails)} 次` : undefined}
-            icon={<ShieldCheck className="h-4 w-4" />}
-          />
-        </div>
       </section>
 
       {(usage || recentFailures.length || trendSeries.length) ? (
         <section aria-label="请求审计" className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Stat
-              label="窗口请求"
-              value={n(usage?.requests)}
-              hint={`成功率 ${usage?.successRate != null ? Number(usage.successRate).toFixed(1) : "—"}% · ${periodLabel}`}
-              icon={<Zap className="h-4 w-4" />}
-            />
-            <Stat
-              label="失败请求"
-              value={n(usage?.failedRequests)}
-              hint={periodLabel}
-              icon={<CircleAlert className="h-4 w-4" />}
-            />
-            <Stat
-              label="P95 延迟"
-              value={usage?.p95DurationMs != null ? `${n(usage.p95DurationMs)} ms` : "—"}
-              hint="请求耗时"
-              icon={<Gauge className="h-4 w-4" />}
-            />
-            <Stat
-              label="窗口 Tokens"
-              value={n(usage?.tokens)}
-              hint="累计 token（若可观测）"
-              icon={<Activity className="h-4 w-4" />}
-            />
-          </div>
-
           <Card>
             <CardHeader className="flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle>用量趋势</CardTitle>
-                <CardDescription>
-                  {periodLabel} · 按小时聚合请求 / 失败 / tokens
-                </CardDescription>
               </div>
             </CardHeader>
             <CardContent>

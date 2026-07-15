@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { ShieldOff, X } from "lucide-react";
+import { LoaderCircle, ShieldOff } from "lucide-react";
 import { adminApi, type ClientKey } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { AnimatedDialog } from "@/components/ui/AnimatedDialog";
 import { ClientKeyFields, LimitDecision } from "@/pages/client-keys/ClientKeyFields";
 import {
   buildClientKeyInput,
@@ -113,31 +113,27 @@ export function ClientKeyDetailDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="client-key-detail-title"
+    <AnimatedDialog
+      open
+      onClose={onClose}
+      title="密钥详情"
+      description={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <Badge tone={detail.revoked_at ? "danger" : "success"}>
+            {detail.revoked_at ? "已撤销" : "有效"}
+          </Badge>
+          <span className="font-mono text-[11px]">{detail.id} · {detail.key_prefix}</span>
+        </span>
+      }
+      maxWidthClassName="max-w-2xl"
+      contentKey={loading ? "loading" : detail.id}
     >
-      <Card className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto shadow-2xl">
-        <CardContent className="p-5">
-          <div className="mb-5 flex items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 id="client-key-detail-title" className="text-base font-medium">密钥详情</h2>
-                <Badge tone={detail.revoked_at ? "danger" : "success"}>
-                  {detail.revoked_at ? "已撤销" : "有效"}
-                </Badge>
-              </div>
-              <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-                {detail.id} · {detail.key_prefix}
-              </p>
-            </div>
-            <Button size="icon" variant="ghost" aria-label="关闭密钥详情" onClick={onClose}>
-              <X className="size-4" />
-            </Button>
-          </div>
-          {loading ? <p className="text-xs text-muted-foreground">正在加载详情…</p> : (
+          {loading ? (
+            <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <LoaderCircle className="size-3.5 animate-spin" />
+              正在加载详情…
+            </p>
+          ) : (
             <form className="space-y-4" onSubmit={save}>
               <ClientKeyFields
                 draft={draft}
@@ -199,9 +195,7 @@ export function ClientKeyDetailDialog({
               </div>
             </form>
           )}
-        </CardContent>
-      </Card>
-    </div>
+    </AnimatedDialog>
   );
 }
 
