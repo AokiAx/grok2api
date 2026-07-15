@@ -522,8 +522,8 @@ func TestNormalizeResponsesToolsMapsCodexBuiltinsToFunctions(t *testing.T) {
 			"indexed_web_access":   true,
 			"search_context_size":  "medium",
 			"search_content_types": []any{"text"},
-			"filters":              map[string]any{"allowed_domains": []any{"example.com"}},
-			"user_location":        map[string]any{"type": "approximate", "country": "US"},
+			// filters/allowed_domains hard-reject; use strip-only extras here.
+			"user_location": map[string]any{"type": "approximate", "country": "US"},
 		},
 		map[string]any{"type": "local_shell"},
 		map[string]any{"type": "tool_search", "execution": "x", "description": "Search tools", "parameters": map[string]any{"type": "object"}},
@@ -867,5 +867,78 @@ func TestSanitizeCompactionAndEncryptedContent(t *testing.T) {
 	}
 	if _, has := rs["encrypted_content"]; has {
 		t.Fatalf("encrypted_content leaked: %#v", rs)
+	}
+}
+
+func TestNormalizeWebSearchExternalAccessFalseDropsTool(t *testing.T) {
+	raw := []any{
+		map[string]any{"type": "web_search", "external_web_access": false},
+		map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}},
+	}
+	result := compat.NormalizeResponsesToolsDetailed(raw, 16)
+	if result.Err != nil {
+		t.Fatalf("err=%v", result.Err)
+	}
+	if result.BackendSearch == nil || *result.BackendSearch {
+		t.Fatalf("BackendSearch=%v want false", result.BackendSearch)
+	}
+	for _, tool := range result.Tools {
+		m, _ := tool.(map[string]any)
+		if m["type"] == "web_search" {
+			t.Fatalf("web_search should be dropped: %#v", result.Tools)
+		}
+	}
+	found := false
+	for _, code := range result.Warnings {
+		if code == "web_search_disabled_no_external_access" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings=%v", result.Warnings)
+	}
+	if len(result.Tools) != 1 {
+		t.Fatalf("tools=%#v", result.Tools)
+	}
+}
+
+func TestNormalizeWebSearchFiltersHardReject(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type":    "web_search",
+			"filters": map[string]any{"allowed_domains": []any{"example.com"}},
+		},
+	}
+	result := compat.NormalizeResponsesToolsDetailed(raw, 16)
+	if result.Err == nil {
+		t.Fatal("expected hard reject for filters")
+	}
+	if !strings.Contains(result.Err.Error(), "filters") {
+		t.Fatalf("err=%v", result.Err)
+	}
+}
+
+func TestNormalizeWebSearchAllowedDomainsHardReject(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type":            "web_search",
+			"allowed_domains": []any{"example.com"},
+		},
+	}
+	result := compat.NormalizeResponsesToolsDetailed(raw, 16)
+	if result.Err == nil {
+		t.Fatal("expected hard reject for allowed_domains")
+	}
+}
+
+func TestNormalizeResponsesRequestRejectsWebSearchFilters(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"input":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"web_search","filters":{"foo":true}}]
+	}`)
+	_, _, _, err := compat.NormalizeResponsesRequest(body, "grok-4.5")
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }

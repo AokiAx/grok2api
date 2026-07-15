@@ -65,6 +65,9 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 		delete(input, "max_completion_tokens")
 	}
 	toolResult := NormalizeResponsesToolsDetailed(input["tools"], MaxUpstreamTools)
+	if toolResult.Err != nil {
+		return nil, "", false, toolResult.Err
+	}
 	if len(toolResult.Tools) > 0 {
 		input["tools"] = toolResult.Tools
 	} else {

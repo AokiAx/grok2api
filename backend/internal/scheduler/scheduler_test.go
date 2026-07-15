@@ -604,3 +604,80 @@ func TestSelectionErrorReasons(t *testing.T) {
 		t.Fatalf("saturated: ok=%v err=%v sel=%#v", ok, err, sel)
 	}
 }
+
+func TestPreferLowerActiveWithinPriority(t *testing.T) {
+	a := readyAccount("a")
+	a.MaxActive = 2
+	b := readyAccount("b")
+	b.MaxActive = 2
+	s := scheduler.New([]account.Account{a, b}).WithStrategy(scheduler.StrategyFillFirst)
+
+	first, err := s.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// Hold first; next should prefer the other account (lower Active).
+	second, err := s.Acquire(context.Background())
+	if err != nil {
+		first.Release()
+		t.Fatalf("second: %v", err)
+	}
+	if second.Account().ID == first.Account().ID {
+		second.Release()
+		first.Release()
+		t.Fatalf("expected different account for lower Active, both=%q", first.Account().ID)
+	}
+	second.Release()
+	first.Release()
+}
+
+func TestClearStickyByAccountAndMoveUnavailable(t *testing.T) {
+	s := scheduler.New([]account.Account{
+		readyAccount("a"),
+		readyAccount("b"),
+	}).WithSticky(true, time.Hour)
+
+	lease, err := s.AcquireSticky(context.Background(), "sess-1")
+	if err != nil {
+		t.Fatalf("sticky acquire: %v", err)
+	}
+	stuckID := lease.Account().ID
+	lease.MoveUnavailable(account.ReasonCooldown, time.Now().Add(time.Minute), "rate_limit")
+	lease.Release()
+
+	// Sticky must not revive the parked account.
+	next, err := s.AcquireSticky(context.Background(), "sess-1")
+	if err != nil {
+		t.Fatalf("reacquire: %v", err)
+	}
+	if next.Account().ID == stuckID {
+		next.Release()
+		t.Fatalf("sticky still bound to parked account %q", stuckID)
+	}
+	next.Release()
+
+	s.ClearStickyByAccount("b") // exercise public API
+}
+
+func TestFailStreakAndCooldown(t *testing.T) {
+	s := scheduler.New([]account.Account{readyAccount("a")})
+	if s.NoteFailure("a") != 1 {
+		t.Fatal("first streak")
+	}
+	if s.NoteFailure("a") != 2 {
+		t.Fatal("second streak")
+	}
+	if got := scheduler.CooldownForStreak(45*time.Second, 1); got != 45*time.Second {
+		t.Fatalf("streak1 = %v", got)
+	}
+	if got := scheduler.CooldownForStreak(45*time.Second, 2); got != 90*time.Second {
+		t.Fatalf("streak2 = %v", got)
+	}
+	if got := scheduler.CooldownForStreak(45*time.Second, 3); got != 180*time.Second {
+		t.Fatalf("streak3 = %v", got)
+	}
+	s.NoteSuccess("a")
+	if s.FailStreak("a") != 0 {
+		t.Fatalf("streak after success = %d", s.FailStreak("a"))
+	}
+}

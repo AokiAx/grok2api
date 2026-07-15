@@ -1,6 +1,9 @@
 package compat
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 type toolDefinition struct {
 	Type        string
@@ -32,6 +35,8 @@ var searchBuiltinTypes = map[string]struct{}{
 }
 
 // tool fields Grok rejects on web_search (Codex OpenAI Responses shape).
+// Compatibility fields may be stripped with a warning; constraint fields that
+// cannot be enforced safely are hard-rejected (see normalizeWebSearchTool).
 var webSearchRejectedFields = []string{
 	"external_web_access",
 	"indexed_web_access",
@@ -39,6 +44,15 @@ var webSearchRejectedFields = []string{
 	"user_location",
 	"search_context_size",
 	"search_content_types",
+	"allowed_domains",
+	"max_search_results",
+	"safe_search",
+}
+
+// webSearchConstraintFields expand client authorization; Grok Build cannot honor them.
+var webSearchConstraintFields = map[string]struct{}{
+	"filters":         {},
+	"allowed_domains": {},
 }
 
 func parseToolDefinition(tool map[string]any) (toolDefinition, bool) {
@@ -156,6 +170,10 @@ type ToolNormalizeResult struct {
 	Tools []any
 	// BackendSearch is set when a Codex web_search tool carried external_web_access.
 	BackendSearch *bool
+	// Warnings are compatibility codes for X-Grok2API-Compatibility-Warnings.
+	Warnings []string
+	// Err is a client-facing validation error (hard reject); tools must not be sent upstream.
+	Err error
 }
 
 // NormalizeResponsesTools adapts client tool lists for strict Grok Responses backends.
@@ -168,6 +186,8 @@ type ToolNormalizeResult struct {
 //  4. Bare shell without environment → shell_command function (avoids 422)
 //  5. Soft-cap count when maxTools > 0
 //  6. Prefer bare web_search/x_search over function tools with the same name
+//  7. external_web_access:false removes web_search (safe capability subset)
+//  8. Non-empty filters / allowed_domains hard-reject (cannot enforce)
 func NormalizeResponsesTools(raw any, maxTools int) []any {
 	return NormalizeResponsesToolsDetailed(raw, maxTools).Tools
 }
@@ -182,6 +202,8 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 	out := make([]any, 0, len(tools))
 	seen := map[string]struct{}{}
 	var backendSearch *bool
+	var warnings []string
+	webSearchDisabled := false
 
 	appendTool := func(tool map[string]any) {
 		if maxTools > 0 && len(out) >= maxTools {
@@ -209,12 +231,13 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 		out = append(out, tool)
 	}
 
-	for _, item := range tools {
+	for index, item := range tools {
 		tool, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+		param := fmt.Sprintf("tools[%d]", index)
 		switch typeName {
 		case "namespace":
 			nested, _ := tool["tools"].([]any)
@@ -230,14 +253,24 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 				}
 				appendTool(definition.responseTool())
 			}
-		case "web_search", "web_search_preview", "websearch":
+		case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26", "websearch":
 			// Codex: {type:web_search, external_web_access:bool, search_context_size, …}
 			// Grok only accepts the bare variant (and uses top-level backend_search).
-			if rawAccess, ok := tool["external_web_access"]; ok {
-				value := truthy(rawAccess)
-				backendSearch = &value
+			normalized, access, warn, err := normalizeWebSearchTool(tool, param)
+			if err != nil {
+				return ToolNormalizeResult{Err: err}
 			}
-			appendTool(map[string]any{"type": "web_search"})
+			warnings = mergeWarningCodes(warnings, warn)
+			if access != nil {
+				backendSearch = access
+				if !*access {
+					webSearchDisabled = true
+					continue
+				}
+			}
+			if normalized != nil {
+				appendTool(normalized)
+			}
 		case "local_shell":
 			// OpenAI built-in tool type — map to the same function name used when
 			// rewriting local_shell_call items in input history.
@@ -329,15 +362,104 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 			}
 		}
 	}
+	if webSearchDisabled {
+		// Strip any bare web_search that slipped in from other tools in the same list.
+		filtered := out[:0]
+		for _, rawTool := range out {
+			tool, ok := rawTool.(map[string]any)
+			if !ok {
+				filtered = append(filtered, rawTool)
+				continue
+			}
+			typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
+			if typeName == "web_search" || typeName == "web_search_preview" || typeName == "websearch" {
+				continue
+			}
+			if (typeName == "function" || typeName == "") &&
+				strings.EqualFold(firstNonEmptyString(tool["name"]), "web_search") {
+				continue
+			}
+			filtered = append(filtered, rawTool)
+		}
+		out = filtered
+		falseVal := false
+		backendSearch = &falseVal
+		warnings = mergeWarningCodes(warnings, []string{"web_search_disabled_no_external_access"})
+	}
 	if len(out) == 0 {
-		return ToolNormalizeResult{BackendSearch: backendSearch}
+		return ToolNormalizeResult{BackendSearch: backendSearch, Warnings: warnings}
 	}
 	// Grok keys tools by name across types: bare web_search + function web_search → 422.
 	out = CollapseSearchToolNameCollisions(out)
 	if maxTools > 0 && len(out) > maxTools {
 		out = out[:maxTools]
 	}
-	return ToolNormalizeResult{Tools: out, BackendSearch: backendSearch}
+	return ToolNormalizeResult{Tools: out, BackendSearch: backendSearch, Warnings: warnings}
+}
+
+// normalizeWebSearchTool collapses Codex web_search to bare form or rejects unsafe constraints.
+// Returns (tool, externalAccess, warnings, err). tool is nil when the search tool is dropped.
+func normalizeWebSearchTool(tool map[string]any, param string) (map[string]any, *bool, []string, error) {
+	var access *bool
+	var warnings []string
+	if rawAccess, ok := tool["external_web_access"]; ok {
+		value := truthy(rawAccess)
+		access = &value
+		if !value {
+			// Expanding to bare web_search would grant external access the client forbade.
+			return nil, access, []string{"web_search_disabled_no_external_access"}, nil
+		}
+	}
+	if filters, ok := tool["filters"]; ok && hasNonEmptyConstraint(filters) {
+		return nil, access, nil, fmt.Errorf("%s.filters: Grok Build cannot enforce web_search filters", param)
+	}
+	if domains, ok := tool["allowed_domains"]; ok && hasNonEmptyConstraint(domains) {
+		return nil, access, nil, fmt.Errorf("%s.allowed_domains: Grok Build cannot enforce allowed_domains", param)
+	}
+	if contentTypes, ok := tool["search_content_types"]; ok {
+		if values, isArr := contentTypes.([]any); isArr {
+			for _, value := range values {
+				if !strings.EqualFold(strings.TrimSpace(stringValue(value)), "text") &&
+					strings.TrimSpace(stringValue(value)) != "" {
+					return nil, access, nil, fmt.Errorf("%s.search_content_types: Grok Build only supports text web search", param)
+				}
+			}
+		}
+	}
+	// Strip remaining Codex extras; track that we degraded.
+	stripped := false
+	for _, key := range webSearchRejectedFields {
+		if _, exists := tool[key]; exists {
+			if key == "external_web_access" {
+				continue
+			}
+			if _, constrained := webSearchConstraintFields[key]; constrained {
+				continue
+			}
+			stripped = true
+		}
+	}
+	if stripped {
+		warnings = append(warnings, "web_search_fields_stripped")
+	}
+	return map[string]any{"type": "web_search"}, access, warnings, nil
+}
+
+func hasNonEmptyConstraint(value any) bool {
+	if value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		// Numbers / bools count as present constraints.
+		return true
+	}
 }
 
 // CollapseSearchToolNameCollisions prefers bare {type:web_search|x_search} over

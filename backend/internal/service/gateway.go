@@ -305,6 +305,7 @@ func (g *Gateway) Request(
 		if stream && response.StatusCode < 400 {
 			// Best-effort: never fail a successful upstream response because SQLite is busy.
 			_ = g.persistSuccessUsage(ctx, lease, response.Header)
+			g.scheduler.NoteSuccess(accountID)
 			// Keep returning this successful stream even if remaining hit 0;
 			// the account is already marked unavailable for subsequent traffic.
 			g.resetCircuit()
@@ -343,6 +344,7 @@ func (g *Gateway) Request(
 		if response.StatusCode < 400 {
 			// Best-effort persist; upstream already succeeded.
 			_ = g.persistSuccessUsage(ctx, lease, response.Header)
+			g.scheduler.NoteSuccess(accountID)
 			// Return the successful body even if this response exhausted free quota.
 			lease.Release()
 			g.resetCircuit()
@@ -385,11 +387,13 @@ func (g *Gateway) Request(
 			if failure.Kind == upstream.FailureQuota {
 				quotaFailures++
 			}
-			retryAt := g.retryAtFor(failure)
+			streak := g.scheduler.NoteFailure(accountID)
+			retryAt := g.retryAtFor(failure, response.Header, streak)
 			reason := failure.Reason
 			if reason == "" {
 				reason = account.ReasonCooldown
 			}
+			// MoveUnavailable also clears sticky bindings for this account.
 			lease.MoveUnavailable(reason, retryAt, failure.Code)
 			updated := lease.Account()
 			if failure.QuotaLimit > 0 || failure.QuotaActual > 0 {
@@ -603,20 +607,34 @@ func shouldRotateAccount(failure upstream.Failure) bool {
 	return false
 }
 
-func (g *Gateway) retryAtFor(failure upstream.Failure) time.Time {
+func (g *Gateway) retryAtFor(failure upstream.Failure, header http.Header, streak int) time.Time {
 	now := g.now()
+	base := g.rateRetry
 	switch {
 	case failure.Kind == upstream.FailureQuota:
-		return now.Add(g.quotaRetry)
-	case failure.Reason == account.ReasonValidating:
-		retry := g.validatingRetry
-		if retry <= 0 {
-			retry = 45 * time.Second
+		// Free-tier windows are long; do not shrink via streak.
+		base = g.quotaRetry
+		if base <= 0 {
+			base = 24 * time.Hour
 		}
-		return now.Add(retry)
+	case failure.Reason == account.ReasonValidating:
+		base = g.validatingRetry
+		if base <= 0 {
+			base = 45 * time.Second
+		}
+		base = scheduler.CooldownForStreak(base, streak)
 	default:
-		return now.Add(g.rateRetry)
+		if base <= 0 {
+			base = 45 * time.Second
+		}
+		base = scheduler.CooldownForStreak(base, streak)
 	}
+	if header != nil {
+		if fromHeader := upstream.ParseRetryAfter(header.Get("Retry-After"), now); fromHeader > base {
+			base = fromHeader
+		}
+	}
+	return now.Add(base)
 }
 
 func (g *Gateway) refreshCircuitLocked() {

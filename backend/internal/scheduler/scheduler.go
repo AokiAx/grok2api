@@ -98,6 +98,11 @@ type stickyEntry struct {
 	expiresAt time.Time
 }
 
+const (
+	// maxFailStreakCap bounds exponential cooldown growth (base * 2^(streak-1)).
+	maxFailStreakCap = 6
+)
+
 type Scheduler struct {
 	mu        sync.Mutex
 	accounts  map[string]*account.Account
@@ -110,6 +115,9 @@ type Scheduler struct {
 	quotaRetry time.Duration
 	strategy  Strategy
 	rrCursor  uint64
+	// failStreak tracks consecutive account-scoped failures for exponential cooldown.
+	// Process-local only; resets on success or process restart.
+	failStreak map[string]int
 	// maxActiveCap is the process-wide concurrency ceiling. A positive value
 	// limits per-account settings without replacing a lower persisted limit.
 	maxActiveCap int
@@ -121,14 +129,15 @@ type Scheduler struct {
 
 func New(accounts []account.Account) *Scheduler {
 	scheduler := &Scheduler{
-		accounts:  make(map[string]*account.Account, len(accounts)),
-		notify:    make(chan struct{}, 1),
-		revision:  1,
-		sticky:    make(map[string]stickyEntry),
-		stickyTTL: defaultStickyTTL,
-		stickyOn:  true,
+		accounts:   make(map[string]*account.Account, len(accounts)),
+		notify:     make(chan struct{}, 1),
+		revision:   1,
+		sticky:     make(map[string]stickyEntry),
+		stickyTTL:  defaultStickyTTL,
+		stickyOn:   true,
 		quotaRetry: 24 * time.Hour,
-		strategy:  StrategyRoundRobin,
+		strategy:   StrategyRoundRobin,
+		failStreak: make(map[string]int),
 		// Hot set: only this many ready accounts serve. Rest are cold reserve.
 		// Concurrent capacity ≈ activeSize * MaxActive (see ApplyMaxActive).
 		activeSize: 0,
@@ -290,7 +299,8 @@ func (s *Scheduler) AcquireSticky(ctx context.Context, stickyKey string) (*Lease
 // pickReadyLocked selects from the highest-priority tier among free *eligible*
 // ready accounts.
 // With activeSize>0, eligibility is the hot set only (cold ready never serve
-// until a hot slot frees). Strategy only orders within the selected tier.
+// until a hot slot frees). Within a priority tier, lower in-flight (Active)
+// is preferred; strategy only orders among that lowest-Active subset.
 func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 	candidates := make([]string, 0, len(s.ready))
 	highestPriority := 0
@@ -332,6 +342,29 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 		return "", nil
 	}
 
+	// Prefer lower in-flight within the priority tier (balanced load).
+	lowestActive := -1
+	loadBalanced := make([]string, 0, len(candidates))
+	for _, id := range candidates {
+		item := s.accounts[id]
+		if item == nil {
+			continue
+		}
+		if lowestActive < 0 || item.Active < lowestActive {
+			lowestActive = item.Active
+			loadBalanced = loadBalanced[:0]
+			loadBalanced = append(loadBalanced, id)
+			continue
+		}
+		if item.Active == lowestActive {
+			loadBalanced = append(loadBalanced, id)
+		}
+	}
+	if len(loadBalanced) == 0 {
+		return "", nil
+	}
+	candidates = loadBalanced
+
 	strategy := s.strategy
 	if strategy == "" {
 		strategy = StrategyRoundRobin
@@ -348,12 +381,85 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 			}
 		}
 	default:
-		// Round-robin over free eligible accounts.
+		// Round-robin over free eligible accounts at the lowest Active.
 		idx := int(s.rrCursor % uint64(len(candidates)))
 		s.rrCursor++
 		chosen = candidates[idx]
 	}
 	return chosen, s.accounts[chosen]
+}
+
+// ClearStickyByAccount drops session affinity entries bound to accountID.
+// Used when an account is parked so the next request does not stick to a dead credential.
+func (s *Scheduler) ClearStickyByAccount(accountID string) {
+	if s == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, entry := range s.sticky {
+		if entry.accountID == accountID {
+			delete(s.sticky, key)
+		}
+	}
+}
+
+// NoteFailure increments the process-local failure streak for accountID and
+// returns the streak after increment (1 on first failure).
+func (s *Scheduler) NoteFailure(accountID string) int {
+	if s == nil || strings.TrimSpace(accountID) == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failStreak == nil {
+		s.failStreak = make(map[string]int)
+	}
+	s.failStreak[accountID]++
+	return s.failStreak[accountID]
+}
+
+// NoteSuccess clears the process-local failure streak for accountID.
+func (s *Scheduler) NoteSuccess(accountID string) {
+	if s == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.failStreak, accountID)
+}
+
+// FailStreak returns the current process-local failure streak (0 if none).
+func (s *Scheduler) FailStreak(accountID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failStreak[accountID]
+}
+
+// CooldownForStreak returns base * 2^(streak-1), capped, for streak >= 1.
+// streak <= 0 yields base. Used for rate-limit / validating style cooldowns.
+func CooldownForStreak(base time.Duration, streak int) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	if streak <= 1 {
+		return base
+	}
+	if streak > maxFailStreakCap {
+		streak = maxFailStreakCap
+	}
+	// streak=2 → base*2, streak=3 → base*4, …
+	cooldown := base
+	for i := 1; i < streak; i++ {
+		if cooldown > time.Hour {
+			return cooldown
+		}
+		cooldown *= 2
+	}
+	return cooldown
 }
 
 func (s *Scheduler) eligibleLocked(id string) bool {
@@ -640,6 +746,12 @@ func (l *Lease) MoveUnavailable(reason account.UnavailableReason, retryAt time.T
 		item.LastErrorCode != errorCode
 	item.MarkUnavailable(reason, retryAt, errorCode, time.Now())
 	l.scheduler.removeReadyLocked(l.accountID)
+	// Drop sticky bindings so subsequent requests do not prefer a parked account.
+	for key, entry := range l.scheduler.sticky {
+		if entry.accountID == l.accountID {
+			delete(l.scheduler.sticky, key)
+		}
+	}
 	if changed {
 		l.scheduler.revision++
 	}

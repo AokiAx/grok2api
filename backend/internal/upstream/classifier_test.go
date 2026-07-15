@@ -2,7 +2,9 @@ package upstream_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/upstream"
@@ -179,5 +181,55 @@ func TestParseRateLimitHeadersRequestCounters(t *testing.T) {
 	usage := upstream.ParseRateLimitHeaders(header)
 	if usage.QuotaLimit() != 100 || usage.QuotaActual() != 60 {
 		t.Fatalf("usage limit/actual = %d/%d", usage.QuotaLimit(), usage.QuotaActual())
+	}
+}
+
+func TestClassifyFailureNestedOpenAIError(t *testing.T) {
+	body := `{"error":{"message":"You used all the included free usage for model grok-4.5","type":"insufficient_quota","code":"subscription:free-usage-exhausted"}}`
+	failure := upstream.ClassifyFailure(429, []byte(body))
+	if failure.Kind != upstream.FailureQuota || failure.Reason != account.ReasonQuota {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if failure.Code != "subscription:free-usage-exhausted" {
+		t.Fatalf("code = %q", failure.Code)
+	}
+	if !failure.ModelScoped {
+		t.Fatal("expected ModelScoped for per-model free usage message")
+	}
+	if !strings.Contains(strings.ToLower(failure.Message), "free usage") {
+		t.Fatalf("message = %q", failure.Message)
+	}
+}
+
+func TestClassifyFailureNestedAuthError(t *testing.T) {
+	body := `{"error":{"message":"Invalid token","type":"invalid_request_error","code":"invalid_api_key"}}`
+	failure := upstream.ClassifyFailure(401, []byte(body))
+	if failure.Kind != upstream.FailureAuth || failure.Reason != account.ReasonAuth {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if failure.Code != "invalid_api_key" {
+		t.Fatalf("code = %q", failure.Code)
+	}
+}
+
+func TestParseRetryAfterSeconds(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	if got := upstream.ParseRetryAfter("30", now); got != 30*time.Second {
+		t.Fatalf("seconds = %v", got)
+	}
+	if got := upstream.ParseRetryAfter("0", now); got != 0 {
+		t.Fatalf("zero = %v", got)
+	}
+	if got := upstream.ParseRetryAfter("", now); got != 0 {
+		t.Fatalf("empty = %v", got)
+	}
+}
+
+func TestParseRetryAfterHTTPDate(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	when := now.Add(45 * time.Second).Format(http.TimeFormat)
+	got := upstream.ParseRetryAfter(when, now)
+	if got < 44*time.Second || got > 46*time.Second {
+		t.Fatalf("http-date retry = %v", got)
 	}
 }

@@ -66,7 +66,10 @@ func SanitizeResponsesWithWarnings(payload []byte) ([]byte, []string, error) {
 	if err := json.Unmarshal(payload, &input); err != nil {
 		return nil, nil, fmt.Errorf("decode responses request: %w", err)
 	}
-	changed, warnings := sanitizeResponsesMap(input)
+	changed, warnings, err := sanitizeResponsesMap(input)
+	if err != nil {
+		return nil, nil, err
+	}
 	if !changed {
 		return payload, warnings, nil
 	}
@@ -82,7 +85,7 @@ func SanitizeResponsesWithWarnings(payload []byte) ([]byte, []string, error) {
 //
 // Also re-sanitizes tools[] so nested Codex extras (web_search.external_web_access,
 // search_context_size, local_shell, …) never reach Grok even if prepare was skipped.
-func sanitizeResponsesMap(input map[string]any) (bool, []string) {
+func sanitizeResponsesMap(input map[string]any) (bool, []string, error) {
 	changed := false
 	var warnings []string
 	warn := func(code string) {
@@ -108,11 +111,20 @@ func sanitizeResponsesMap(input map[string]any) (bool, []string) {
 	// Nested tool sanitize (Codex puts external_web_access on tools, not only root).
 	if rawTools, ok := input["tools"]; ok {
 		result := NormalizeResponsesToolsDetailed(rawTools, MaxUpstreamTools)
+		if result.Err != nil {
+			return false, nil, result.Err
+		}
 		if result.BackendSearch != nil {
 			if _, exists := input["backend_search"]; !exists {
 				input["backend_search"] = *result.BackendSearch
 				changed = true
 			}
+		}
+		if len(result.Warnings) > 0 {
+			for _, code := range result.Warnings {
+				warn(code)
+			}
+			changed = true
 		}
 		if len(result.Tools) > 0 {
 			input["tools"] = result.Tools
@@ -160,7 +172,7 @@ func sanitizeResponsesMap(input map[string]any) (bool, []string) {
 			changed = true
 		}
 	}
-	return changed, warnings
+	return changed, warnings, nil
 }
 
 // stripUnsupportedReasoningNone removes reasoning_effort/reasoning.effort when
