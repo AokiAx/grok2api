@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"database/sql"
 	"context"
 	"crypto/sha256"
 	"path/filepath"
@@ -396,4 +397,41 @@ func mustLoginAttempt(t *testing.T, username, sourceIP string, succeeded bool, c
 		t.Fatalf("new login attempt: %v", err)
 	}
 	return attempt
+}
+
+func TestSQLiteUpgradeForcesClientAuthRequired(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "upgrade-client-auth.db")
+	repo, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatalf("close initial repo: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO app_meta(key, value) VALUES('client_auth_required', '0')
+		ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		t.Fatalf("force open marker: %v", err)
+	}
+	var marker string
+	if err := raw.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key='client_auth_required'`).Scan(&marker); err != nil || marker != "0" {
+		t.Fatalf("pre-upgrade marker=%q err=%v", marker, err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	repo2, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	defer repo2.Close()
+	if required, err := repo2.ClientAuthRequired(ctx); err != nil || !required {
+		t.Fatalf("post-upgrade required=%v err=%v", required, err)
+	}
 }
