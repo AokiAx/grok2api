@@ -600,12 +600,48 @@ func RecoverValidating(
 	return result, nil
 }
 
+
+// RuntimeKnobs is a shared, mutable holder for recovery parking backoffs.
+type RuntimeKnobs struct {
+	mu         sync.RWMutex
+	quotaRetry time.Duration
+}
+
+func NewRuntimeKnobs(quotaRetry time.Duration) *RuntimeKnobs {
+	if quotaRetry <= 0 {
+		quotaRetry = 24 * time.Hour
+	}
+	return &RuntimeKnobs{quotaRetry: quotaRetry}
+}
+
+func (k *RuntimeKnobs) ConfigureQuotaRetry(duration time.Duration) {
+	if k == nil || duration <= 0 {
+		return
+	}
+	k.mu.Lock()
+	k.quotaRetry = duration
+	k.mu.Unlock()
+}
+
+func (k *RuntimeKnobs) QuotaRetry() time.Duration {
+	if k == nil {
+		return 24 * time.Hour
+	}
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.quotaRetry <= 0 {
+		return 24 * time.Hour
+	}
+	return k.quotaRetry
+}
+
 type recoveryConfig struct {
 	credentialStore repository.AccountStore
 	refresher       CredentialRefresher
 	validator       CredentialValidator
 	quotaProber     QuotaProber
 	quotaRetry      time.Duration
+	knobs           *RuntimeKnobs
 }
 
 type RecoveryOption func(*recoveryConfig)
@@ -627,6 +663,16 @@ func WithQuotaRetry(duration time.Duration) RecoveryOption {
 	return func(config *recoveryConfig) {
 		if duration > 0 {
 			config.quotaRetry = duration
+		}
+	}
+}
+
+// WithRuntimeKnobs uses a shared knobs holder so settings updates can change recovery backoff live.
+func WithRuntimeKnobs(knobs *RuntimeKnobs) RecoveryOption {
+	return func(config *recoveryConfig) {
+		config.knobs = knobs
+		if knobs != nil {
+			config.quotaRetry = knobs.QuotaRetry()
 		}
 	}
 }

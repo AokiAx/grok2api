@@ -94,6 +94,36 @@ func WithMaintenance(maintenance Maintenance) Option {
 	}
 }
 
+
+func WithQuotaRetry(duration time.Duration) Option {
+	return func(service *Service) {
+		if duration > 0 {
+			service.quotaRetry = duration
+		}
+	}
+}
+
+func WithRateRetry(duration time.Duration) Option {
+	return func(service *Service) {
+		if duration > 0 {
+			service.rateRetry = duration
+		}
+	}
+}
+
+// ConfigureRuntime updates maintenance parking backoffs without rebuilding the service.
+func (s *Service) ConfigureRuntime(quotaRetry, rateRetry time.Duration) {
+	if s == nil {
+		return
+	}
+	if quotaRetry > 0 {
+		s.quotaRetry = quotaRetry
+	}
+	if rateRetry > 0 {
+		s.rateRetry = rateRetry
+	}
+}
+
 func WithClock(now func() time.Time) Option {
 	return func(service *Service) {
 		if now != nil {

@@ -70,8 +70,9 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 		writeAdminError(writer, http.StatusInternalServerError, "settings_get_failed", err.Error())
 		return
 	}
-	if body.ExpectedRevision == 0 {
-		body.ExpectedRevision = current.Revision
+	if body.ExpectedRevision <= 0 {
+		writeAdminError(writer, http.StatusBadRequest, "revision_required", "expected_revision is required")
+		return
 	}
 	next := current
 	next.Pool = body.Pool
@@ -151,13 +152,9 @@ func (s *Server) adminV1RollbackSettings(writer http.ResponseWriter, request *ht
 		writeAdminError(writer, http.StatusBadRequest, "invalid_revision", "target_revision is required")
 		return
 	}
-	if body.ExpectedRevision == 0 {
-		current, err := s.settings.GetSettings(request.Context())
-		if err != nil {
-			writeAdminError(writer, http.StatusInternalServerError, "settings_get_failed", err.Error())
-			return
-		}
-		body.ExpectedRevision = current.Revision
+	if body.ExpectedRevision <= 0 {
+		writeAdminError(writer, http.StatusBadRequest, "revision_required", "expected_revision is required")
+		return
 	}
 	doc, err := s.settings.RollbackSettings(request.Context(), body.ExpectedRevision, body.TargetRevision, "admin")
 	if errors.Is(err, repository.ErrSettingsConflict) {

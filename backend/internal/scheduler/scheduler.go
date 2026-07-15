@@ -107,6 +107,7 @@ type Scheduler struct {
 	sticky    map[string]stickyEntry
 	stickyTTL time.Duration
 	stickyOn  bool
+	quotaRetry time.Duration
 	strategy  Strategy
 	rrCursor  uint64
 	// maxActiveCap is the process-wide concurrency ceiling. A positive value
@@ -126,6 +127,7 @@ func New(accounts []account.Account) *Scheduler {
 		sticky:    make(map[string]stickyEntry),
 		stickyTTL: defaultStickyTTL,
 		stickyOn:  true,
+		quotaRetry: 24 * time.Hour,
 		strategy:  StrategyRoundRobin,
 		// Hot set: only this many ready accounts serve. Rest are cold reserve.
 		// Concurrent capacity ≈ activeSize * MaxActive (see ApplyMaxActive).
@@ -302,7 +304,11 @@ func (s *Scheduler) pickReadyLocked(now time.Time) (string, *account.Account) {
 		}
 		// Known-empty free quotas must leave ready immediately so Status() and
 		// acquire waiters do not treat them as capacity.
-		if item.ParkKnownExhausted(now, 24*time.Hour) {
+		retry := s.quotaRetry
+		if retry <= 0 {
+			retry = 24 * time.Hour
+		}
+		if item.ParkKnownExhausted(now, retry) {
 			s.removeReadyLocked(id)
 			s.revision++
 			continue
@@ -659,4 +665,14 @@ func (l *Lease) Release() {
 		l.scheduler.mu.Unlock()
 		l.scheduler.signal()
 	})
+}
+
+// ConfigureQuotaRetry updates the backoff used when parking known-exhausted ready accounts.
+func (s *Scheduler) ConfigureQuotaRetry(duration time.Duration) {
+	if s == nil || duration <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.quotaRetry = duration
 }

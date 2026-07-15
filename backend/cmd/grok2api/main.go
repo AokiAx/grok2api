@@ -325,14 +325,25 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 			slog.Warn("debug_trace enabled; writing JSONL traces", "dir", traceDir)
 		}
 	}
-	adminService := admin.NewService(repo, upstreamClient, admin.WithMaintenance(upstreamClient), admin.WithSink(pool))
+	adminService := admin.NewService(repo, upstreamClient,
+			admin.WithMaintenance(upstreamClient),
+			admin.WithSink(pool),
+			admin.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
+			admin.WithRateRetry(time.Duration(settings.RateRetrySeconds)*time.Second),
+		)
 	deviceAuthService := deviceauth.NewService(repo, upstreamClient, upstreamClient, nil, repo, pool)
 	// Registration is an external project (grok-register). This service only
 	// imports credentials via the admin import API / panel.
 	readiness := &api.AtomicReadiness{}
 	readiness.Set(false, "starting")
 	settingsPtr := &settings
-	applier := &runtimeSettingsApplier{pool: pool, gateway: gateway, settings: settingsPtr}
+	recoveryKnobs := runtimeworker.NewRuntimeKnobs(time.Duration(settings.QuotaRetryMinutes) * time.Minute)
+		pool.ConfigureQuotaRetry(time.Duration(settings.QuotaRetryMinutes) * time.Minute)
+		httpClientRef := httpClient
+		applier := &runtimeSettingsApplier{
+			pool: pool, gateway: gateway, admin: adminService, recovery: recoveryKnobs,
+			httpClient: httpClientRef, settings: settingsPtr,
+		}
 	handler := newAPIHandler(
 		*settingsPtr,
 		repo,
@@ -402,6 +413,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 			runtimeworker.WithCredentialRecovery(repo, upstreamClient, upstreamClient),
 			runtimeworker.WithQuotaProber(upstreamClient),
 			runtimeworker.WithQuotaRetry(time.Duration(settings.QuotaRetryMinutes)*time.Minute),
+				runtimeworker.WithRuntimeKnobs(recoveryKnobs),
 		); err != nil {
 			slog.Error("recovery worker stopped", "error", err)
 		}
@@ -616,9 +628,12 @@ func applyManagedSettings(base config.Config, managed settings.Document) config.
 }
 
 type runtimeSettingsApplier struct {
-	pool     *scheduler.Scheduler
-	gateway  *service.Gateway
-	settings *config.Config
+	pool       *scheduler.Scheduler
+	gateway    *service.Gateway
+	admin      *admin.Service
+	recovery   *runtimeworker.RuntimeKnobs
+	httpClient *http.Client
+	settings   *config.Config
 }
 
 func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
@@ -631,13 +646,22 @@ func (a *runtimeSettingsApplier) ApplySettings(doc settings.Document) error {
 	a.pool.ApplyActiveSize(a.settings.ActiveSize)
 	stickyTTL := time.Duration(a.settings.StickyTTLMinutes) * time.Minute
 	a.pool.WithSticky(a.settings.StickyPool, stickyTTL)
+	quotaRetry := time.Duration(a.settings.QuotaRetryMinutes) * time.Minute
+	rateRetry := time.Duration(a.settings.RateRetrySeconds) * time.Second
+	acquireTimeout := time.Duration(a.settings.AcquireTimeoutSec) * time.Second
+	a.pool.ConfigureQuotaRetry(quotaRetry)
 	if a.gateway != nil {
-		a.gateway.ConfigureRuntime(
-			time.Duration(a.settings.QuotaRetryMinutes)*time.Minute,
-			time.Duration(a.settings.RateRetrySeconds)*time.Second,
-			time.Duration(a.settings.AcquireTimeoutSec)*time.Second,
-			a.settings.MaxAttempts,
-		)
+		a.gateway.ConfigureRuntime(quotaRetry, rateRetry, acquireTimeout, a.settings.MaxAttempts)
+	}
+	if a.admin != nil {
+		a.admin.ConfigureRuntime(quotaRetry, rateRetry)
+	}
+	if a.recovery != nil {
+		a.recovery.ConfigureQuotaRetry(quotaRetry)
+	}
+	if a.httpClient != nil && a.settings.RequestTimeoutSec > 0 {
+		// Live non-stream outbound timeout. Stream client keeps Timeout=0.
+		a.httpClient.Timeout = a.settings.RequestTimeout()
 	}
 	slog.Info("applied managed settings", "revision", doc.Revision)
 	return nil
