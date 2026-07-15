@@ -188,7 +188,16 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 	if err != nil {
 		return LoginOutput{}, err
 	}
-	if !ok || !old.Active(now) || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(parts[1]))) {
+	if !ok || !old.MatchesRefreshSecretHash(sha256.Sum256([]byte(parts[1]))) {
+		return LoginOutput{}, ErrInvalidRefresh
+	}
+	if !old.RotatedAt.IsZero() || old.RevocationReason == domain.RevocationRotated {
+		if err := s.repo.RevokeAdminSessionFamily(ctx, old.FamilyID, now, domain.RevocationRefreshReplay); err != nil {
+			return LoginOutput{}, err
+		}
+		return LoginOutput{}, ErrInvalidRefresh
+	}
+	if !old.Active(now) {
 		return LoginOutput{}, ErrInvalidRefresh
 	}
 	access, e := s.randomToken(32)
