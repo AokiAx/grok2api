@@ -94,23 +94,24 @@ func (a *clientKeyAdminAPI) create(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	var body struct {
-		Name          string                `json:"name"`
-		ModelPolicy   clientkey.ModelPolicy `json:"model_policy"`
-		ModelScopes   []string              `json:"model_scopes"`
-		RPMLimit      int                   `json:"rpm_limit"`
-		MaxConcurrent int                   `json:"max_concurrent"`
-		ExpiresAt     time.Time             `json:"expires_at"`
+		Name          string                 `json:"name"`
+		ModelPolicy   *clientkey.ModelPolicy `json:"model_policy"`
+		ModelScopes   []string               `json:"model_scopes"`
+		RPMLimit      *int                   `json:"rpm_limit"`
+		MaxConcurrent *int                   `json:"max_concurrent"`
+		ExpiresAt     time.Time              `json:"expires_at"`
 	}
 	if err := decodeStrictJSON(writer, request, &body); err != nil {
 		writeAdminError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if body.ModelPolicy == "" {
-		body.ModelPolicy = clientkey.ModelPolicyAll
+	if body.ModelPolicy == nil || body.RPMLimit == nil || body.MaxConcurrent == nil {
+		writeAdminError(writer, http.StatusBadRequest, "invalid_request", "model_policy, rpm_limit, and max_concurrent are required")
+		return
 	}
 	result, err := a.service.Create(request.Context(), clientkeys.CreateRequest{
-		Name: body.Name, ModelPolicy: body.ModelPolicy, Scopes: body.ModelScopes,
-		RPMLimit: body.RPMLimit, MaxConcurrent: body.MaxConcurrent, ExpiresAt: body.ExpiresAt,
+		Name: body.Name, ModelPolicy: *body.ModelPolicy, Scopes: body.ModelScopes,
+		RPMLimit: *body.RPMLimit, MaxConcurrent: *body.MaxConcurrent, ExpiresAt: body.ExpiresAt,
 	})
 	if err != nil {
 		writeClientKeyAdminError(writer, err)
