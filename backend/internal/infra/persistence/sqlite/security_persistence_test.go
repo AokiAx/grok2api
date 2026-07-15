@@ -234,7 +234,7 @@ func TestSQLiteAdminAuthPersistenceEnforcesForeignKeysRotationAndThrottleDimensi
 	if err != nil || count != 0 {
 		t.Fatalf("tuple failure count = %d err=%v", count, err)
 	}
-	if err := repo.RecordAdminLoginAttempt(ctx, mustLoginAttempt(t, "admin", "10.0.0.1", false, "bad_password", now.Add(4*time.Minute))); err != nil {
+	if err := repo.RecordAdminLoginAttempt(ctx, mustLoginAttempt(t, "admin", "10.0.0.1", false, "bad_password", now.Add(3*time.Minute))); err != nil {
 		t.Fatalf("record post-success failure: %v", err)
 	}
 	count, err = repo.CountRecentAdminLoginFailures(ctx, "admin", "10.0.0.1", now.Add(-15*time.Minute))
