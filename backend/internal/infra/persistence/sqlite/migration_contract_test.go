@@ -234,6 +234,63 @@ func TestOpenV4DatabaseIsIdempotentAndPreservesRowsEventsAndMetadata(t *testing.
 	}
 }
 
+func TestExistingAdminSessionsGainRememberWithoutLosingRows(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "pre-remember-v5.db")
+	db := openRawSQLite(t, database)
+	statements := []string{
+		`CREATE TABLE admin_users (
+			id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			password_scheme TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL,
+			enabled INTEGER NOT NULL, last_login_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE admin_sessions (
+			id TEXT PRIMARY KEY, family_id TEXT NOT NULL, admin_user_id TEXT NOT NULL,
+			access_token_hash BLOB NOT NULL UNIQUE, refresh_secret_hash BLOB NOT NULL UNIQUE,
+			source_ip TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL, access_expires_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '', rotated_at TEXT NOT NULL DEFAULT '',
+			replaced_by_session_id TEXT NOT NULL DEFAULT '', revocation_reason TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO admin_users(id, username, password_scheme, password_hash, role, enabled, created_at, updated_at)
+		 VALUES('admin-1','admin','bcrypt_sha256_v1','$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy','administrator',1,'2026-07-15T01:00:00Z','2026-07-15T01:00:00Z')`,
+		`INSERT INTO admin_sessions(id, family_id, admin_user_id, access_token_hash, refresh_secret_hash, source_ip, user_agent,
+		 created_at, access_expires_at, expires_at, last_seen_at)
+		 VALUES('session-1','family-1','admin-1',zeroblob(32),randomblob(32),'127.0.0.1','fixture-agent',
+		 '2026-07-15T01:00:00Z','2026-07-15T01:05:00Z','2026-08-14T01:00:00Z','2026-07-15T01:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("fixture SQL: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := sqlite.OpenSQLite(ctx, database)
+	if err != nil {
+		t.Fatalf("open migrated database: %v", err)
+	}
+	defer repo.Close()
+	session, found, err := repo.GetAdminSession(ctx, "session-1")
+	if err != nil || !found {
+		t.Fatalf("session found=%v err=%v", found, err)
+	}
+	if session.Remember || session.FamilyID != "family-1" || session.SourceIP != "127.0.0.1" || session.UserAgent != "fixture-agent" {
+		t.Fatalf("migrated session=%+v", session)
+	}
+	raw := openRawSQLite(t, database)
+	defer raw.Close()
+	var remember, rows int
+	if err := raw.QueryRowContext(ctx, `SELECT remember FROM admin_sessions WHERE id='session-1'`).Scan(&remember); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_sessions`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if remember != 0 || rows != 1 {
+		t.Fatalf("remember=%d rows=%d", remember, rows)
+	}
+}
+
 func TestLegacyJSONImportRollsBackAllRowsWhenOneUpsertFails(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "rollback.db")
