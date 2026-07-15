@@ -61,6 +61,7 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 		Audit            settings.Audit      `json:"audit"`
 		Proxy            settings.Proxy      `json:"proxy"`
 		ClientKeys       settings.ClientKeys `json:"client_keys"`
+		DeviceAuth       settings.DeviceAuth `json:"device_auth"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
 		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid settings payload")
@@ -81,6 +82,7 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 	next.Audit = body.Audit
 	next.Proxy = body.Proxy
 	next.ClientKeys = body.ClientKeys
+	next.DeviceAuth = body.DeviceAuth
 	updatedBy := "admin"
 	doc, err := s.settings.PutSettings(request.Context(), body.ExpectedRevision, next, updatedBy)
 	if errors.Is(err, repository.ErrSettingsConflict) {
@@ -190,6 +192,7 @@ func settingsToMap(doc settings.Document) map[string]any {
 		"audit":       doc.Audit,
 		"proxy":       doc.Proxy,
 		"client_keys": doc.ClientKeys,
+		"device_auth":  doc.DeviceAuth,
 	}
 }
 

@@ -53,6 +53,11 @@ export function SettingsPage() {
         audit: doc.audit,
         proxy: doc.proxy,
         client_keys: doc.client_keys || { default_rpm_limit: 120, default_max_concurrent: 4 },
+        device_auth: doc.device_auth || {
+          issuer: "https://auth.x.ai",
+          client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+          scope: "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+        },
       });
       setDoc(next);
       setMessage(`已保存 revision ${next.revision}`);
@@ -330,6 +335,63 @@ export function SettingsPage() {
                   client_keys: {
                     default_rpm_limit: doc.client_keys?.default_rpm_limit ?? 120,
                     default_max_concurrent: num(e.target.value, 4),
+                  },
+                })
+              }
+            />
+          </Field>
+        </CardContent>
+      </Card>
+
+      <Card className="p-4 sm:p-5">
+        <CardHeader>
+          <CardTitle>Build Device OAuth</CardTitle>
+          <CardDescription>
+            账号导入使用的 OIDC Device Flow 默认参数；device_code / token 仍只在服务端。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="mt-3 grid gap-3">
+          <Field label="Issuer">
+            <Input
+              value={doc.device_auth?.issuer ?? "https://auth.x.ai"}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  device_auth: {
+                    issuer: e.target.value,
+                    client_id: doc.device_auth?.client_id ?? "",
+                    scope: doc.device_auth?.scope ?? "",
+                  },
+                })
+              }
+            />
+          </Field>
+          <Field label="Client ID">
+            <Input
+              className="mono"
+              value={doc.device_auth?.client_id ?? ""}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  device_auth: {
+                    issuer: doc.device_auth?.issuer ?? "https://auth.x.ai",
+                    client_id: e.target.value,
+                    scope: doc.device_auth?.scope ?? "",
+                  },
+                })
+              }
+            />
+          </Field>
+          <Field label="Scope">
+            <Input
+              value={doc.device_auth?.scope ?? ""}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  device_auth: {
+                    issuer: doc.device_auth?.issuer ?? "https://auth.x.ai",
+                    client_id: doc.device_auth?.client_id ?? "",
+                    scope: e.target.value,
                   },
                 })
               }

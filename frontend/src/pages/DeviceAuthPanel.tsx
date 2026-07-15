@@ -3,23 +3,46 @@ import { adminApi, AdminApiError, type DeviceAuthSession } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 const terminal = new Set(["succeeded", "denied", "expired", "cancelled", "failed"]);
 
-export function DeviceAuthPanel() {
-  // Official Grok CLI OAuth public client (UUID). Do not use "grok-cli" here —
-  // that string is only the API header x-grok-client-identifier, not OIDC client_id.
-  const [issuer, setIssuer] = useState("https://auth.x.ai");
-  const [clientId, setClientId] = useState("b1a00492-073a-47ea-816f-4c329264a828");
-  const [scope, setScope] = useState(
+const FALLBACK = {
+  issuer: "https://auth.x.ai",
+  client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+  scope:
     "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
-  );
+};
+
+export function DeviceAuthPanel() {
+  const [config, setConfig] = useState(FALLBACK);
+  const [configReady, setConfigReady] = useState(false);
   const [session, setSession] = useState<DeviceAuthSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void adminApi
+      .settings()
+      .then((settings) => {
+        if (!active) return;
+        setConfig({
+          issuer: settings.device_auth?.issuer?.trim() || FALLBACK.issuer,
+          client_id: settings.device_auth?.client_id?.trim() || FALLBACK.client_id,
+          scope: settings.device_auth?.scope?.trim() || FALLBACK.scope,
+        });
+      })
+      .catch(() => {
+        /* keep product fallbacks */
+      })
+      .finally(() => {
+        if (active) setConfigReady(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -49,10 +72,23 @@ export function DeviceAuthPanel() {
     setBusy(true);
     setError(null);
     try {
+      // Prefer latest settings so operators don't need to reopen the panel after save.
+      let nextConfig = config;
+      try {
+        const settings = await adminApi.settings();
+        nextConfig = {
+          issuer: settings.device_auth?.issuer?.trim() || FALLBACK.issuer,
+          client_id: settings.device_auth?.client_id?.trim() || FALLBACK.client_id,
+          scope: settings.device_auth?.scope?.trim() || FALLBACK.scope,
+        };
+        setConfig(nextConfig);
+      } catch {
+        /* use cached/fallback config */
+      }
       const next = await adminApi.startDeviceAuth({
-        issuer: issuer.trim() || undefined,
-        client_id: clientId.trim() || undefined,
-        scope: scope.trim() || undefined,
+        issuer: nextConfig.issuer || undefined,
+        client_id: nextConfig.client_id || undefined,
+        scope: nextConfig.scope || undefined,
       });
       setSession(next);
     } catch (err) {
@@ -89,28 +125,26 @@ export function DeviceAuthPanel() {
       <CardHeader>
         <CardTitle>Build Device OAuth</CardTitle>
         <CardDescription>
-          使用 Grok CLI 的 OAuth client 走 Device Flow：开始后打开 verification 链接并确认 user code。
-          device_code 与 token 只在服务端，不会返回浏览器。
+          使用设置中的 OIDC 参数发起 Device Flow。device_code 与 token 只在服务端；Issuer / Client ID / Scope 请到「设置」修改。
         </CardDescription>
       </CardHeader>
       <CardContent className="mt-3 space-y-4">
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Issuer</Label>
-            <Input value={issuer} onChange={(e) => setIssuer(e.target.value)} />
+        <div className="rounded-lg border border-border/70 bg-background/60 p-3 text-xs">
+          <div className="grid gap-1 sm:grid-cols-[88px_1fr]">
+            <span className="text-muted-foreground">Issuer</span>
+            <span className="mono break-all">{config.issuer}</span>
+            <span className="text-muted-foreground">Client ID</span>
+            <span className="mono break-all">{config.client_id}</span>
+            <span className="text-muted-foreground">Scope</span>
+            <span className="break-all text-muted-foreground">{config.scope}</span>
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Client ID</Label>
-            <Input value={clientId} onChange={(e) => setClientId(e.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Scope</Label>
-            <Input value={scope} onChange={(e) => setScope(e.target.value)} />
-          </div>
+          {!configReady ? (
+            <p className="mt-2 text-[11px] text-muted-foreground">正在读取设置…</p>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => void start()} disabled={busy}>
+          <Button onClick={() => void start()} disabled={busy || !configReady}>
             {busy ? "启动中…" : "开始授权"}
           </Button>
           {session && !terminal.has(session.status) ? (

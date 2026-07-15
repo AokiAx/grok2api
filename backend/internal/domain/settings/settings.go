@@ -20,6 +20,7 @@ type Document struct {
 	Audit      Audit      `json:"audit"`
 	Proxy      Proxy      `json:"proxy"`
 	ClientKeys ClientKeys `json:"client_keys"`
+	DeviceAuth DeviceAuth `json:"device_auth"`
 }
 
 type Pool struct {
@@ -48,6 +49,15 @@ type Proxy struct {
 	Enabled       bool   `json:"enabled"`
 	RuntimeStatus string `json:"runtime_status"` // always "not_wired" until implemented
 	Note          string `json:"note,omitempty"`
+}
+
+
+// DeviceAuth is OIDC device-flow configuration for Build Device OAuth import.
+// Values are operator-editable defaults; secrets never live here.
+type DeviceAuth struct {
+	Issuer   string `json:"issuer"`
+	ClientID string `json:"client_id"`
+	Scope    string `json:"scope"`
 }
 
 // ClientKeys holds operator defaults used when creating new client keys in the admin UI.
@@ -93,6 +103,11 @@ func Defaults() Document {
 		ClientKeys: ClientKeys{
 			DefaultRPMLimit:      120,
 			DefaultMaxConcurrent: 4,
+		},
+		DeviceAuth: DeviceAuth{
+			Issuer:   "https://auth.x.ai",
+			ClientID: "b1a00492-073a-47ea-816f-4c329264a828",
+			Scope:    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
 		},
 	}
 }
@@ -145,6 +160,19 @@ func (d *Document) Normalize() error {
 	if d.ClientKeys.DefaultMaxConcurrent < 0 {
 		return fmt.Errorf("client_keys.default_max_concurrent must be >= 0")
 	}
+	d.DeviceAuth.Issuer = strings.TrimRight(strings.TrimSpace(d.DeviceAuth.Issuer), "/")
+	d.DeviceAuth.ClientID = strings.TrimSpace(d.DeviceAuth.ClientID)
+	d.DeviceAuth.Scope = strings.Join(strings.Fields(d.DeviceAuth.Scope), " ")
+	defaultsDA := Defaults().DeviceAuth
+	if d.DeviceAuth.Issuer == "" {
+		d.DeviceAuth.Issuer = defaultsDA.Issuer
+	}
+	if d.DeviceAuth.ClientID == "" {
+		d.DeviceAuth.ClientID = defaultsDA.ClientID
+	}
+	if d.DeviceAuth.Scope == "" {
+		d.DeviceAuth.Scope = defaultsDA.Scope
+	}
 	d.Proxy.URL = strings.TrimSpace(d.Proxy.URL)
 	d.Proxy.RuntimeStatus = "not_wired"
 	if d.Proxy.Note == "" {
@@ -174,6 +202,9 @@ func Unmarshal(raw []byte) (Document, error) {
 		defaults := Defaults().ClientKeys
 		doc.ClientKeys = defaults
 	}
+	if !jsonHasDeviceAuth(raw) {
+		doc.DeviceAuth = Defaults().DeviceAuth
+	}
 	if err := doc.Normalize(); err != nil {
 		return Document{}, err
 	}
@@ -188,4 +219,14 @@ func jsonHasClientKeys(raw []byte) bool {
 		return false
 	}
 	return len(probe.ClientKeys) > 0 && string(probe.ClientKeys) != "null"
+}
+
+func jsonHasDeviceAuth(raw []byte) bool {
+	var probe struct {
+		DeviceAuth json.RawMessage `json:"device_auth"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return len(probe.DeviceAuth) > 0 && string(probe.DeviceAuth) != "null"
 }

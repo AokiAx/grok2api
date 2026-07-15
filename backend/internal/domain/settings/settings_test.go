@@ -1,6 +1,9 @@
 package settings
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDocumentNormalizeAndProxyStatus(t *testing.T) {
 	doc := Defaults()
@@ -22,7 +25,11 @@ func TestDocumentNormalizeAndProxyStatus(t *testing.T) {
 	if doc.ClientKeys.DefaultRPMLimit != 120 || doc.ClientKeys.DefaultMaxConcurrent != 4 {
 		t.Fatalf("client key defaults=%+v", doc.ClientKeys)
 	}
+	if doc.DeviceAuth.ClientID == "" || !strings.Contains(doc.DeviceAuth.Scope, "offline_access") {
+		t.Fatalf("device auth defaults=%+v", doc.DeviceAuth)
+	}
 }
+
 
 func TestUnmarshalSeedsLegacyClientKeyDefaults(t *testing.T) {
 	raw := []byte(`{"revision":2,"pool":{"max_concurrent":4,"max_attempts":3,"strategy":"round-robin","active_size":0,"sticky":true,"sticky_ttl_minutes":30,"quota_retry_minutes":1440,"rate_retry_seconds":45},"timeouts":{"request_timeout_sec":600,"acquire_timeout_sec":60},"audit":{"retention_days":30},"proxy":{"url":"","enabled":false}}`)
@@ -46,3 +53,17 @@ func TestUnmarshalKeepsExplicitZeroClientKeyDefaults(t *testing.T) {
 	}
 }
 
+
+func TestUnmarshalSeedsLegacyDeviceAuth(t *testing.T) {
+	raw := []byte(`{"revision":2,"pool":{"max_concurrent":4,"max_attempts":3,"strategy":"round-robin","active_size":0,"sticky":true,"sticky_ttl_minutes":30,"quota_retry_minutes":1440,"rate_retry_seconds":45},"timeouts":{"request_timeout_sec":600,"acquire_timeout_sec":60},"audit":{"retention_days":30},"proxy":{"url":"","enabled":false},"client_keys":{"default_rpm_limit":120,"default_max_concurrent":4}}`)
+	doc, err := Unmarshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.DeviceAuth.Issuer != "https://auth.x.ai" {
+		t.Fatalf("issuer=%q", doc.DeviceAuth.Issuer)
+	}
+	if doc.DeviceAuth.ClientID != "b1a00492-073a-47ea-816f-4c329264a828" {
+		t.Fatalf("client_id=%q", doc.DeviceAuth.ClientID)
+	}
+}

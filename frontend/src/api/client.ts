@@ -496,6 +496,11 @@ export type SettingsDocument = {
     default_rpm_limit: number;
     default_max_concurrent: number;
   };
+  device_auth: {
+    issuer: string;
+    client_id: string;
+    scope: string;
+  };
 };
 
 export type SettingsSnapshot = {
@@ -774,6 +779,7 @@ export const adminApi = {
     audit: SettingsDocument["audit"];
     proxy: SettingsDocument["proxy"];
     client_keys: SettingsDocument["client_keys"];
+    device_auth: SettingsDocument["device_auth"];
   }) =>
     request<SettingsDocument>("/api/admin/v1/settings", {
       method: "PUT",
