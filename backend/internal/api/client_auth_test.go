@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
@@ -88,6 +91,67 @@ func TestClientAuthMiddlewareMapsAllCredentialFailuresToSameResponse(t *testing.
 		if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), `"code":"invalid_api_key"`) {
 			t.Fatalf("header=%q status=%d body=%s", header, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestClientModelAuthorizationAppliesDefaultBeforeScopeCheck(t *testing.T) {
+	grant := service.ClientGrant{
+		Authenticated: true, KeyID: "ck_limited", Principal: "client-key:ck_limited",
+		ModelPolicy: clientkey.ModelPolicyAllowlist, ModelScopes: []string{"grok-4.5"},
+	}
+	nextCalled := false
+	handler := ClientModelAuthorizationMiddleware("grok-3", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		nextCalled = true
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
+	req = req.WithContext(service.WithClientGrant(req.Context(), grant))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || nextCalled || !strings.Contains(rec.Body.String(), `"code":"model_not_allowed"`) {
+		t.Fatalf("status=%d next=%v body=%s", rec.Code, nextCalled, rec.Body.String())
+	}
+
+	handler = ClientModelAuthorizationMiddleware("grok-4.5", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		if !bytes.Equal(body, []byte(`{"input":"hi"}`)) {
+			t.Fatalf("middleware changed body: %s", body)
+		}
+		model, ok := service.EffectiveModelFromContext(request.Context())
+		if !ok || model != "grok-4.5" {
+			t.Fatalf("effective model=%q ok=%v", model, ok)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hi"}`))
+	req = req.WithContext(service.WithClientGrant(req.Context(), grant))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("allowed status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClientModelsScopeMiddlewareFiltersCatalog(t *testing.T) {
+	grant := service.ClientGrant{
+		Authenticated: true, KeyID: "ck_limited", ModelPolicy: clientkey.ModelPolicyAllowlist,
+		ModelScopes: []string{"grok-4.5"},
+	}
+	upstream := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Header().Set("X-Upstream", "preserved")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"object":"list","data":[{"id":"grok-3"},{"id":"grok-4.5","name":"Grok"},{"model":"grok-4.5"}]}`))
+	})
+	handler := ClientModelsScopeMiddleware(upstream)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req = req.WithContext(service.WithClientGrant(req.Context(), grant))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Upstream") != "preserved" {
+		t.Fatalf("status=%d headers=%v", rec.Code, rec.Header())
+	}
+	if strings.Contains(rec.Body.String(), `"id":"grok-3"`) || strings.Count(rec.Body.String(), "grok-4.5") != 2 {
+		t.Fatalf("filtered catalog=%s", rec.Body.String())
 	}
 }
 

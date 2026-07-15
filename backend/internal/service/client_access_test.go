@@ -109,3 +109,42 @@ func TestClientAccessAllowsAnonymousOnlyBeforeStickyAuthMarker(t *testing.T) {
 		t.Fatalf("present unknown credential err=%v", err)
 	}
 }
+
+func TestClientGrantAuthorizesEffectiveModelAfterApplyingDefault(t *testing.T) {
+	grant := ClientGrant{
+		Authenticated: true,
+		KeyID:         "ck_limited",
+		ModelPolicy:   clientkey.ModelPolicyAllowlist,
+		ModelScopes:   []string{"grok-4.5", "grok-code-fast-1"},
+	}
+	model, err := grant.AuthorizeModel("", "grok-4.5")
+	if err != nil || model != "grok-4.5" {
+		t.Fatalf("default effective model=%q err=%v", model, err)
+	}
+	model, err = grant.AuthorizeModel(" GROK-CODE-FAST-1 ", "grok-4.5")
+	if err != nil || model != "GROK-CODE-FAST-1" {
+		t.Fatalf("requested effective model=%q err=%v", model, err)
+	}
+	if _, err := grant.AuthorizeModel("grok-3", "grok-4.5"); !errors.Is(err, ErrModelNotAllowed) {
+		t.Fatalf("unscoped model err=%v", err)
+	}
+	if _, err := grant.AuthorizeModel("", "grok-3"); !errors.Is(err, ErrModelNotAllowed) {
+		t.Fatalf("unscoped default err=%v", err)
+	}
+}
+
+func TestClientGrantFiltersModelCatalogByScope(t *testing.T) {
+	grant := ClientGrant{
+		Authenticated: true,
+		ModelPolicy:   clientkey.ModelPolicyAllowlist,
+		ModelScopes:   []string{"grok-4.5", "GROK-CODE-FAST-1"},
+	}
+	got := grant.FilterModelIDs([]string{"grok-3", "grok-4.5", "grok-code-fast-1", "grok-4.5"})
+	if len(got) != 3 || got[0] != "grok-4.5" || got[1] != "grok-code-fast-1" || got[2] != "grok-4.5" {
+		t.Fatalf("filtered ids=%#v", got)
+	}
+	all := ClientGrant{Authenticated: true, ModelPolicy: clientkey.ModelPolicyAll}
+	if got := all.FilterModelIDs([]string{"a", "b"}); len(got) != 2 {
+		t.Fatalf("all-policy filter=%#v", got)
+	}
+}
