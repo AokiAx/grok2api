@@ -19,7 +19,10 @@ import (
 
 	"github.com/AokiAx/grok2api/backend/internal/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
+	"github.com/AokiAx/grok2api/backend/internal/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/api"
+	"github.com/AokiAx/grok2api/backend/internal/bootstrap"
+	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/config"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
@@ -29,9 +32,19 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 	"github.com/AokiAx/grok2api/backend/internal/upstream"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const version = "1.0.0-go"
+
+type runtimeRepository interface {
+	repository.AccountRepository
+	repository.AdminAuthRepository
+	repository.ClientKeyRepository
+	repository.LegacySecurityBootstrapRepository
+}
+
+type serveCommand func(context.Context, config.Config, runtimeRepository) error
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -43,6 +56,10 @@ func main() {
 }
 
 func run(ctx context.Context, arguments []string, output io.Writer) error {
+	return runWithServe(ctx, arguments, output, serve)
+}
+
+func runWithServe(ctx context.Context, arguments []string, output io.Writer, serveFn serveCommand) error {
 	command := "serve"
 	if len(arguments) > 0 && arguments[0] != "--config" {
 		command = arguments[0]
@@ -84,7 +101,13 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	case "migrate", "status":
 		return printStatus(ctx, output, repo)
 	case "serve":
-		return serve(ctx, settings, repo)
+		if serveFn == nil {
+			return errors.New("serve command is required")
+		}
+		if err := bootstrapServeSecurity(ctx, &settings, repo); err != nil {
+			return err
+		}
+		return serveFn(ctx, settings, repo)
 	case "export":
 		return runExport(ctx, output, settings, repo, *exportPath, *exportPool)
 	case "register", "mint":
@@ -92,6 +115,29 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func bootstrapServeSecurity(ctx context.Context, settings *config.Config, repo repository.LegacySecurityBootstrapRepository) error {
+	if settings == nil {
+		return errors.New("security bootstrap settings are required")
+	}
+	result, err := bootstrap.NewLegacySecurityService(repo, time.Now, bcrypt.DefaultCost).Bootstrap(ctx, bootstrap.LegacySecrets{
+		PanelPassword: settings.PanelPassword,
+		AppKey:        settings.AppKey,
+		APIKey:        settings.APIKey,
+	})
+	if err != nil {
+		return fmt.Errorf("bootstrap legacy security: %w", err)
+	}
+	settings.PanelPassword = ""
+	settings.AppKey = ""
+	settings.APIKey = ""
+	slog.Info("legacy security bootstrap complete",
+		"admin", result.Admin,
+		"client_key", result.ClientKey,
+		"admin_setup_required", result.AdminSetupRequired,
+	)
+	return nil
 }
 
 func importLegacyWhenEmpty(ctx context.Context, repo *sqlite.SQLite, dataDir string) error {
@@ -140,7 +186,7 @@ func printStatus(ctx context.Context, output io.Writer, repo repository.AccountL
 	})
 }
 
-func serve(ctx context.Context, settings config.Config, repo repository.AccountRepository) error {
+func serve(ctx context.Context, settings config.Config, repo runtimeRepository) error {
 	frontendFS, err := frontendFileSystem(settings.Frontend.StaticPath)
 	if err != nil {
 		return err
@@ -223,22 +269,15 @@ func serve(ctx context.Context, settings config.Config, repo repository.AccountR
 	adminService := admin.NewService(repo, upstreamClient, admin.WithMaintenance(upstreamClient), admin.WithSink(pool))
 	// Registration is an external project (grok-register). This service only
 	// imports credentials via the admin import API / panel.
-	serverOptions := []api.Option{
-		api.WithDefaultModel(settings.DefaultModel),
-		api.WithAdmin(adminService, settings.AdminKey()),
-	}
-	if frontendFS != nil {
-		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
-	}
-	if tracer != nil {
-		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
-	}
-	handler := api.NewServer(
+	handler := newAPIHandler(
+		settings,
+		repo,
 		apiGateway,
 		poolStatusProvider{scheduler: pool},
-		settings.APIKey,
-		serverOptions...,
-	).Handler()
+		adminService,
+		frontendFS,
+		tracer,
+	)
 	server := &http.Server{
 		Addr:              settings.Address(),
 		Handler:           handler,
@@ -288,6 +327,34 @@ func serve(ctx context.Context, settings config.Config, repo repository.AccountR
 		}
 		return err
 	}
+}
+
+func newAPIHandler(
+	settings config.Config,
+	repo runtimeRepository,
+	gateway api.Gateway,
+	status api.StatusProvider,
+	adminService api.AdminService,
+	frontendFS fs.FS,
+	tracer *intercept.Tracer,
+) http.Handler {
+	adminAuthService := adminauth.NewService(repo)
+	clientAccess := service.NewClientAccess(repo)
+	clientKeyService := clientkeys.NewService(repo)
+	serverOptions := []api.Option{
+		api.WithDefaultModel(settings.DefaultModel),
+		api.WithAdmin(adminService, ""),
+		api.WithAdminAuth(adminAuthService, api.AdminAuthHandlerOptions{SecureCookies: settings.AdminSecureCookies}),
+		api.WithClientAccess(clientAccess),
+		api.WithClientKeys(clientKeyService),
+	}
+	if frontendFS != nil {
+		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
+	}
+	if tracer != nil {
+		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
+	}
+	return api.NewServer(gateway, status, "", serverOptions...).Handler()
 }
 
 func frontendFileSystem(staticPath string) (fs.FS, error) {
