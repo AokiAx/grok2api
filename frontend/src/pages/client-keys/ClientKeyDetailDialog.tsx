@@ -68,6 +68,8 @@ export function ClientKeyDetailDialog({
       const merged = { ...detail, ...updated, secret: undefined };
       setDetail(merged);
       setDraft(draftFromClientKey(merged));
+      setUnlimitedRPM(merged.rpm_limit === 0);
+      setUnlimitedConcurrent(merged.max_concurrent === 0);
       onChanged(merged);
     } catch (failure) {
       setError(clientKeyErrorMessage(failure, "保存密钥设置失败"));
