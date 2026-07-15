@@ -9,9 +9,13 @@ import { Label } from "@/components/ui/label";
 const terminal = new Set(["succeeded", "denied", "expired", "cancelled", "failed"]);
 
 export function DeviceAuthPanel() {
+  // Official Grok CLI OAuth public client (UUID). Do not use "grok-cli" here —
+  // that string is only the API header x-grok-client-identifier, not OIDC client_id.
   const [issuer, setIssuer] = useState("https://auth.x.ai");
-  const [clientId, setClientId] = useState("grok-cli");
-  const [scope, setScope] = useState("openid profile email offline_access");
+  const [clientId, setClientId] = useState("b1a00492-073a-47ea-816f-4c329264a828");
+  const [scope, setScope] = useState(
+    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
+  );
   const [session, setSession] = useState<DeviceAuthSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -85,7 +89,8 @@ export function DeviceAuthPanel() {
       <CardHeader>
         <CardTitle>Build Device OAuth</CardTitle>
         <CardDescription>
-          在浏览器打开 verification URL 并输入 user code。device_code 与 token 不会返回前端。
+          使用 Grok CLI 的 OAuth client 走 Device Flow：开始后打开 verification 链接并确认 user code。
+          device_code 与 token 只在服务端，不会返回浏览器。
         </CardDescription>
       </CardHeader>
       <CardContent className="mt-3 space-y-4">
@@ -133,14 +138,24 @@ export function DeviceAuthPanel() {
               <span className="text-muted-foreground">User code</span>
               <span className="font-mono text-base font-semibold tracking-wider">{session.user_code}</span>
               <span className="text-muted-foreground">Verification</span>
-              <a
-                className="truncate text-foreground underline-offset-2 hover:underline"
-                href={session.verification_uri_complete || session.verification_uri}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {session.verification_uri_complete || session.verification_uri}
-              </a>
+              <div className="min-w-0 space-y-1">
+                <a
+                  className="block break-all text-foreground underline-offset-2 hover:underline"
+                  href={session.verification_uri_complete || session.verification_uri}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {session.verification_uri_complete || session.verification_uri}
+                </a>
+                <a
+                  className="inline-flex text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+                  href={session.verification_uri_complete || session.verification_uri}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  在新标签打开授权页
+                </a>
+              </div>
               {session.account_id ? (
                 <>
                   <span className="text-muted-foreground">账号</span>

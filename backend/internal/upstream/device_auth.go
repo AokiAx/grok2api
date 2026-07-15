@@ -67,7 +67,14 @@ func (c *Client) StartDeviceAuthorization(ctx context.Context, issuer, clientID,
 		return DeviceAuthorization{}, fmt.Errorf("read device authorization response: %w", err)
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		return DeviceAuthorization{}, fmt.Errorf("device authorization returned %d", resp.StatusCode)
+		snippet := strings.TrimSpace(string(body))
+		if len(snippet) > 300 {
+			snippet = snippet[:300] + "…"
+		}
+		if snippet == "" {
+			return DeviceAuthorization{}, fmt.Errorf("device authorization returned %d", resp.StatusCode)
+		}
+		return DeviceAuthorization{}, fmt.Errorf("device authorization returned %d: %s", resp.StatusCode, snippet)
 	}
 	var payload struct {
 		DeviceCode              string `json:"device_code"`

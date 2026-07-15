@@ -33,10 +33,18 @@ func (s *Server) adminV1StartDeviceAuth(writer http.ResponseWriter, request *htt
 		return
 	}
 	var body deviceauth.StartRequest
-	_ = json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body)
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20))
+	if err := decoder.Decode(&body); err != nil {
+		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid device authorization payload")
+		return
+	}
 	session, err := s.deviceAuth.Start(request.Context(), body)
 	if err != nil {
-		writeAdminError(writer, http.StatusBadGateway, "device_auth_start_failed", "Failed to start device authorization")
+		msg := strings.TrimSpace(err.Error())
+		if msg == "" {
+			msg = "Failed to start device authorization"
+		}
+		writeAdminError(writer, http.StatusBadGateway, "device_auth_start_failed", msg)
 		return
 	}
 	writeAdminOK(writer, http.StatusCreated, session.Public())

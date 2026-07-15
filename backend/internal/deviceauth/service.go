@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
@@ -46,6 +47,7 @@ type Service struct {
 	issuer    string
 	clientID  string
 	scope     string
+	pollLocks sync.Map // session ID -> *sync.Mutex; serializes polls in this process
 }
 
 type Option func(*Service)
@@ -89,9 +91,11 @@ func NewService(
 		accounts:  accounts,
 		sink:      sink,
 		now:       time.Now,
-		issuer:    "https://auth.x.ai",
-		clientID:  "grok-cli",
-		scope:     "openid profile email offline_access",
+		issuer:   "https://auth.x.ai",
+		// OAuth public client used by official Grok CLI device flow.
+		// This is NOT the API header x-grok-client-identifier ("grok-cli").
+		clientID: "b1a00492-073a-47ea-816f-4c329264a828",
+		scope:    "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
 	}
 	for _, option := range options {
 		option(s)
@@ -143,7 +147,14 @@ func (s *Service) Get(ctx context.Context, id string) (domain.Session, bool, err
 }
 
 func (s *Service) Cancel(ctx context.Context, id string) (domain.Session, error) {
-	session, found, err := s.store.GetDeviceAuthSession(ctx, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return domain.Session{}, fmt.Errorf("device auth session not found")
+	}
+	lock := s.sessionPollLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	session, found, err := s.store.GetDeviceAuthSession(ctx, id)
 	if err != nil {
 		return domain.Session{}, err
 	}
@@ -166,7 +177,23 @@ func (s *Service) Cancel(ctx context.Context, id string) (domain.Session, error)
 
 // PollOnce advances one device-token poll for a pending session.
 func (s *Service) PollOnce(ctx context.Context, id string) (domain.Session, error) {
-	session, found, err := s.store.GetDeviceAuthSession(ctx, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return domain.Session{}, fmt.Errorf("device auth session not found")
+	}
+	lock := s.sessionPollLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.pollOnce(ctx, id)
+}
+
+func (s *Service) sessionPollLock(id string) *sync.Mutex {
+	value, _ := s.pollLocks.LoadOrStore(id, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+func (s *Service) pollOnce(ctx context.Context, id string) (domain.Session, error) {
+	session, found, err := s.store.GetDeviceAuthSession(ctx, id)
 	if err != nil {
 		return domain.Session{}, err
 	}
@@ -310,8 +337,16 @@ func (s *Service) tick(ctx context.Context) {
 		slog.Warn("list device auth sessions failed", "error", err)
 		return
 	}
+	now := s.now().UTC()
 	for _, session := range sessions {
 		if session.Status != domain.StatusPending && session.Status != domain.StatusSlowDown {
+			continue
+		}
+		interval := time.Duration(session.IntervalSec) * time.Second
+		if interval <= 0 {
+			interval = 5 * time.Second
+		}
+		if !session.UpdatedAt.IsZero() && now.Before(session.UpdatedAt.Add(interval)) {
 			continue
 		}
 		if _, err := s.PollOnce(ctx, session.ID); err != nil {
