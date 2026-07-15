@@ -53,6 +53,7 @@ type Gateway struct {
 	now            func() time.Time
 	circuitMu      sync.Mutex
 	circuit        CircuitStatus
+	runtimeMu      sync.RWMutex
 }
 
 type CircuitStatus struct {
@@ -223,7 +224,8 @@ func (g *Gateway) Request(
 	}
 	// Critical: never rotate through the entire ready pool. One exhausted or
 	// permission-denied response would otherwise park every credential.
-	attemptBudget := g.maxAttempts
+	_, _, acquireTimeout, maxAttempts := g.runtimeSnapshot()
+	attemptBudget := maxAttempts
 	if attemptBudget <= 0 {
 		attemptBudget = 3
 	}
@@ -246,8 +248,8 @@ func (g *Gateway) Request(
 	for range attemptBudget {
 		acquireCtx := ctx
 		var cancel context.CancelFunc
-		if g.acquireTimeout > 0 {
-			acquireCtx, cancel = context.WithTimeout(ctx, g.acquireTimeout)
+		if acquireTimeout > 0 {
+			acquireCtx, cancel = context.WithTimeout(ctx, acquireTimeout)
 		}
 		lease, acquireErr := g.scheduler.AcquireSticky(acquireCtx, stickyKey)
 		if cancel != nil {
@@ -771,6 +773,8 @@ func (g *Gateway) ConfigureRuntime(quotaRetry, rateRetry, acquireTimeout time.Du
 	if g == nil {
 		return
 	}
+	g.runtimeMu.Lock()
+	defer g.runtimeMu.Unlock()
 	if quotaRetry > 0 {
 		g.quotaRetry = quotaRetry
 	}
@@ -783,4 +787,13 @@ func (g *Gateway) ConfigureRuntime(quotaRetry, rateRetry, acquireTimeout time.Du
 	if maxAttempts > 0 {
 		g.maxAttempts = maxAttempts
 	}
+}
+
+func (g *Gateway) runtimeSnapshot() (quotaRetry, rateRetry, acquireTimeout time.Duration, maxAttempts int) {
+	if g == nil {
+		return 0, 0, 0, 3
+	}
+	g.runtimeMu.RLock()
+	defer g.runtimeMu.RUnlock()
+	return g.quotaRetry, g.rateRetry, g.acquireTimeout, g.maxAttempts
 }

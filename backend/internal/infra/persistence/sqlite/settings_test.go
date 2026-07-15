@@ -18,7 +18,7 @@ func TestSettingsOptimisticLockSnapshotsAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = repo.Close() })
-	if got := repo.SchemaVersion(ctx); got != 8 {
+	if got := repo.SchemaVersion(ctx); got != 9 {
 		t.Fatalf("schema=%d", got)
 	}
 	doc, err := repo.GetSettings(ctx)

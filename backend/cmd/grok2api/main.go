@@ -23,6 +23,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/bootstrap"
 	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/config"
+	"github.com/AokiAx/grok2api/backend/internal/deviceauth"
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/domain/settings"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
@@ -46,6 +47,7 @@ type runtimeRepository interface {
 	repository.AuditRepository
 	repository.ModelRegistryRepository
 	repository.SettingsRepository
+	repository.DeviceAuthRepository
 }
 
 type serveCommand func(context.Context, config.Config, runtimeRepository) error
@@ -324,6 +326,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		}
 	}
 	adminService := admin.NewService(repo, upstreamClient, admin.WithMaintenance(upstreamClient), admin.WithSink(pool))
+	deviceAuthService := deviceauth.NewService(repo, upstreamClient, upstreamClient, nil, repo, pool)
 	// Registration is an external project (grok-register). This service only
 	// imports credentials via the admin import API / panel.
 	readiness := &api.AtomicReadiness{}
@@ -341,6 +344,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		readiness,
 		repo,
 		applier,
+		deviceAuthService,
 	)
 	// Accept traffic once accounts are loaded into the scheduler. Recovery
 	// continues in the background and may still move accounts between pools.
@@ -355,6 +359,7 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 	recoveryCtx, cancelRecovery := context.WithCancel(ctx)
 	defer cancelRecovery()
 	recoveryDone := make(chan struct{})
+	go deviceAuthService.RunWorker(recoveryCtx)
 	go func() {
 		// Retain request audits for 30 days by default.
 		ticker := time.NewTicker(6 * time.Hour)
@@ -436,6 +441,7 @@ func newAPIHandler(
 	readiness api.Readiness,
 	audits api.AuditReader,
 	settingsApplier api.SettingsApplier,
+	deviceAuth api.DeviceAuthAdmin,
 ) http.Handler {
 	adminAuthService := adminauth.NewService(repo)
 	clientAccess := service.NewClientAccess(repo)
@@ -451,6 +457,7 @@ func newAPIHandler(
 		api.WithModelAdmin(repo),
 		api.WithSettingsAdmin(repo),
 		api.WithSettingsApplier(settingsApplier),
+		api.WithDeviceAuth(deviceAuth),
 	}
 	if frontendFS != nil {
 		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))

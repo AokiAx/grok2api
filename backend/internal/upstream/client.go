@@ -45,6 +45,7 @@ type Client struct {
 	streamHTTPClient *http.Client
 	discoveryMu      sync.Mutex
 	tokenEndpoints   map[string]string
+	deviceEndpoints  map[string]string
 	identityMu       sync.Mutex
 	identities       map[string]clientIdentity
 }
@@ -76,6 +77,7 @@ func NewClientWithOptions(baseURL, clientVersion string, httpClient *http.Client
 		httpClient:       httpClient,
 		streamHTTPClient: &streamHTTPClient,
 		tokenEndpoints:   make(map[string]string),
+		deviceEndpoints:  make(map[string]string),
 		identities:       make(map[string]clientIdentity),
 	}
 }

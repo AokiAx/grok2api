@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 type SQLite struct {
 	db     *sql.DB
@@ -273,6 +273,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 	if err := r.ensureSettingsSchema(ctx); err != nil {
 		return err
 	}
+	if err := r.ensureDeviceAuthSchema(ctx); err != nil {
+		return err
+	}
 	if err := r.ensureAccountColumns(ctx); err != nil {
 		return err
 	}
@@ -285,7 +288,11 @@ func (r *SQLite) migrate(ctx context.Context) error {
 	if err := r.migratePythonV1(ctx); err != nil {
 		return err
 	}
-	if _, err := r.db.ExecContext(ctx, `INSERT INTO app_meta(key, value) VALUES('client_auth_required', '1') ON CONFLICT(key) DO NOTHING`); err != nil {
+	// Fresh installs and upgrades both require client authentication. Operators who
+	// intentionally open the gateway must re-disable after migrate; silent '0'
+	// from pre-hardening DBs must not survive an upgrade.
+	if _, err := r.db.ExecContext(ctx, `INSERT INTO app_meta(key, value) VALUES('client_auth_required', '1')
+		ON CONFLICT(key) DO UPDATE SET value='1'`); err != nil {
 		return fmt.Errorf("initialize client auth marker: %w", err)
 	}
 	_, err := r.db.ExecContext(

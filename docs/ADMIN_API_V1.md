@@ -122,3 +122,14 @@ Contract source: [`docs/openapi.yaml`](openapi.yaml)
 | `GET /docs` | Embedded Swagger UI (CDN) |
 
 The binary embeds a copy under `backend/internal/api/openapi/`. Keep `docs/openapi.yaml` and the embedded copy in sync when changing the contract. Route contract tests assert required paths exist both in the document and on the live mux.
+
+## Device OAuth (Build)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/api/admin/v1/device-auth/sessions` | Start device authorization; returns `user_code` + `verification_uri` only |
+| GET | `/api/admin/v1/device-auth/sessions/{id}` | Public session status |
+| POST | `/api/admin/v1/device-auth/sessions/{id}/poll` | Manual poll (worker also polls) |
+| POST | `/api/admin/v1/device-auth/sessions/{id}/cancel` | Cancel pending session |
+
+`device_code` and OAuth tokens never appear in admin responses or logs. On success the credential is validated and imported into the account pool.

@@ -70,6 +70,7 @@ type Server struct {
 	modelAdmin       ModelAdmin
 	settings         SettingsAdmin
 	settingsApplier  SettingsApplier
+	deviceAuth       DeviceAuthAdmin
 	onModelsChanged  func([]modelreg.Model)
 	maxBodyBytes     int64
 	handler          http.Handler
@@ -178,6 +179,13 @@ type AuditReader interface {
 	AuditRecentFailures(context.Context, time.Time, time.Time, int) ([]audit.RecentFailure, error)
 }
 
+// WithDeviceAuth installs Build Device OAuth administration.
+func WithDeviceAuth(admin DeviceAuthAdmin) Option {
+	return func(server *Server) {
+		server.deviceAuth = admin
+	}
+}
+
 // WithSettingsAdmin installs the versioned settings center.
 func WithSettingsAdmin(admin SettingsAdmin) Option {
 	return func(server *Server) {
@@ -261,6 +269,7 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	server.registerAdminRoutes(mux)
 	server.registerModelAdminRoutes(mux)
 	server.registerSettingsRoutes(mux)
+	server.registerDeviceAuthRoutes(mux)
 	var handler http.Handler = mux
 	if server.tracer != nil && server.tracer.Enabled() {
 		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.
