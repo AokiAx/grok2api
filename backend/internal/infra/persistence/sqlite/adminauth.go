@@ -300,6 +300,41 @@ func (r *SQLite) OldestRecentAdminLoginFailure(ctx context.Context, username, so
 	return parseTime(raw.String), true, nil
 }
 
+func (r *SQLite) CountRecentAdminLoginFailuresBySourceIP(ctx context.Context, sourceIP string, since time.Time) (int, error) {
+	if since.IsZero() {
+		return 0, errors.New("login failure window start is required")
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts AS failure
+		WHERE failure.source_ip=? AND failure.succeeded=0 AND failure.created_at>=?
+		AND failure.id > COALESCE((SELECT MAX(success.id) FROM admin_login_attempts AS success
+			WHERE success.source_ip=? AND success.succeeded=1), 0)`,
+		strings.TrimSpace(sourceIP), formatTime(since), strings.TrimSpace(sourceIP)).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count recent admin login failures by source IP: %w", err)
+	}
+	return count, nil
+}
+
+func (r *SQLite) OldestRecentAdminLoginFailureBySourceIP(ctx context.Context, sourceIP string, since time.Time) (time.Time, bool, error) {
+	if since.IsZero() {
+		return time.Time{}, false, errors.New("login failure window start is required")
+	}
+	var raw sql.NullString
+	err := r.db.QueryRowContext(ctx, `SELECT MIN(failure.created_at) FROM admin_login_attempts AS failure
+		WHERE failure.source_ip=? AND failure.succeeded=0 AND failure.created_at>=?
+		AND failure.id > COALESCE((SELECT MAX(success.id) FROM admin_login_attempts AS success
+			WHERE success.source_ip=? AND success.succeeded=1), 0)`,
+		strings.TrimSpace(sourceIP), formatTime(since), strings.TrimSpace(sourceIP)).Scan(&raw)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("oldest admin login failure by source IP: %w", err)
+	}
+	if !raw.Valid || raw.String == "" {
+		return time.Time{}, false, nil
+	}
+	return parseTime(raw.String), true, nil
+}
+
 const sessionSelect = `SELECT
 	id, family_id, admin_user_id, access_token_hash, refresh_secret_hash,
 	source_ip, user_agent, remember, created_at, access_expires_at, expires_at,

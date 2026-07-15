@@ -116,22 +116,31 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 	if net.ParseIP(ip) == nil {
 		return LoginOutput{}, ErrInvalidCredentials
 	}
-	failures, err := s.repo.CountRecentAdminLoginFailures(ctx, username, ip, now.Add(-15*time.Minute))
+	windowStart := now.Add(-15 * time.Minute)
+	failures, err := s.repo.CountRecentAdminLoginFailures(ctx, username, ip, windowStart)
 	if err != nil {
 		return LoginOutput{}, err
 	}
+	ipFailures, err := s.repo.CountRecentAdminLoginFailuresBySourceIP(ctx, ip, windowStart)
+	if err != nil {
+		return LoginOutput{}, err
+	}
+	retry := time.Duration(0)
 	if failures >= 5 {
-		oldest, found, e := s.repo.OldestRecentAdminLoginFailure(ctx, username, ip, now.Add(-15*time.Minute))
+		oldest, found, e := s.repo.OldestRecentAdminLoginFailure(ctx, username, ip, windowStart)
 		if e != nil {
 			return LoginOutput{}, e
 		}
-		retry := 15 * time.Minute
-		if found {
-			retry = oldest.Add(15 * time.Minute).Sub(now)
-			if retry < time.Second {
-				retry = time.Second
-			}
+		retry = maxDuration(retry, loginRetryAfter(now, oldest, found))
+	}
+	if ipFailures >= 5 {
+		oldest, found, e := s.repo.OldestRecentAdminLoginFailureBySourceIP(ctx, ip, windowStart)
+		if e != nil {
+			return LoginOutput{}, e
 		}
+		retry = maxDuration(retry, loginRetryAfter(now, oldest, found))
+	}
+	if retry > 0 {
 		return LoginOutput{}, &LoginRateLimitError{RetryAfter: retry}
 	}
 	u, ok, err := s.repo.GetAdminUserByUsername(ctx, username)
@@ -175,6 +184,24 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginOutput, error)
 		return LoginOutput{}, err
 	}
 	return LoginOutput{Admin: u, AccessToken: access, RefreshCookieValue: sid + "." + refresh, AccessExpiresAt: session.AccessExpiresAt, RefreshExpiresAt: session.ExpiresAt, Remember: session.Remember}, nil
+}
+
+func loginRetryAfter(now, oldest time.Time, found bool) time.Duration {
+	retry := 15 * time.Minute
+	if found {
+		retry = oldest.Add(15 * time.Minute).Sub(now)
+		if retry < time.Second {
+			retry = time.Second
+		}
+	}
+	return retry
+}
+
+func maxDuration(left, right time.Duration) time.Duration {
+	if right > left {
+		return right
+	}
+	return left
 }
 
 func (s *Service) recordAttempt(ctx context.Context, u, ip string, ok bool, code string, at time.Time) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	authservice "github.com/AokiAx/grok2api/backend/internal/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
@@ -278,6 +280,7 @@ func TestSQLiteLoginFailureSourceIPBucketPersistsAcrossReopenAndUsernameRotation
 	database := filepath.Join(t.TempDir(), "login-ip-reopen.db")
 	repo := openSecurityRepo(t, ctx, database)
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
+	createStoredAdmin(t, ctx, repo, "ip-bucket-admin", "admin", now)
 	for index, username := range []string{"one", "two", "three", "four", "five"} {
 		attempt := mustLoginAttempt(t, username, "10.0.0.9", false, "invalid_credentials", now.Add(time.Duration(index)*time.Minute))
 		if err := repo.RecordAdminLoginAttempt(ctx, attempt); err != nil {
@@ -296,6 +299,10 @@ func TestSQLiteLoginFailureSourceIPBucketPersistsAcrossReopenAndUsernameRotation
 	oldest, found, err := repo.OldestRecentAdminLoginFailureBySourceIP(ctx, "10.0.0.9", now.Add(-15*time.Minute))
 	if err != nil || !found || !oldest.Equal(now) {
 		t.Fatalf("oldest=%v found=%v err=%v", oldest, found, err)
+	}
+	svc := authservice.NewService(repo, authservice.WithClock(func() time.Time { return now.Add(4 * time.Minute) }))
+	if _, err := svc.Login(ctx, authservice.LoginInput{Username: "sixth-name", Password: "bad", SourceIP: "10.0.0.9"}); !errors.Is(err, authservice.ErrRateLimited) {
+		t.Fatalf("rotated username login err=%v; want rate limit", err)
 	}
 }
 

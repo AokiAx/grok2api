@@ -52,6 +52,12 @@ func (adminAuthContractRepository) CountRecentAdminLoginFailures(context.Context
 func (adminAuthContractRepository) OldestRecentAdminLoginFailure(context.Context, string, string, time.Time) (time.Time, bool, error) {
 	return time.Time{}, false, nil
 }
+func (adminAuthContractRepository) CountRecentAdminLoginFailuresBySourceIP(context.Context, string, time.Time) (int, error) {
+	return 0, nil
+}
+func (adminAuthContractRepository) OldestRecentAdminLoginFailureBySourceIP(context.Context, string, time.Time) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
 
 type clientKeyContractRepository struct{}
 
