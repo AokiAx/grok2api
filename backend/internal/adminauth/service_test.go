@@ -3,11 +3,12 @@ package adminauth
 import (
 	"context"
 	"errors"
-	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
-	"github.com/AokiAx/grok2api/backend/internal/security"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
+	"github.com/AokiAx/grok2api/backend/internal/security"
 )
 
 type fakeRepo struct {
@@ -20,6 +21,7 @@ type fakeRepo struct {
 	getUserByIDErr       error
 	getSessionErr        error
 	rotateCalls          int
+	revokeFamilyCalls    int
 }
 
 func (f *fakeRepo) CountAdminUsers(context.Context) (int, error)               { return len(f.users), nil }
@@ -92,6 +94,7 @@ func (f *fakeRepo) RevokeAdminSession(_ context.Context, id string, _ time.Time,
 	return nil
 }
 func (f *fakeRepo) RevokeAdminSessionFamily(context.Context, string, time.Time, adminauth.RevocationReason) error {
+	f.revokeFamilyCalls++
 	return nil
 }
 func (f *fakeRepo) RecordAdminLoginAttempt(_ context.Context, a adminauth.LoginAttempt) error {
@@ -120,6 +123,59 @@ func TestLoginPersistsSessionAndSuccessAtomically(t *testing.T) {
 	}
 	if len(repo.sessions) != 0 || len(repo.attempts) != 0 {
 		t.Fatalf("partial success persisted sessions=%d attempts=%d", len(repo.sessions), len(repo.attempts))
+	}
+}
+
+func TestRefreshClassifiesRecentRotationAsConflictAndExpiredGraceAsReplay(t *testing.T) {
+	now := time.Date(2026, 7, 15, 4, 0, 0, 0, time.UTC)
+	credential, err := security.HashAdminPassword("secret", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := adminauth.NewAdminUser("admin-1", "admin", credential, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name          string
+		rotatedAt     time.Time
+		wantError     error
+		wantRevokes   int
+		wantRotations int
+	}{
+		{name: "inside grace", rotatedAt: now.Add(-2 * time.Second), wantError: ErrConflict},
+		{name: "at grace deadline", rotatedAt: now.Add(-5 * time.Second), wantError: ErrInvalidRefresh, wantRevokes: 1},
+		{name: "after grace deadline", rotatedAt: now.Add(-5*time.Second - time.Nanosecond), wantError: ErrInvalidRefresh, wantRevokes: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := &fakeRepo{
+				users:    map[string]adminauth.AdminUser{user.ID: user},
+				sessions: map[string]adminauth.Session{},
+				rotateOK: true,
+			}
+			service := NewService(repo, WithClock(func() time.Time { return now }))
+			login, err := service.Login(context.Background(), LoginInput{
+				Username: "admin", Password: "secret", SourceIP: "127.0.0.1",
+			})
+			if err != nil {
+				t.Fatalf("login: %v", err)
+			}
+			sessionID := strings.SplitN(login.RefreshCookieValue, ".", 2)[0]
+			session := repo.sessions[sessionID]
+			session.RotatedAt = test.rotatedAt
+			session.RevokedAt = test.rotatedAt
+			session.RevocationReason = adminauth.RevocationRotated
+			repo.sessions[sessionID] = session
+
+			_, err = service.Refresh(context.Background(), login.RefreshCookieValue, "127.0.0.1", "ua")
+			if !errors.Is(err, test.wantError) {
+				t.Fatalf("refresh err=%v want=%v", err, test.wantError)
+			}
+			if repo.revokeFamilyCalls != test.wantRevokes || repo.rotateCalls != test.wantRotations {
+				t.Fatalf("family revokes=%d rotations=%d", repo.revokeFamilyCalls, repo.rotateCalls)
+			}
+		})
 	}
 }
 

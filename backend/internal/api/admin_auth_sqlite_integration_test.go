@@ -24,7 +24,7 @@ type authHTTPResult struct {
 
 func TestAdminAuthSQLiteRefreshRotationReplayAndCookies(t *testing.T) {
 	now := time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)
-	handler, repo := newSQLiteAuthHandler(t, now, true, true)
+	handler, repo, clock := newSQLiteAuthHandlerWithClock(t, now, true, true)
 	defer repo.Close()
 
 	sessionLogin := authLogin(t, handler, false)
@@ -49,6 +49,14 @@ func TestAdminAuthSQLiteRefreshRotationReplayAndCookies(t *testing.T) {
 		t.Fatalf("refresh did not inherit remember lifetime old=%+v new=%+v", persistentLogin.Cookie, refreshed.Cookie)
 	}
 	assertMe(t, handler, persistentLogin.Access, http.StatusUnauthorized)
+	concurrentLoser := authRefresh(handler, persistentLogin.Cookie)
+	assertAuthResponse(t, concurrentLoser, http.StatusConflict, false, "refresh_conflict")
+	if concurrentLoser.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("conflict changed cookie: %q", concurrentLoser.Header().Get("Set-Cookie"))
+	}
+	assertMe(t, handler, refreshed.Access, http.StatusOK)
+
+	clock.Advance(6 * time.Second)
 	oldRefresh := authRefresh(handler, persistentLogin.Cookie)
 	assertAuthResponse(t, oldRefresh, http.StatusUnauthorized, false, "invalid_refresh_session")
 	assertMe(t, handler, refreshed.Access, http.StatusUnauthorized)
@@ -144,6 +152,28 @@ func TestAdminAuthSQLiteStatusHeadersThrottleAndLogout(t *testing.T) {
 }
 
 func newSQLiteAuthHandler(t *testing.T, now time.Time, withAdmin, secure bool) (http.Handler, *sqlite.SQLite) {
+	handler, repo, _ := newSQLiteAuthHandlerWithClock(t, now, withAdmin, secure)
+	return handler, repo
+}
+
+type authTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *authTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *authTestClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(duration)
+}
+
+func newSQLiteAuthHandlerWithClock(t *testing.T, now time.Time, withAdmin, secure bool) (http.Handler, *sqlite.SQLite, *authTestClock) {
 	t.Helper()
 	repo, err := sqlite.OpenSQLite(context.Background(), t.TempDir()+"/auth-integration.db")
 	if err != nil {
@@ -162,8 +192,9 @@ func newSQLiteAuthHandler(t *testing.T, now time.Time, withAdmin, secure bool) (
 			t.Fatal(err)
 		}
 	}
-	svc := service.NewService(repo, service.WithClock(func() time.Time { return now }))
-	return NewAdminAuthHandler(svc, AdminAuthHandlerOptions{SecureCookies: secure, Clock: func() time.Time { return now }}), repo
+	clock := &authTestClock{now: now}
+	svc := service.NewService(repo, service.WithClock(clock.Now))
+	return NewAdminAuthHandler(svc, AdminAuthHandlerOptions{SecureCookies: secure, Clock: clock.Now}), repo, clock
 }
 
 func rawLogin(handler http.Handler, body string) *httptest.ResponseRecorder {
