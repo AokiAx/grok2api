@@ -292,6 +292,45 @@ describe("admin authentication transport", () => {
     expect(calls.filter((call) => call.path.endsWith("/auth/me"))).toHaveLength(1);
     expect(calls.at(-1)).toEqual({ path: "/api/admin/v1/system", authorization: null });
   });
+
+  it("does not start refresh for an old request that becomes unauthorized after logout", async () => {
+    const meResponse = deferred<Response>();
+    const meStarted = deferred<void>();
+    const logoutResponse = deferred<Response>();
+    const calls: Array<{ path: string; authorization: string | null }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const authorization = new Headers(init?.headers).get("Authorization");
+      calls.push({ path, authorization });
+      if (path.endsWith("/auth/login")) return envelope({ tokens: { accessToken: "active" } });
+      if (path.endsWith("/auth/logout")) return logoutResponse.promise;
+      if (path.endsWith("/auth/refresh")) return envelope({ tokens: { accessToken: "restored-after-logout" } });
+      if (path.endsWith("/auth/me") && authorization === "Bearer active") {
+        meStarted.resolve();
+        return meResponse.promise;
+      }
+      if (path.endsWith("/auth/me")) return envelope({ id: "admin-1", username: "admin" });
+      return envelope({ version: "1", api_version: "v1", default_model: "grok", auth_required: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { adminApi } = await loadClient();
+    await adminApi.login("secret", true);
+    const pendingMe = adminApi.me();
+    await meStarted.promise;
+
+    const pendingLogout = adminApi.logout();
+    await Promise.resolve();
+    meResponse.resolve(envelope(null, 401));
+
+    await expect(pendingMe).rejects.toMatchObject({ status: 401 });
+    await adminApi.system();
+    expect(calls.filter((call) => call.path.endsWith("/auth/refresh"))).toHaveLength(0);
+    expect(calls.at(-1)).toEqual({ path: "/api/admin/v1/system", authorization: null });
+
+    logoutResponse.resolve(envelope({ loggedOut: true }));
+    await pendingLogout;
+  });
 });
 
 describe("client-key administration API", () => {
