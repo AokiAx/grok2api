@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,16 +12,23 @@ import (
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/clientkey"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/service"
 )
 
 type singlePassBody struct {
 	payload []byte
 	reads   int
+	events  *[]string
+	seen    bool
 }
 
 func (b *singlePassBody) Read(destination []byte) (int, error) {
 	b.reads++
+	if !b.seen && b.events != nil {
+		*b.events = append(*b.events, "body")
+		b.seen = true
+	}
 	if len(b.payload) == 0 {
 		return 0, io.EOF
 	}
@@ -30,6 +38,29 @@ func (b *singlePassBody) Read(destination []byte) (int, error) {
 }
 
 func (*singlePassBody) Close() error { return nil }
+
+type rejectingTraceAccess struct {
+	authErr error
+	rpmErr  error
+}
+
+func (a *rejectingTraceAccess) Authenticate(context.Context, string) (service.ClientGrant, error) {
+	return service.ClientGrant{
+		Authenticated: true,
+		KeyID:         "ck_rejected",
+		Principal:     "client-key:ck_rejected",
+		ModelPolicy:   clientkey.ModelPolicyAll,
+		MaxConcurrent: 1,
+	}, a.authErr
+}
+
+func (a *rejectingTraceAccess) ConsumeRPM(context.Context, service.ClientGrant) (repository.RateLimitDecision, error) {
+	return repository.RateLimitDecision{Allowed: a.rpmErr == nil}, a.rpmErr
+}
+
+func (*rejectingTraceAccess) AcquireConcurrency(service.ClientGrant) (service.ClientPermit, error) {
+	return nil, nil
+}
 
 func TestDebugTraceReusesSingleBoundedInferenceBody(t *testing.T) {
 	dir := t.TempDir()
@@ -42,12 +73,10 @@ func TestDebugTraceReusesSingleBoundedInferenceBody(t *testing.T) {
 		MaxConcurrent: 1,
 	}}
 	payload := `{"model":"grok-4.5","input":"hi"}`
-	body := &singlePassBody{payload: []byte(payload)}
+	body := &singlePassBody{payload: []byte(payload), events: &access.events}
 
-	var downstreamBody io.ReadCloser
 	handler := intercept.Middleware(tracer, ClientInferenceMiddleware(access, "grok-4.5", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		access.events = append(access.events, "handler")
-		downstreamBody = request.Body
 		first, err := readInferenceRequestBody(writer, request)
 		if err != nil {
 			t.Fatalf("read cached body: %v", err)
@@ -73,9 +102,6 @@ func TestDebugTraceReusesSingleBoundedInferenceBody(t *testing.T) {
 	if body.reads != 1 {
 		t.Fatalf("original request body reads=%d want=1", body.reads)
 	}
-	if downstreamBody != body {
-		t.Fatal("request body was rebuilt instead of reusing the shared bounded cache")
-	}
 	wantEvents := "authenticate,rpm,concurrency,body,handler,release"
 	if got := strings.Join(access.events, ","); got != wantEvents {
 		t.Fatalf("events=%s want=%s", got, wantEvents)
@@ -91,5 +117,37 @@ func TestDebugTraceReusesSingleBoundedInferenceBody(t *testing.T) {
 	}
 	if !strings.Contains(string(trace), `"model":"grok-4.5"`) {
 		t.Fatalf("trace did not reuse cached request payload: %s", trace)
+	}
+}
+
+func TestDebugTraceDoesNotReadRejectedInferenceBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		access     *rejectingTraceAccess
+		wantStatus int
+	}{
+		{name: "unauthorized", access: &rejectingTraceAccess{authErr: service.ErrClientUnauthorized}, wantStatus: http.StatusUnauthorized},
+		{name: "rate limited", access: &rejectingTraceAccess{rpmErr: service.ErrClientRateLimited}, wantStatus: http.StatusTooManyRequests},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tracer := intercept.New(intercept.Options{Enabled: true, Dir: t.TempDir(), MaxBody: 4096})
+			body := &singlePassBody{payload: []byte(`{"model":"grok-4.5"}`)}
+			handler := intercept.Middleware(tracer, ClientInferenceMiddleware(test.access, "grok-4.5", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("rejected request reached handler")
+			})))
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+			request.Header.Set("Authorization", "Bearer rejected-key")
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if body.reads != 0 {
+				t.Fatalf("rejected request body reads=%d want=0", body.reads)
+			}
+		})
 	}
 }
