@@ -267,10 +267,10 @@ func (r *SQLite) CountRecentAdminLoginFailures(
 		return 0, errors.New("login failure window start is required")
 	}
 	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts
-		WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?
-		AND created_at > COALESCE((SELECT MAX(created_at) FROM admin_login_attempts
-			WHERE username=? AND source_ip=? AND succeeded=1), '')`,
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_login_attempts AS failure
+		WHERE failure.username=? AND failure.source_ip=? AND failure.succeeded=0 AND failure.created_at>=?
+		AND failure.id > COALESCE((SELECT MAX(success.id) FROM admin_login_attempts AS success
+			WHERE success.username=? AND success.source_ip=? AND success.succeeded=1), 0)`,
 		strings.ToLower(strings.TrimSpace(username)),
 		strings.TrimSpace(sourceIP),
 		formatTime(since),
@@ -285,10 +285,10 @@ func (r *SQLite) CountRecentAdminLoginFailures(
 
 func (r *SQLite) OldestRecentAdminLoginFailure(ctx context.Context, username, sourceIP string, since time.Time) (time.Time, bool, error) {
 	var raw sql.NullString
-	err := r.db.QueryRowContext(ctx, `SELECT MIN(created_at) FROM admin_login_attempts
-		WHERE username=? AND source_ip=? AND succeeded=0 AND created_at>=?
-		AND created_at > COALESCE((SELECT MAX(created_at) FROM admin_login_attempts
-			WHERE username=? AND source_ip=? AND succeeded=1), '')`,
+	err := r.db.QueryRowContext(ctx, `SELECT MIN(failure.created_at) FROM admin_login_attempts AS failure
+		WHERE failure.username=? AND failure.source_ip=? AND failure.succeeded=0 AND failure.created_at>=?
+		AND failure.id > COALESCE((SELECT MAX(success.id) FROM admin_login_attempts AS success
+			WHERE success.username=? AND success.source_ip=? AND success.succeeded=1), 0)`,
 		strings.ToLower(strings.TrimSpace(username)), strings.TrimSpace(sourceIP), formatTime(since),
 		strings.ToLower(strings.TrimSpace(username)), strings.TrimSpace(sourceIP)).Scan(&raw)
 	if err != nil {
