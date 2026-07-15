@@ -12,7 +12,10 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
-var ErrClientUnauthorized = errors.New("client credential is invalid")
+var (
+	ErrClientUnauthorized = errors.New("client credential is invalid")
+	ErrModelNotAllowed    = errors.New("model is not allowed for this client key")
+)
 
 type ClientAccessRepository interface {
 	ClientAuthRequired(context.Context) (bool, error)
@@ -49,6 +52,33 @@ func (g ClientGrant) AllowsModel(model string) bool {
 		}
 	}
 	return false
+}
+
+// AuthorizeModel computes the effective model first, then evaluates the key's
+// policy. This prevents an omitted model from bypassing an allowlist through a
+// server-side default.
+func (g ClientGrant) AuthorizeModel(requested, defaultModel string) (string, error) {
+	model := strings.TrimSpace(requested)
+	if model == "" {
+		model = strings.TrimSpace(defaultModel)
+	}
+	if !g.AllowsModel(model) {
+		return "", ErrModelNotAllowed
+	}
+	return model, nil
+}
+
+func (g ClientGrant) FilterModelIDs(models []string) []string {
+	if !g.Authenticated || g.ModelPolicy == clientkey.ModelPolicyAll {
+		return append([]string(nil), models...)
+	}
+	filtered := make([]string, 0, len(models))
+	for _, model := range models {
+		if g.AllowsModel(model) {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
 }
 
 type ClientAccess struct {
@@ -130,4 +160,21 @@ func ClientGrantFromContext(ctx context.Context) (ClientGrant, bool) {
 	}
 	grant, ok := ctx.Value(clientGrantContextKey{}).(ClientGrant)
 	return grant, ok
+}
+
+type effectiveModelContextKey struct{}
+
+func WithEffectiveModel(ctx context.Context, model string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, effectiveModelContextKey{}, strings.TrimSpace(model))
+}
+
+func EffectiveModelFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	model, ok := ctx.Value(effectiveModelContextKey{}).(string)
+	return model, ok && model != ""
 }
