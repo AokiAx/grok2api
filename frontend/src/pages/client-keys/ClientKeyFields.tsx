@@ -78,6 +78,8 @@ export function LimitDecision({
   unlimitedLabel,
   value,
   unlimited,
+  disabled = false,
+  min = 1,
   onValue,
   onUnlimited,
 }: {
@@ -86,6 +88,8 @@ export function LimitDecision({
   unlimitedLabel: string;
   value: string;
   unlimited: boolean;
+  disabled?: boolean;
+  min?: number;
   onValue: (value: string) => void;
   onUnlimited: (value: boolean) => void;
 }) {
@@ -96,15 +100,16 @@ export function LimitDecision({
         <Input
           id={id}
           type="number"
-          min={1}
+          min={min}
           value={value}
-          disabled={unlimited}
+          disabled={disabled || unlimited}
           onChange={(event) => onValue(event.target.value)}
         />
         <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
             checked={unlimited}
+            disabled={disabled}
             onChange={(event) => onUnlimited(event.target.checked)}
           />
           {unlimitedLabel}

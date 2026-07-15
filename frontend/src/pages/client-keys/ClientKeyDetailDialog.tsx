@@ -4,9 +4,7 @@ import { adminApi, type ClientKey } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { ClientKeyFields } from "@/pages/client-keys/ClientKeyFields";
+import { ClientKeyFields, LimitDecision } from "@/pages/client-keys/ClientKeyFields";
 import {
   buildClientKeyInput,
   clientKeyErrorMessage,
@@ -29,11 +27,15 @@ export function ClientKeyDetailDialog({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [unlimitedRPM, setUnlimitedRPM] = useState(false);
+  const [unlimitedConcurrent, setUnlimitedConcurrent] = useState(false);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
+    setUnlimitedRPM(false);
+    setUnlimitedConcurrent(false);
     void adminApi.clientKey(initial.id).then((loaded) => {
       if (!active) return;
       setDetail(loaded);
@@ -51,8 +53,8 @@ export function ClientKeyDetailDialog({
   async function save(event: FormEvent) {
     event.preventDefault();
     const input = buildClientKeyInput(draft, {
-      unlimitedRPM: draft.rpmLimit === "0",
-      unlimitedConcurrent: draft.maxConcurrent === "0",
+      unlimitedRPM,
+      unlimitedConcurrent,
       allModelsConfirmed: true,
     });
     if (typeof input === "string") {
@@ -124,30 +126,28 @@ export function ClientKeyDetailDialog({
                 disabled={Boolean(detail.revoked_at)}
               />
               <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="detail-rpm">每分钟请求数</Label>
-                  <Input
-                    id="detail-rpm"
-                    type="number"
-                    min={0}
-                    value={draft.rpmLimit}
-                    disabled={Boolean(detail.revoked_at)}
-                    onChange={(event) => setDraft((current) => ({ ...current, rpmLimit: event.target.value }))}
-                  />
-                  <p className="text-[11px] text-muted-foreground">0 表示不限</p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="detail-concurrency">最大并发</Label>
-                  <Input
-                    id="detail-concurrency"
-                    type="number"
-                    min={0}
-                    value={draft.maxConcurrent}
-                    disabled={Boolean(detail.revoked_at)}
-                    onChange={(event) => setDraft((current) => ({ ...current, maxConcurrent: event.target.value }))}
-                  />
-                  <p className="text-[11px] text-muted-foreground">0 表示不限</p>
-                </div>
+                <LimitDecision
+                  id="detail-rpm"
+                  label="每分钟请求数"
+                  unlimitedLabel="RPM 不限"
+                  value={draft.rpmLimit}
+                  unlimited={unlimitedRPM}
+                  disabled={Boolean(detail.revoked_at)}
+                  min={0}
+                  onValue={(value) => setDraft((current) => ({ ...current, rpmLimit: value }))}
+                  onUnlimited={setUnlimitedRPM}
+                />
+                <LimitDecision
+                  id="detail-concurrency"
+                  label="最大并发"
+                  unlimitedLabel="并发不限"
+                  value={draft.maxConcurrent}
+                  unlimited={unlimitedConcurrent}
+                  disabled={Boolean(detail.revoked_at)}
+                  min={0}
+                  onValue={(value) => setDraft((current) => ({ ...current, maxConcurrent: value }))}
+                  onUnlimited={setUnlimitedConcurrent}
+                />
               </div>
               <dl className="grid gap-2 rounded-lg bg-background p-3 text-[11px] sm:grid-cols-2">
                 <KeyFact label="来源" value={detail.origin} />
