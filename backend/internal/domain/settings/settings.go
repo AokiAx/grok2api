@@ -12,13 +12,14 @@ import (
 
 // Document is the versioned, operator-editable settings document.
 type Document struct {
-	Revision  int64     `json:"revision"`
-	UpdatedAt time.Time `json:"updated_at"`
-	UpdatedBy string    `json:"updated_by,omitempty"`
-	Pool      Pool      `json:"pool"`
-	Timeouts  Timeouts  `json:"timeouts"`
-	Audit     Audit     `json:"audit"`
-	Proxy     Proxy     `json:"proxy"`
+	Revision   int64      `json:"revision"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	UpdatedBy  string     `json:"updated_by,omitempty"`
+	Pool       Pool       `json:"pool"`
+	Timeouts   Timeouts   `json:"timeouts"`
+	Audit      Audit      `json:"audit"`
+	Proxy      Proxy      `json:"proxy"`
+	ClientKeys ClientKeys `json:"client_keys"`
 }
 
 type Pool struct {
@@ -47,6 +48,13 @@ type Proxy struct {
 	Enabled       bool   `json:"enabled"`
 	RuntimeStatus string `json:"runtime_status"` // always "not_wired" until implemented
 	Note          string `json:"note,omitempty"`
+}
+
+// ClientKeys holds operator defaults used when creating new client keys in the admin UI.
+// Existing keys are unaffected; values are defaults only (0 still means unlimited when chosen explicitly).
+type ClientKeys struct {
+	DefaultRPMLimit      int `json:"default_rpm_limit"`
+	DefaultMaxConcurrent int `json:"default_max_concurrent"`
 }
 
 // Snapshot is an immutable historical revision.
@@ -81,6 +89,10 @@ func Defaults() Document {
 			Enabled:       false,
 			RuntimeStatus: "not_wired",
 			Note:          "Proxy settings are stored for future use and do not affect runtime outbound traffic yet.",
+		},
+		ClientKeys: ClientKeys{
+			DefaultRPMLimit:      120,
+			DefaultMaxConcurrent: 4,
 		},
 	}
 }
@@ -125,6 +137,14 @@ func (d *Document) Normalize() error {
 	if d.Audit.RetentionDays > 365 {
 		return fmt.Errorf("audit retention_days must be <= 365")
 	}
+	// Client key create-form defaults. 0 means "unlimited" as the form default
+	// when an operator explicitly chooses it; product Defaults() uses 120 RPM / 4 concurrent.
+	if d.ClientKeys.DefaultRPMLimit < 0 {
+		return fmt.Errorf("client_keys.default_rpm_limit must be >= 0")
+	}
+	if d.ClientKeys.DefaultMaxConcurrent < 0 {
+		return fmt.Errorf("client_keys.default_max_concurrent must be >= 0")
+	}
 	d.Proxy.URL = strings.TrimSpace(d.Proxy.URL)
 	d.Proxy.RuntimeStatus = "not_wired"
 	if d.Proxy.Note == "" {
@@ -148,8 +168,24 @@ func Unmarshal(raw []byte) (Document, error) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return Document{}, err
 	}
+	// Legacy documents lack client_keys; seed product defaults so create-key UX
+	// has 120 RPM / 4 concurrency until the operator saves settings explicitly.
+	if !jsonHasClientKeys(raw) {
+		defaults := Defaults().ClientKeys
+		doc.ClientKeys = defaults
+	}
 	if err := doc.Normalize(); err != nil {
 		return Document{}, err
 	}
 	return doc, nil
+}
+
+func jsonHasClientKeys(raw []byte) bool {
+	var probe struct {
+		ClientKeys json.RawMessage `json:"client_keys"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return len(probe.ClientKeys) > 0 && string(probe.ClientKeys) != "null"
 }

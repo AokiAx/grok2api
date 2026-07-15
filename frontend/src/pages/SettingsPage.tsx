@@ -52,6 +52,7 @@ export function SettingsPage() {
         timeouts: doc.timeouts,
         audit: doc.audit,
         proxy: doc.proxy,
+        client_keys: doc.client_keys || { default_rpm_limit: 120, default_max_concurrent: 4 },
       });
       setDoc(next);
       setMessage(`已保存 revision ${next.revision}`);
@@ -293,6 +294,49 @@ export function SettingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="p-4 sm:p-5">
+        <CardHeader>
+          <CardTitle>客户端密钥默认限额</CardTitle>
+          <CardDescription>
+            创建密钥时的表单预填值；不会修改已有密钥。0 表示默认勾选“不限”。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="mt-3 grid gap-3 sm:grid-cols-2">
+          <Field label="默认 RPM">
+            <Input
+              type="number"
+              min={0}
+              value={doc.client_keys?.default_rpm_limit ?? 120}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  client_keys: {
+                    default_rpm_limit: num(e.target.value, 120),
+                    default_max_concurrent: doc.client_keys?.default_max_concurrent ?? 4,
+                  },
+                })
+              }
+            />
+          </Field>
+          <Field label="默认并发">
+            <Input
+              type="number"
+              min={0}
+              value={doc.client_keys?.default_max_concurrent ?? 4}
+              onChange={(e) =>
+                setDoc({
+                  ...doc,
+                  client_keys: {
+                    default_rpm_limit: doc.client_keys?.default_rpm_limit ?? 120,
+                    default_max_concurrent: num(e.target.value, 4),
+                  },
+                })
+              }
+            />
+          </Field>
+        </CardContent>
+      </Card>
 
       <Card className="p-4 sm:p-5">
         <CardHeader>

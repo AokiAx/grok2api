@@ -55,11 +55,12 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	var body struct {
-		ExpectedRevision int64             `json:"expected_revision"`
-		Pool             settings.Pool     `json:"pool"`
-		Timeouts         settings.Timeouts `json:"timeouts"`
-		Audit            settings.Audit    `json:"audit"`
-		Proxy            settings.Proxy    `json:"proxy"`
+		ExpectedRevision int64               `json:"expected_revision"`
+		Pool             settings.Pool       `json:"pool"`
+		Timeouts         settings.Timeouts   `json:"timeouts"`
+		Audit            settings.Audit      `json:"audit"`
+		Proxy            settings.Proxy      `json:"proxy"`
+		ClientKeys       settings.ClientKeys `json:"client_keys"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
 		writeAdminError(writer, http.StatusBadRequest, "invalid_json", "Invalid settings payload")
@@ -79,6 +80,7 @@ func (s *Server) adminV1PutSettings(writer http.ResponseWriter, request *http.Re
 	next.Timeouts = body.Timeouts
 	next.Audit = body.Audit
 	next.Proxy = body.Proxy
+	next.ClientKeys = body.ClientKeys
 	updatedBy := "admin"
 	doc, err := s.settings.PutSettings(request.Context(), body.ExpectedRevision, next, updatedBy)
 	if errors.Is(err, repository.ErrSettingsConflict) {
@@ -180,13 +182,14 @@ func (s *Server) adminV1RollbackSettings(writer http.ResponseWriter, request *ht
 
 func settingsToMap(doc settings.Document) map[string]any {
 	return map[string]any{
-		"revision":   doc.Revision,
-		"updated_at": doc.UpdatedAt.UTC().Format(time.RFC3339),
-		"updated_by": doc.UpdatedBy,
-		"pool":       doc.Pool,
-		"timeouts":   doc.Timeouts,
-		"audit":      doc.Audit,
-		"proxy":      doc.Proxy,
+		"revision":    doc.Revision,
+		"updated_at":  doc.UpdatedAt.UTC().Format(time.RFC3339),
+		"updated_by":  doc.UpdatedBy,
+		"pool":        doc.Pool,
+		"timeouts":    doc.Timeouts,
+		"audit":       doc.Audit,
+		"proxy":       doc.Proxy,
+		"client_keys": doc.ClientKeys,
 	}
 }
 

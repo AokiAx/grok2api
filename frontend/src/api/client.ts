@@ -492,6 +492,10 @@ export type SettingsDocument = {
     runtime_status: string;
     note?: string;
   };
+  client_keys: {
+    default_rpm_limit: number;
+    default_max_concurrent: number;
+  };
 };
 
 export type SettingsSnapshot = {
@@ -769,6 +773,7 @@ export const adminApi = {
     timeouts: SettingsDocument["timeouts"];
     audit: SettingsDocument["audit"];
     proxy: SettingsDocument["proxy"];
+    client_keys: SettingsDocument["client_keys"];
   }) =>
     request<SettingsDocument>("/api/admin/v1/settings", {
       method: "PUT",
