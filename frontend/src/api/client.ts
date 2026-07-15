@@ -166,6 +166,7 @@ async function transport(
   init: RequestInit = {},
   options: TransportOptions = {},
 ): Promise<Response> {
+  const generation = sessionGeneration;
   const authenticated = options.authenticated ?? true;
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type") && init.body) {
@@ -184,7 +185,9 @@ async function transport(
     (options.retryUnauthorized ?? true) &&
     await refreshSingleFlight()
   ) {
-    return transport(path, init, { authenticated: true, retryUnauthorized: false });
+    const retried = await transport(path, init, { authenticated: true, retryUnauthorized: false });
+    if (retried.status === 401) invalidateSession(generation);
+    return retried;
   }
   return response;
 }
