@@ -13,6 +13,60 @@ import (
 )
 
 var _ repository.LegacySecurityBootstrapRepository = (*SQLite)(nil)
+var _ repository.AdminBootstrapRepository = (*SQLite)(nil)
+
+func (r *SQLite) BootstrapAdmin(
+	ctx context.Context,
+	item adminauth.AdminUser,
+) (repository.BootstrapStatus, error) {
+	if err := item.Validate(); err != nil {
+		return "", fmt.Errorf("validate bootstrap admin: %w", err)
+	}
+	if item.CreatedAt.IsZero() || item.UpdatedAt.IsZero() {
+		return "", errors.New("bootstrap admin timestamps are required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin admin bootstrap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	marked, err := markerExists(ctx, tx, repository.AdminBootstrapMarker)
+	if err != nil {
+		return "", err
+	}
+	if marked {
+		return repository.BootstrapAlreadyCompleted, nil
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_users`).Scan(&count); err != nil {
+		return "", fmt.Errorf("count administrators during bootstrap: %w", err)
+	}
+	if count > 0 {
+		if err := setMarker(ctx, tx, repository.AdminBootstrapMarker, "1"); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("commit existing admin bootstrap: %w", err)
+		}
+		return repository.BootstrapExisting, nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO admin_users(
+		id, username, password_scheme, password_hash, role, enabled,
+		last_login_at, created_at, updated_at
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.Username, item.Password.Scheme, item.Password.Hash, item.Role, item.Enabled,
+		formatTime(item.LastLoginAt), formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
+	); err != nil {
+		return "", fmt.Errorf("insert bootstrap administrator: %w", err)
+	}
+	if err := setMarker(ctx, tx, repository.AdminBootstrapMarker, "1"); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit admin bootstrap: %w", err)
+	}
+	return repository.BootstrapCreated, nil
+}
 
 func (r *SQLite) BootstrapLegacyAdmin(
 	ctx context.Context,
@@ -26,7 +80,7 @@ func (r *SQLite) BootstrapLegacyAdmin(
 		return "", fmt.Errorf("begin legacy admin bootstrap: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	marked, err := markerExists(ctx, tx, repository.AdminBootstrapMarker)
+	marked, err := markerExists(ctx, tx, repository.LegacyAdminBootstrapMarker)
 	if err != nil {
 		return "", err
 	}
@@ -50,7 +104,7 @@ func (r *SQLite) BootstrapLegacyAdmin(
 		}
 		status = repository.BootstrapCreated
 	}
-	if err := setMarker(ctx, tx, repository.AdminBootstrapMarker, "1"); err != nil {
+	if err := setMarker(ctx, tx, repository.LegacyAdminBootstrapMarker, "1"); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {

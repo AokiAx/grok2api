@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	AdminBootstrapMarker     = repository.AdminBootstrapMarker
+	AdminBootstrapMarker     = repository.LegacyAdminBootstrapMarker
 	ClientKeyBootstrapMarker = repository.ClientKeyBootstrapMarker
 )
 
