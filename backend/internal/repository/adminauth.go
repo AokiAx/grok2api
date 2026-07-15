@@ -32,8 +32,23 @@ type AdminLoginAttemptStore interface {
 	OldestRecentAdminLoginFailureBySourceIP(context.Context, string, time.Time) (time.Time, bool, error)
 }
 
+type AdminAuthRetentionCutoffs struct {
+	LoginAttemptsBefore    time.Time
+	InactiveSessionsBefore time.Time
+}
+
+type AdminAuthPruneResult struct {
+	LoginAttemptsDeleted int64
+	SessionsDeleted      int64
+}
+
+type AdminAuthHistoryStore interface {
+	PruneAdminAuthHistory(context.Context, AdminAuthRetentionCutoffs) (AdminAuthPruneResult, error)
+}
+
 type AdminAuthRepository interface {
 	AdminUserStore
 	AdminSessionStore
 	AdminLoginAttemptStore
+	AdminAuthHistoryStore
 }

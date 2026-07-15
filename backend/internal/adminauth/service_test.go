@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 )
 
@@ -114,6 +115,9 @@ func (f *fakeRepo) CountRecentAdminLoginFailuresBySourceIP(_ context.Context, _ 
 }
 func (f *fakeRepo) OldestRecentAdminLoginFailureBySourceIP(_ context.Context, _ string, _ time.Time) (time.Time, bool, error) {
 	return f.ipOldestFailure, !f.ipOldestFailure.IsZero(), nil
+}
+func (f *fakeRepo) PruneAdminAuthHistory(context.Context, repository.AdminAuthRetentionCutoffs) (repository.AdminAuthPruneResult, error) {
+	return repository.AdminAuthPruneResult{}, nil
 }
 
 func TestLoginRateLimitCannotBeBypassedByRotatingUsername(t *testing.T) {

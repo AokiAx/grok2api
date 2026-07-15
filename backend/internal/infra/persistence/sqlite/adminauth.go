@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/AokiAx/grok2api/backend/internal/domain/adminauth"
+	"github.com/AokiAx/grok2api/backend/internal/repository"
 )
 
 func (r *SQLite) CountAdminUsers(ctx context.Context) (int, error) {
@@ -333,6 +334,40 @@ func (r *SQLite) OldestRecentAdminLoginFailureBySourceIP(ctx context.Context, so
 		return time.Time{}, false, nil
 	}
 	return parseTime(raw.String), true, nil
+}
+
+func (r *SQLite) PruneAdminAuthHistory(ctx context.Context, cutoffs repository.AdminAuthRetentionCutoffs) (repository.AdminAuthPruneResult, error) {
+	if cutoffs.LoginAttemptsBefore.IsZero() || cutoffs.InactiveSessionsBefore.IsZero() {
+		return repository.AdminAuthPruneResult{}, errors.New("admin auth retention cutoffs are required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return repository.AdminAuthPruneResult{}, fmt.Errorf("begin admin auth history prune: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	attemptResult, err := tx.ExecContext(ctx, `DELETE FROM admin_login_attempts WHERE created_at < ?`, formatTime(cutoffs.LoginAttemptsBefore))
+	if err != nil {
+		return repository.AdminAuthPruneResult{}, fmt.Errorf("prune admin login attempts: %w", err)
+	}
+	sessionResult, err := tx.ExecContext(ctx, `DELETE FROM admin_sessions
+		WHERE (expires_at != '' AND expires_at < ?)
+		OR (revoked_at != '' AND revoked_at < ?)`,
+		formatTime(cutoffs.InactiveSessionsBefore), formatTime(cutoffs.InactiveSessionsBefore))
+	if err != nil {
+		return repository.AdminAuthPruneResult{}, fmt.Errorf("prune inactive admin sessions: %w", err)
+	}
+	attemptsDeleted, err := attemptResult.RowsAffected()
+	if err != nil {
+		return repository.AdminAuthPruneResult{}, fmt.Errorf("inspect pruned admin login attempts: %w", err)
+	}
+	sessionsDeleted, err := sessionResult.RowsAffected()
+	if err != nil {
+		return repository.AdminAuthPruneResult{}, fmt.Errorf("inspect pruned admin sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return repository.AdminAuthPruneResult{}, fmt.Errorf("commit admin auth history prune: %w", err)
+	}
+	return repository.AdminAuthPruneResult{LoginAttemptsDeleted: attemptsDeleted, SessionsDeleted: sessionsDeleted}, nil
 }
 
 const sessionSelect = `SELECT

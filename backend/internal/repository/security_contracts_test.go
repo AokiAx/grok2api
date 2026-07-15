@@ -58,6 +58,9 @@ func (adminAuthContractRepository) CountRecentAdminLoginFailuresBySourceIP(conte
 func (adminAuthContractRepository) OldestRecentAdminLoginFailureBySourceIP(context.Context, string, time.Time) (time.Time, bool, error) {
 	return time.Time{}, false, nil
 }
+func (adminAuthContractRepository) PruneAdminAuthHistory(context.Context, repository.AdminAuthRetentionCutoffs) (repository.AdminAuthPruneResult, error) {
+	return repository.AdminAuthPruneResult{}, nil
+}
 
 type clientKeyContractRepository struct{}
 
