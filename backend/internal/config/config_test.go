@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 		"default_model":"grok-file",
 		"proxy_base_url":"https://example.test/v1",
 		"app_key":"file-admin",
+		"admin_secure_cookies":false,
 		"frontend":{"static_path":"./file-ui"}
 	}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -24,6 +26,7 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GROK2API_PORT", "9999")
 	t.Setenv("GROK2API_DEFAULT_MODEL", "grok-env")
 	t.Setenv("GROK2API_APP_KEY", "env-admin")
+	t.Setenv("GROK2API_ADMIN_SECURE_COOKIES", "true")
 	t.Setenv("GROK2API_DEBUG_TRACE", "true")
 	t.Setenv("GROK2API_DEBUG_TRACE_DIR", "/tmp/g2a-traces")
 	t.Setenv("GROK2API_FRONTEND_STATIC_PATH", "/app/frontend/dist")
@@ -44,6 +47,9 @@ func TestLoadAppliesFileThenEnvironmentOverrides(t *testing.T) {
 	if got.AppKey != "env-admin" {
 		t.Fatalf("app key = %q", got.AppKey)
 	}
+	if !adminSecureCookies(t, got) {
+		t.Fatal("expected AdminSecureCookies from env")
+	}
 	if !got.DebugTrace {
 		t.Fatal("expected DebugTrace from env")
 	}
@@ -63,7 +69,7 @@ func TestAdminKeyPrecedence(t *testing.T) {
 	}{
 		{name: "panel password", config: config.Config{PanelPassword: "panel", AppKey: "app", APIKey: "api"}, want: "panel"},
 		{name: "app key", config: config.Config{AppKey: "app", APIKey: "api"}, want: "app"},
-		{name: "api key", config: config.Config{APIKey: "api"}, want: "api"},
+		{name: "api key is not an admin credential", config: config.Config{APIKey: "api"}, want: ""},
 		{name: "open panel", config: config.Config{}, want: ""},
 	}
 	for _, test := range tests {
@@ -72,6 +78,21 @@ func TestAdminKeyPrecedence(t *testing.T) {
 				t.Fatalf("admin key = %q; want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestLoadReadsAdminSecureCookiesFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"admin_secure_cookies":true}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !adminSecureCookies(t, got) {
+		t.Fatal("expected AdminSecureCookies from config file")
 	}
 }
 
@@ -89,6 +110,13 @@ func TestLoadRejectsInvalidEnvironmentInteger(t *testing.T) {
 	t.Setenv("GROK2API_PORT", "not-a-number")
 	if _, err := config.Load(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("expected invalid environment integer error")
+	}
+}
+
+func TestLoadRejectsInvalidAdminSecureCookiesEnvironment(t *testing.T) {
+	t.Setenv("GROK2API_ADMIN_SECURE_COOKIES", "sometimes")
+	if _, err := config.Load(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Fatal("expected invalid admin secure cookies environment error")
 	}
 }
 
@@ -119,4 +147,16 @@ func TestLoadUsesSafeDefaultsWhenFileMissing(t *testing.T) {
 	if got.Frontend.StaticPath != "" {
 		t.Fatalf("frontend static path=%q, want disabled by default", got.Frontend.StaticPath)
 	}
+}
+
+func adminSecureCookies(t *testing.T, got config.Config) bool {
+	t.Helper()
+	field := reflect.ValueOf(got).FieldByName("AdminSecureCookies")
+	if !field.IsValid() {
+		t.Fatal("Config.AdminSecureCookies field is missing")
+	}
+	if field.Kind() != reflect.Bool {
+		t.Fatalf("Config.AdminSecureCookies kind = %s; want bool", field.Kind())
+	}
+	return field.Bool()
 }
