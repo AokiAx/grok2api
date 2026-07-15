@@ -62,6 +62,8 @@ type Server struct {
 	clientAccess     *service.ClientAccess
 	clientKeys       ClientKeyLifecycle
 	frontend         fs.FS
+	readiness        Readiness
+	maxBodyBytes     int64
 	handler          http.Handler
 }
 
@@ -143,6 +145,22 @@ func WithFrontend(frontend fs.FS) Option {
 	}
 }
 
+// WithReadiness installs the process readiness gate used by /readyz.
+// When unset, /readyz only reflects account-pool readiness.
+func WithReadiness(readiness Readiness) Option {
+	return func(server *Server) {
+		server.readiness = readiness
+	}
+}
+
+// WithMaxBodyBytes overrides the global request body ceiling applied by the
+// production baseline middleware. Zero keeps the default (32 MiB).
+func WithMaxBodyBytes(max int64) Option {
+	return func(server *Server) {
+		server.maxBodyBytes = max
+	}
+}
+
 func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ...Option) *Server {
 	server := &Server{
 		gateway:         gateway,
@@ -151,6 +169,7 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		defaultModel:    "grok-4.5",
 		modelCatalog:    upstream.NewDefaultCatalog(),
 		preferResponses: true,
+		maxBodyBytes:    defaultMaxBodyBytes,
 	}
 	for _, option := range options {
 		option(server)
@@ -163,6 +182,8 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
+	mux.HandleFunc("GET /healthz", server.health)
+	mux.HandleFunc("GET /readyz", server.readyz)
 	modelsHandler := http.Handler(http.HandlerFunc(server.models))
 	billingHandler := http.Handler(http.HandlerFunc(server.billing))
 	chatHandler := http.Handler(http.HandlerFunc(server.chat))
@@ -190,7 +211,8 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.
 		handler = intercept.Middleware(server.tracer, mux)
 	}
-	server.handler = handler
+	// Outermost: request id, security headers, body limit, access log.
+	server.handler = productionBaseline(handler, server.readiness, server.maxBodyBytes)
 	return server
 }
 
@@ -314,9 +336,10 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
+	// Liveness: process is up. Do not gate on pool capacity or recovery.
 	status := s.status.PoolStatus()
 	payload := map[string]any{
-		"ok":           status.Ready > 0,
+		"ok":           true,
 		"version":      "1.0.0-go",
 		"account_pool": status,
 	}
@@ -519,7 +542,25 @@ func (s *Server) writeGatewayError(writer http.ResponseWriter, err error) {
 		if message == "" {
 			message = "No ready accounts; retry later"
 		}
-		writeOpenAIErrorCode(writer, poolError.Status, string(poolError.Reason), message)
+		code := string(poolError.Reason)
+		if code == "" {
+			code = "pool_unavailable"
+		}
+		// Normalize capacity failures onto the public status contract:
+		// quota/circuit → 429, everything else capacity-like → 503.
+		status := poolError.Status
+		switch poolError.Reason {
+		case service.PoolReasonQuota, service.PoolReasonCircuit:
+			status = http.StatusTooManyRequests
+		case service.PoolReasonSaturated, service.PoolReasonCooling, service.PoolReasonAuth,
+			service.PoolReasonValidating, service.PoolReasonEmpty:
+			status = http.StatusServiceUnavailable
+		default:
+			if status < http.StatusBadRequest {
+				status = http.StatusServiceUnavailable
+			}
+		}
+		writeOpenAIErrorCode(writer, status, code, message)
 		return
 	}
 	writeOpenAIError(writer, http.StatusBadGateway, err.Error())
@@ -584,12 +625,12 @@ func authorizedWithKey(request *http.Request, key string) bool {
 }
 
 func writeOpenAIError(writer http.ResponseWriter, status int, message string) {
-	writeOpenAIErrorCode(writer, status, strconv.Itoa(status), message)
+	writeOpenAIErrorCode(writer, status, publicErrorCode(status), message)
 }
 
 func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message string) {
 	if code == "" {
-		code = strconv.Itoa(status)
+		code = publicErrorCode(status)
 	}
 	if status >= http.StatusInternalServerError {
 		slog.Error("api request failed", "status", status, "code", code, "error", message)
@@ -598,11 +639,41 @@ func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message 
 	writeJSON(writer, status, map[string]any{
 		"error": map[string]any{
 			"message": message,
-			"type":    "api_error",
+			"type":    errorTypeForStatus(status),
 			"code":    code,
 			"param":   nil,
 		},
 	})
+}
+
+func publicErrorCode(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "invalid_api_key"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	case http.StatusServiceUnavailable:
+		return "service_unavailable"
+	case http.StatusBadRequest:
+		return "invalid_request"
+	default:
+		return strconv.Itoa(status)
+	}
+}
+
+func errorTypeForStatus(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "authentication_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	default:
+		return "api_error"
+	}
 }
 
 func publicServerErrorMessage(status int) string {

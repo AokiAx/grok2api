@@ -84,7 +84,7 @@ func TestOpenAIAuthenticationAndErrorEnvelopeContract(t *testing.T) {
 
 			server.Handler().ServeHTTP(recorder, request)
 
-			assertOpenAIErrorEnvelope(t, recorder, http.StatusUnauthorized, "401", "Invalid API key")
+			assertOpenAIErrorEnvelope(t, recorder, http.StatusUnauthorized, "invalid_api_key", "Invalid API key")
 		})
 	}
 }
@@ -98,7 +98,7 @@ func TestAuthorizationHeaderTakesPrecedenceOverXAPIKey(t *testing.T) {
 
 	server.Handler().ServeHTTP(recorder, request)
 
-	assertOpenAIErrorEnvelope(t, recorder, http.StatusUnauthorized, "401", "Invalid API key")
+	assertOpenAIErrorEnvelope(t, recorder, http.StatusUnauthorized, "invalid_api_key", "Invalid API key")
 }
 
 func TestAdminV1AuthenticationEnvelopeContract(t *testing.T) {
@@ -183,8 +183,18 @@ func assertOpenAIErrorEnvelope(t *testing.T, recorder *httptest.ResponseRecorder
 	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode OpenAI error envelope: %v; body=%s", err, recorder.Body.String())
 	}
-	if envelope.Error.Message != message || envelope.Error.Type != "api_error" || envelope.Error.Code != code || envelope.Error.Param != nil {
-		t.Fatalf("unexpected OpenAI error envelope: %#v", envelope)
+	wantType := "api_error"
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		wantType = "authentication_error"
+	}
+	if status == http.StatusTooManyRequests {
+		wantType = "rate_limit_error"
+	}
+	if status == http.StatusBadRequest {
+		wantType = "invalid_request_error"
+	}
+	if envelope.Error.Message != message || envelope.Error.Type != wantType || envelope.Error.Code != code || envelope.Error.Param != nil {
+		t.Fatalf("unexpected OpenAI error envelope: %#v want type=%s code=%s", envelope, wantType, code)
 	}
 }
 

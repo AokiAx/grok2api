@@ -19,6 +19,7 @@
 | 前端 SPA C1 | `frontend/` Vite+React：登录/总览/账号/系统；dev proxy → :8787 |
 | 前端 C2 | 导入 preview/commit + 账号详情侧栏 |
 | 前端 C3 容器交付 | Docker 构建 `frontend/dist` → `/app/frontend/dist` → `/` |
+| P0-4 HTTP 生产基线 | Request ID、安全头、访问日志、全局 body limit、`/healthz`/`/readyz`、进程 readiness 门控、401/429/503 错误码 |
 
 ---
 

@@ -27,9 +27,7 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/panel-meta", s.panelMeta)
 	mux.HandleFunc("GET /api/admin/v1/system/meta", s.adminV1Meta)
 
-	// Health aliases (k8s-friendly).
-	mux.HandleFunc("GET /healthz", s.health)
-	mux.HandleFunc("GET /readyz", s.readyz)
+	// /health, /healthz, /readyz are registered on the root mux in NewServer.
 	if s.adminAuth != nil {
 		RegisterAdminAuthRoutes(mux, s.adminAuth, s.adminAuthOptions)
 	} else if s.admin != nil {
@@ -78,15 +76,31 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 
 func (s *Server) readyz(writer http.ResponseWriter, _ *http.Request) {
 	status := s.status.PoolStatus()
-	ready := status.Ready > 0
+	processReady := true
+	reason := "ready"
+	if s.readiness != nil {
+		processReady, reason = s.readiness.Ready()
+	}
+	// Ready means: process gate open AND at least one account available.
+	// Empty pool is a capacity problem operators must see on /readyz.
+	poolReady := status.Ready > 0
+	ready := processReady && poolReady
+	if processReady && !poolReady {
+		reason = "no_ready_accounts"
+	}
+	if !processReady && reason == "" {
+		reason = "starting"
+	}
 	code := http.StatusOK
 	if !ready {
 		code = http.StatusServiceUnavailable
 	}
 	writeJSON(writer, code, map[string]any{
-		"ready":        ready,
-		"state":        map[bool]string{true: "ready", false: "not_ready"}[ready],
-		"account_pool": status,
+		"ready":         ready,
+		"state":         map[bool]string{true: "ready", false: "not_ready"}[ready],
+		"reason":        reason,
+		"process_ready": processReady,
+		"account_pool":  status,
 	})
 }
 

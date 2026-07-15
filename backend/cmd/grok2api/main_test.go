@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/api"
 	"github.com/AokiAx/grok2api/backend/internal/bootstrap"
 	"github.com/AokiAx/grok2api/backend/internal/config"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/security"
 	"github.com/AokiAx/grok2api/backend/internal/service"
@@ -266,6 +266,7 @@ func TestNewAPIHandlerWiresPersistentSecurityAndSecureCookies(t *testing.T) {
 		mainTestGateway{},
 		mainTestStatus{},
 		adminService,
+		nil,
 		nil,
 		nil,
 	)

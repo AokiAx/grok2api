@@ -17,13 +17,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/admin"
 	"github.com/AokiAx/grok2api/backend/internal/adminauth"
 	"github.com/AokiAx/grok2api/backend/internal/api"
 	"github.com/AokiAx/grok2api/backend/internal/bootstrap"
 	"github.com/AokiAx/grok2api/backend/internal/clientkeys"
 	"github.com/AokiAx/grok2api/backend/internal/config"
+	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/infra/persistence/sqlite"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
@@ -317,6 +317,8 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 	adminService := admin.NewService(repo, upstreamClient, admin.WithMaintenance(upstreamClient), admin.WithSink(pool))
 	// Registration is an external project (grok-register). This service only
 	// imports credentials via the admin import API / panel.
+	readiness := &api.AtomicReadiness{}
+	readiness.Set(false, "starting")
 	handler := newAPIHandler(
 		settings,
 		repo,
@@ -325,7 +327,11 @@ func serve(ctx context.Context, settings config.Config, repo runtimeRepository) 
 		adminService,
 		frontendFS,
 		tracer,
+		readiness,
 	)
+	// Accept traffic once accounts are loaded into the scheduler. Recovery
+	// continues in the background and may still move accounts between pools.
+	readiness.Set(true, "serving")
 	server := &http.Server{
 		Addr:              settings.Address(),
 		Handler:           handler,
@@ -385,6 +391,7 @@ func newAPIHandler(
 	adminService api.AdminService,
 	frontendFS fs.FS,
 	tracer *intercept.Tracer,
+	readiness api.Readiness,
 ) http.Handler {
 	adminAuthService := adminauth.NewService(repo)
 	clientAccess := service.NewClientAccess(repo)
@@ -395,6 +402,7 @@ func newAPIHandler(
 		api.WithAdminAuth(adminAuthService, api.AdminAuthHandlerOptions{SecureCookies: settings.AdminSecureCookies}),
 		api.WithClientAccess(clientAccess),
 		api.WithClientKeys(clientKeyService),
+		api.WithReadiness(readiness),
 	}
 	if frontendFS != nil {
 		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
