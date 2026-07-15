@@ -276,7 +276,7 @@ func (r *SQLite) migrate(ctx context.Context) error {
 	if err := r.migratePythonV1(ctx); err != nil {
 		return err
 	}
-	if _, err := r.db.ExecContext(ctx, `INSERT INTO app_meta(key, value) VALUES('client_auth_required', '0') ON CONFLICT(key) DO NOTHING`); err != nil {
+	if _, err := r.db.ExecContext(ctx, `INSERT INTO app_meta(key, value) VALUES('client_auth_required', '1') ON CONFLICT(key) DO NOTHING`); err != nil {
 		return fmt.Errorf("initialize client auth marker: %w", err)
 	}
 	_, err := r.db.ExecContext(
