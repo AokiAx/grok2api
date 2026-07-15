@@ -32,6 +32,8 @@ type Clock func() time.Time
 type Random func([]byte) error
 type Option func(*Service)
 
+const defaultRefreshReplayGrace = 5 * time.Second
+
 func WithClock(c Clock) Option {
 	return func(s *Service) {
 		if c != nil {
@@ -48,15 +50,30 @@ func WithRandom(r Random) Option {
 }
 func WithBcryptCost(cost int) Option { return func(s *Service) { s.bcryptCost = cost } }
 
+func WithRefreshReplayGrace(grace time.Duration) Option {
+	return func(s *Service) {
+		if grace >= 0 {
+			s.refreshReplayGrace = grace
+		}
+	}
+}
+
 type Service struct {
-	repo       repository.AdminAuthRepository
-	clock      Clock
-	random     Random
-	bcryptCost int
+	repo               repository.AdminAuthRepository
+	clock              Clock
+	random             Random
+	bcryptCost         int
+	refreshReplayGrace time.Duration
 }
 
 func NewService(repo repository.AdminAuthRepository, opts ...Option) *Service {
-	s := &Service{repo: repo, clock: time.Now, random: func(b []byte) error { _, err := rand.Read(b); return err }, bcryptCost: 10}
+	s := &Service{
+		repo:               repo,
+		clock:              time.Now,
+		random:             func(b []byte) error { _, err := rand.Read(b); return err },
+		bcryptCost:         10,
+		refreshReplayGrace: defaultRefreshReplayGrace,
+	}
 	for _, o := range opts {
 		o(s)
 	}
@@ -216,6 +233,9 @@ func (s *Service) Refresh(ctx context.Context, cookie string, sourceIP, userAgen
 		return LoginOutput{}, ErrInvalidRefresh
 	}
 	if !old.RotatedAt.IsZero() || old.RevocationReason == domain.RevocationRotated {
+		if !old.RotatedAt.IsZero() && now.Before(old.RotatedAt.Add(s.refreshReplayGrace)) {
+			return LoginOutput{}, ErrConflict
+		}
 		if err := s.repo.RevokeAdminSessionFamily(ctx, old.FamilyID, now, domain.RevocationRefreshReplay); err != nil {
 			return LoginOutput{}, err
 		}
