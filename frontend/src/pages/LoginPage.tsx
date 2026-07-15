@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
-const bootstrapCommand = 'printf \'%s\\n\' "$ADMIN_PASSWORD" | docker compose run --rm -T app bootstrap-admin --password-stdin --config /app/config.json';
+const powershellBootstrapCommand = "$env:ADMIN_PASSWORD | docker compose run --rm -T app bootstrap-admin --password-stdin --config /app/config.json";
+const bashBootstrapCommand = 'printf \'%s\\n\' "$ADMIN_PASSWORD" | docker compose run --rm -T app bootstrap-admin --password-stdin --config /app/config.json';
 
 function loginErrorMessage(error: unknown): string {
   if (!(error instanceof AdminApiError)) return "登录失败，请检查服务连接后重试";
@@ -102,9 +103,18 @@ export function LoginPage() {
                 <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
                   管理员账号尚未初始化。请在服务端设置 <code className="font-mono">ADMIN_PASSWORD</code> 后运行 bootstrap-admin：
                 </div>
-                <code className="block overflow-x-auto rounded-md bg-secondary/60 p-3 font-mono text-[11px] leading-5 text-foreground">
-                  {bootstrapCommand}
-                </code>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">PowerShell</p>
+                  <code className="block overflow-x-auto rounded-md bg-secondary/60 p-3 font-mono text-[11px] leading-5 text-foreground">
+                    {powershellBootstrapCommand}
+                  </code>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">Bash</p>
+                  <code className="block overflow-x-auto rounded-md bg-secondary/60 p-3 font-mono text-[11px] leading-5 text-foreground">
+                    {bashBootstrapCommand}
+                  </code>
+                </div>
                 <Button type="button" variant="outline" size="sm" onClick={() => void refreshMeta()}>
                   初始化完成后重试
                 </Button>
