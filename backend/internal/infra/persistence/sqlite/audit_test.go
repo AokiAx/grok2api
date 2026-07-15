@@ -67,12 +67,27 @@ func TestRequestAuditRoundTripAndDashboardQueries(t *testing.T) {
 	if usage.InputTokens != 100 || usage.CachedInputTokens != 40 || usage.OutputTokens != 12 || usage.TotalTokens != 112 {
 		t.Fatalf("token usage=%+v", usage)
 	}
+	if usage.SampledRequests != 1 {
+		t.Fatalf("sampled=%d want 1", usage.SampledRequests)
+	}
 	if usage.P95DurationMS < 40 {
 		t.Fatalf("p95=%d", usage.P95DurationMS)
 	}
 	models, err := repo.AuditTopModels(ctx, from, to, 5)
 	if err != nil || len(models) == 0 {
 		t.Fatalf("models=%v err=%v", models, err)
+	}
+	found := false
+	for _, m := range models {
+		if m.Name == "grok-4.5" {
+			found = true
+			if m.InputTokens != 100 || m.CachedInputTokens != 40 || m.OutputTokens != 12 || m.Tokens != 112 {
+				t.Fatalf("top model tokens=%+v", m)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("models missing grok-4.5: %+v", models)
 	}
 	accounts, err := repo.AuditTopAccounts(ctx, from, to, 5)
 	if err != nil || len(accounts) == 0 {

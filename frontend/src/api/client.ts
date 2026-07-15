@@ -336,6 +336,8 @@ export type Dashboard = {
     requests?: number;
     successfulRequests?: number;
     failedRequests?: number;
+    sampledRequests?: number;
+    usageSource?: "upstream" | "none" | string;
     inputTokens?: number;
     cachedInputTokens?: number;
     outputTokens?: number;
@@ -350,10 +352,36 @@ export type Dashboard = {
     requests?: number;
     failures?: number;
     tokens?: number;
-    models?: Array<{ model?: string; tokens?: number }>;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    models?: Array<{
+      model?: string;
+      tokens?: number;
+      inputTokens?: number;
+      cachedInputTokens?: number;
+      outputTokens?: number;
+    }>;
   }>;
-  topModels?: Array<{ name?: string; model?: string; count?: number; requests?: number; tokens?: number }>;
-  topAccounts?: Array<{ name?: string; count?: number; requests?: number; tokens?: number }>;
+  topModels?: Array<{
+    name?: string;
+    model?: string;
+    count?: number;
+    requests?: number;
+    tokens?: number;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+  }>;
+  topAccounts?: Array<{
+    name?: string;
+    count?: number;
+    requests?: number;
+    tokens?: number;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+  }>;
   recentFailures?: Array<{
     requestId?: string;
     startedAt?: string;

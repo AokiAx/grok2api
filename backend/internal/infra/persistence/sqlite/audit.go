@@ -218,6 +218,7 @@ func (r *SQLite) AuditUsageSummary(ctx context.Context, from, to time.Time) (aud
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN success=1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN input_tokens > 0 OR output_tokens > 0 OR total_tokens > 0 OR cached_input_tokens > 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(cached_input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
@@ -230,6 +231,7 @@ func (r *SQLite) AuditUsageSummary(ctx context.Context, from, to time.Time) (aud
 		&out.Requests,
 		&out.SuccessfulRequests,
 		&out.FailedRequests,
+		&out.SampledRequests,
 		&out.InputTokens,
 		&out.CachedInputTokens,
 		&out.OutputTokens,
@@ -294,7 +296,10 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 			(CAST(strftime('%s', replace(substr(started_at,1,19),'T',' ')) AS INTEGER) / ?) * ? AS bucket,
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(total_tokens), 0)
+			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(cached_input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0)
 		FROM request_audits
 		WHERE started_at >= ? AND started_at < ?
 		GROUP BY bucket
@@ -307,16 +312,19 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 	defer rows.Close()
 	byBucket := make(map[int64]audit.SeriesPoint)
 	for rows.Next() {
-		var bucketUnix, requests, failures, tokens int64
-		if err := rows.Scan(&bucketUnix, &requests, &failures, &tokens); err != nil {
+		var bucketUnix, requests, failures, tokens, inputTokens, cachedTokens, outputTokens int64
+		if err := rows.Scan(&bucketUnix, &requests, &failures, &tokens, &inputTokens, &cachedTokens, &outputTokens); err != nil {
 			return nil, err
 		}
 		byBucket[bucketUnix] = audit.SeriesPoint{
-			BucketStart: time.Unix(bucketUnix, 0).UTC(),
-			BucketEnd:   time.Unix(bucketUnix+step, 0).UTC(),
-			Requests:    requests,
-			Failures:    failures,
-			Tokens:      tokens,
+			BucketStart:       time.Unix(bucketUnix, 0).UTC(),
+			BucketEnd:         time.Unix(bucketUnix+step, 0).UTC(),
+			Requests:          requests,
+			Failures:          failures,
+			Tokens:            tokens,
+			InputTokens:       inputTokens,
+			CachedInputTokens: cachedTokens,
+			OutputTokens:      outputTokens,
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -328,7 +336,10 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 		`SELECT
 			(CAST(strftime('%s', replace(substr(started_at,1,19),'T',' ')) AS INTEGER) / ?) * ? AS bucket,
 			CASE WHEN TRIM(model)='' THEN '(unknown)' ELSE model END AS name,
-			COALESCE(SUM(total_tokens), 0) AS tokens
+			COALESCE(SUM(total_tokens), 0) AS tokens,
+			COALESCE(SUM(input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+			COALESCE(SUM(output_tokens), 0) AS output_tokens
 		FROM request_audits
 		WHERE started_at >= ? AND started_at < ?
 		GROUP BY bucket, name
@@ -341,17 +352,20 @@ func (r *SQLite) AuditSeries(ctx context.Context, from, to time.Time, bucket tim
 	defer modelRows.Close()
 	modelsByBucket := make(map[int64][]audit.SeriesModelUsage)
 	for modelRows.Next() {
-		var bucketUnix, tokens int64
+		var bucketUnix, tokens, inputTokens, cachedTokens, outputTokens int64
 		var name string
-		if err := modelRows.Scan(&bucketUnix, &name, &tokens); err != nil {
+		if err := modelRows.Scan(&bucketUnix, &name, &tokens, &inputTokens, &cachedTokens, &outputTokens); err != nil {
 			return nil, err
 		}
 		if len(modelsByBucket[bucketUnix]) >= 8 {
 			continue
 		}
 		modelsByBucket[bucketUnix] = append(modelsByBucket[bucketUnix], audit.SeriesModelUsage{
-			Model:  name,
-			Tokens: tokens,
+			Model:             name,
+			Tokens:            tokens,
+			InputTokens:       inputTokens,
+			CachedInputTokens: cachedTokens,
+			OutputTokens:      outputTokens,
 		})
 	}
 	if err := modelRows.Err(); err != nil {
@@ -398,7 +412,10 @@ func (r *SQLite) auditTop(ctx context.Context, from, to time.Time, limit int, co
 	query := fmt.Sprintf(
 		`SELECT CASE WHEN TRIM(%s)='' THEN '(unknown)' ELSE %s END AS name,
 		        COUNT(*) AS c,
-		        COALESCE(SUM(total_tokens), 0) AS tokens
+		        COALESCE(SUM(total_tokens), 0) AS tokens,
+		        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		        COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+		        COALESCE(SUM(output_tokens), 0) AS output_tokens
 		 FROM request_audits
 		 WHERE started_at >= ? AND started_at < ?
 		 GROUP BY name
@@ -413,7 +430,7 @@ func (r *SQLite) auditTop(ctx context.Context, from, to time.Time, limit int, co
 	var out []audit.NamedCount
 	for rows.Next() {
 		var item audit.NamedCount
-		if err := rows.Scan(&item.Name, &item.Count, &item.Tokens); err != nil {
+		if err := rows.Scan(&item.Name, &item.Count, &item.Tokens, &item.InputTokens, &item.CachedInputTokens, &item.OutputTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

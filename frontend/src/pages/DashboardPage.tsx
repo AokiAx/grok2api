@@ -106,10 +106,16 @@ export function DashboardPage() {
     period === "24h" ? "近 24 小时" : period === "7d" ? "近 7 天" : "近 30 天";
   const inputTokens = usage?.inputTokens ?? 0;
   const cachedInputTokens = usage?.cachedInputTokens ?? 0;
+  const sampledRequests = usage?.sampledRequests ?? 0;
+  const usageSource = usage?.usageSource || (sampledRequests > 0 ? "upstream" : "none");
+  const usageSampled = usageSource === "upstream" && sampledRequests > 0;
   const cacheHitRate =
-    inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : 0;
+    usageSampled && inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : 0;
   const cacheHitDisplay =
-    inputTokens > 0 ? `${cacheHitRate.toFixed(1)}%` : "—";
+    usageSampled && inputTokens > 0 ? `${cacheHitRate.toFixed(1)}%` : usageSampled ? "0.0%" : "—";
+  const usageDetailHint = usageSampled
+    ? `${periodLabel} · 上游 usage（已采样 ${n(sampledRequests)} 次）`
+    : `${periodLabel} · 未采样到上游 usage（非 0% 命中）`;
 
   return (
     <div className="space-y-6">
@@ -247,7 +253,7 @@ export function DashboardPage() {
       <section aria-label="Token 明细" className="grid gap-3 xl:grid-cols-3">
         <MetricGroup
           title="Token 明细"
-          description={`${periodLabel} · 来自上游 usage`}
+          description={usageDetailHint}
           metrics={[
             {
               label: "输入",
@@ -410,7 +416,16 @@ function TopList({
   items,
   empty,
 }: {
-  items: Array<{ name?: string; model?: string; count?: number; requests?: number; tokens?: number }>;
+  items: Array<{
+    name?: string;
+    model?: string;
+    count?: number;
+    requests?: number;
+    tokens?: number;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+  }>;
   empty: string;
 }) {
   if (!items.length) {
@@ -422,20 +437,31 @@ function TopList({
       {items.slice(0, 8).map((item, index) => {
         const count = Number(item.requests ?? item.count) || 0;
         const tokens = Number(item.tokens) || 0;
+        const input = Number(item.inputTokens) || 0;
+        const cached = Number(item.cachedInputTokens) || 0;
+        const output = Number(item.outputTokens) || 0;
+        const hit = input > 0 ? `${((cached / input) * 100).toFixed(0)}%` : "—";
         const width = `${Math.max(6, (count / max) * 100)}%`;
         const label = item.model || item.name || "—";
         return (
           <li key={`${label}-${index}`} className="space-y-1">
             <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="min-w-0 truncate font-mono text-[11px]">{label}</span>
+              <span className="min-w-0 truncate font-medium" title={label}>
+                {label}
+              </span>
               <span className="shrink-0 tabular-nums text-muted-foreground">
-                {n(count)}
-                {tokens > 0 ? ` · ${n(tokens)} tok` : ""}
+                {n(count)} 次
               </span>
             </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
-              <div className="h-full rounded-full bg-foreground/70" style={{ width }} />
+            <div className="h-1.5 overflow-hidden rounded-full bg-secondary/70">
+              <div className="h-full rounded-full bg-primary/70" style={{ width }} />
             </div>
+            <p className="truncate text-[11px] text-muted-foreground">
+              总 {n(tokens)}
+              {input || output || cached
+                ? ` · 入 ${n(input)} / 缓存 ${n(cached)} (${hit}) / 出 ${n(output)}`
+                : ""}
+            </p>
           </li>
         );
       })}

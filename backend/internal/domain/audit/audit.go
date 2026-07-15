@@ -6,27 +6,27 @@ import "time"
 
 // Request is one client-facing gateway call (chat/responses/messages/models/billing).
 type Request struct {
-	ID           string
-	RequestID    string
-	StartedAt    time.Time
-	FinishedAt   time.Time
-	DurationMS   int64
-	Method       string
-	Path         string
-	Operation    string
-	Model        string
-	ClientKeyID  string
-	AccountID    string
-	StatusCode   int
-	Success      bool
-	ErrorType          string
-	ErrorCode          string
-	InputTokens        int64
-	CachedInputTokens  int64
-	OutputTokens       int64
-	TotalTokens        int64
-	AttemptCount       int
-	Stream             bool
+	ID                string
+	RequestID         string
+	StartedAt         time.Time
+	FinishedAt        time.Time
+	DurationMS        int64
+	Method            string
+	Path              string
+	Operation         string
+	Model             string
+	ClientKeyID       string
+	AccountID         string
+	StatusCode        int
+	Success           bool
+	ErrorType         string
+	ErrorCode         string
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
+	TotalTokens       int64
+	AttemptCount      int
+	Stream            bool
 }
 
 // Attempt is one account try within a request (rotation/retry).
@@ -49,10 +49,13 @@ type UsageSummary struct {
 	Requests           int64
 	SuccessfulRequests int64
 	FailedRequests     int64
-	InputTokens        int64
-	CachedInputTokens  int64
-	OutputTokens       int64
-	TotalTokens        int64
+	// SampledRequests counts rows where at least one token field is non-zero.
+	// Zero sampled + non-zero requests means usage was not observed (not "0% cache hit").
+	SampledRequests   int64
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
+	TotalTokens       int64
 	// P95DurationMS is approximate from stored durations (percentile sample).
 	P95DurationMS int64
 	SuccessRate   float64
@@ -60,25 +63,34 @@ type UsageSummary struct {
 
 // SeriesModelUsage is per-model token volume inside one series bucket.
 type SeriesModelUsage struct {
-	Model  string
-	Tokens int64
+	Model             string
+	Tokens            int64
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
 }
 
 // SeriesPoint is a time-bucketed counter.
 type SeriesPoint struct {
-	BucketStart time.Time
-	BucketEnd   time.Time
-	Requests    int64
-	Failures    int64
-	Tokens      int64
-	Models      []SeriesModelUsage
+	BucketStart       time.Time
+	BucketEnd         time.Time
+	Requests          int64
+	Failures          int64
+	Tokens            int64
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
+	Models            []SeriesModelUsage
 }
 
 // NamedCount is a ranked aggregation row.
 type NamedCount struct {
-	Name   string
-	Count  int64
-	Tokens int64
+	Name              string
+	Count             int64
+	Tokens            int64
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
 }
 
 // RecentFailure is a compact failure row for dashboards.

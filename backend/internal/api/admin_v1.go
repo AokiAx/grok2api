@@ -297,10 +297,16 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 	recentFailures := []any{}
 	if s.audits != nil {
 		if u, err := s.audits.AuditUsageSummary(request.Context(), from, now); err == nil {
+			usageSource := "none"
+			if u.SampledRequests > 0 {
+				usageSource = "upstream"
+			}
 			usage = map[string]any{
 				"requests":           u.Requests,
 				"successfulRequests": u.SuccessfulRequests,
 				"failedRequests":     u.FailedRequests,
+				"sampledRequests":    u.SampledRequests,
+				"usageSource":        usageSource,
 				"inputTokens":        u.InputTokens,
 				"cachedInputTokens":  u.CachedInputTokens,
 				"outputTokens":       u.OutputTokens,
@@ -324,8 +330,11 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 				models := make([]any, 0, len(p.Models))
 				for _, m := range p.Models {
 					models = append(models, map[string]any{
-						"model":  m.Model,
-						"tokens": m.Tokens,
+						"model":             m.Model,
+						"tokens":            m.Tokens,
+						"inputTokens":       m.InputTokens,
+						"cachedInputTokens": m.CachedInputTokens,
+						"outputTokens":      m.OutputTokens,
 					})
 				}
 				end := p.BucketEnd
@@ -333,26 +342,46 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 					end = p.BucketStart.Add(bucket)
 				}
 				series = append(series, map[string]any{
-					"bucketStart": p.BucketStart.Format(time.RFC3339),
-					"start":       p.BucketStart.Format(time.RFC3339),
-					"end":         end.Format(time.RFC3339),
-					"requests":    p.Requests,
-					"failures":    p.Failures,
-					"tokens":      p.Tokens,
-					"models":      models,
+					"bucketStart":       p.BucketStart.Format(time.RFC3339),
+					"start":             p.BucketStart.Format(time.RFC3339),
+					"end":               end.Format(time.RFC3339),
+					"requests":          p.Requests,
+					"failures":          p.Failures,
+					"tokens":            p.Tokens,
+					"inputTokens":       p.InputTokens,
+					"cachedInputTokens": p.CachedInputTokens,
+					"outputTokens":      p.OutputTokens,
+					"models":            models,
 				})
 			}
 		}
 		if rows, err := s.audits.AuditTopModels(request.Context(), from, now, 10); err == nil {
 			topModels = make([]any, 0, len(rows))
 			for _, row := range rows {
-				topModels = append(topModels, map[string]any{"name": row.Name, "model": row.Name, "count": row.Count, "requests": row.Count, "tokens": row.Tokens})
+				topModels = append(topModels, map[string]any{
+					"name":              row.Name,
+					"model":             row.Name,
+					"count":             row.Count,
+					"requests":          row.Count,
+					"tokens":            row.Tokens,
+					"inputTokens":       row.InputTokens,
+					"cachedInputTokens": row.CachedInputTokens,
+					"outputTokens":      row.OutputTokens,
+				})
 			}
 		}
 		if rows, err := s.audits.AuditTopAccounts(request.Context(), from, now, 10); err == nil {
 			topAccounts = make([]any, 0, len(rows))
 			for _, row := range rows {
-				topAccounts = append(topAccounts, map[string]any{"name": row.Name, "count": row.Count, "requests": row.Count, "tokens": row.Tokens})
+				topAccounts = append(topAccounts, map[string]any{
+					"name":              row.Name,
+					"count":             row.Count,
+					"requests":          row.Count,
+					"tokens":            row.Tokens,
+					"inputTokens":       row.InputTokens,
+					"cachedInputTokens": row.CachedInputTokens,
+					"outputTokens":      row.OutputTokens,
+				})
 			}
 		}
 		if rows, err := s.audits.AuditRecentFailures(request.Context(), from, now, 20); err == nil {
