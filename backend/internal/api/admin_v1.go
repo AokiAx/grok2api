@@ -359,6 +359,17 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 			activeKeys = listed.Total
 		}
 	}
+	enabledModels, totalModels := 0, 0
+	if s.modelAdmin != nil {
+		if all, err := s.modelAdmin.ListModels(request.Context(), true); err == nil {
+			totalModels = len(all)
+			for _, m := range all {
+				if m.Enabled {
+					enabledModels++
+				}
+			}
+		}
+	}
 	writeAdminOK(writer, http.StatusOK, map[string]any{
 		"period":      period,
 		"generatedAt": now.Format(time.RFC3339),
@@ -369,8 +380,8 @@ func (s *Server) adminV1Dashboard(writer http.ResponseWriter, request *http.Requ
 		"resources": map[string]any{
 			"activeAccounts":   summary.ReadyAccounts,
 			"totalAccounts":    summary.TotalAccounts,
-			"enabledModels":    1,
-			"totalModels":      1,
+			"enabledModels":    enabledModels,
+			"totalModels":      totalModels,
 			"activeClientKeys": activeKeys,
 			"totalClientKeys":  totalKeys,
 			"allTimeRequests":  summary.TotalRequests,

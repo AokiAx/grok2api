@@ -43,6 +43,7 @@ type runtimeRepository interface {
 	repository.ClientKeyRepository
 	repository.LegacySecurityBootstrapRepository
 	repository.AuditRepository
+	repository.ModelRegistryRepository
 }
 
 type serveCommand func(context.Context, config.Config, runtimeRepository) error
@@ -433,12 +434,16 @@ func newAPIHandler(
 		api.WithClientKeys(clientKeyService),
 		api.WithReadiness(readiness),
 		api.WithAuditReader(audits),
+		api.WithModelAdmin(repo),
 	}
 	if frontendFS != nil {
 		serverOptions = append(serverOptions, api.WithFrontend(frontendFS))
 	}
 	if tracer != nil {
 		serverOptions = append(serverOptions, api.WithDebugTrace(tracer))
+	}
+	if models, err := repo.ListModels(context.Background(), false); err == nil {
+		serverOptions = append(serverOptions, api.WithModelCatalog(sqlite.CatalogFromRegistry(models)))
 	}
 	return api.NewServer(gateway, status, "", serverOptions...).Handler()
 }

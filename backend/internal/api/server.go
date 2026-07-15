@@ -19,6 +19,7 @@ import (
 	"github.com/AokiAx/grok2api/backend/internal/compat"
 	"github.com/AokiAx/grok2api/backend/internal/domain/account"
 	"github.com/AokiAx/grok2api/backend/internal/domain/audit"
+	"github.com/AokiAx/grok2api/backend/internal/domain/modelreg"
 	"github.com/AokiAx/grok2api/backend/internal/intercept"
 	"github.com/AokiAx/grok2api/backend/internal/repository"
 	"github.com/AokiAx/grok2api/backend/internal/requestctx"
@@ -65,6 +66,8 @@ type Server struct {
 	frontend         fs.FS
 	readiness        Readiness
 	audits           AuditReader
+	modelAdmin       ModelAdmin
+	onModelsChanged  func([]modelreg.Model)
 	maxBodyBytes     int64
 	handler          http.Handler
 }
@@ -172,6 +175,20 @@ type AuditReader interface {
 	AuditRecentFailures(context.Context, time.Time, time.Time, int) ([]audit.RecentFailure, error)
 }
 
+// WithModelAdmin installs the managed model registry for admin APIs and catalog refresh.
+func WithModelAdmin(admin ModelAdmin) Option {
+	return func(server *Server) {
+		server.modelAdmin = admin
+	}
+}
+
+// WithModelCatalogReloader installs a callback used when models change.
+func WithModelCatalogReloader(fn func([]modelreg.Model)) Option {
+	return func(server *Server) {
+		server.onModelsChanged = fn
+	}
+}
+
 // WithAuditReader installs request audit analytics for the admin dashboard.
 func WithAuditReader(reader AuditReader) Option {
 	return func(server *Server) {
@@ -224,6 +241,7 @@ func NewServer(gateway Gateway, status StatusProvider, apiKey string, options ..
 		server.registerSPARoutes(mux)
 	}
 	server.registerAdminRoutes(mux)
+	server.registerModelAdminRoutes(mux)
 	var handler http.Handler = mux
 	if server.tracer != nil && server.tracer.Enabled() {
 		// Temporary protocol debugger: client ↔ bridge ↔ upstream stages.

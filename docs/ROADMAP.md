@@ -21,6 +21,7 @@
 | 前端 C3 容器交付 | Docker 构建 `frontend/dist` → `/app/frontend/dist` → `/` |
 | P0-4 HTTP 生产基线 | Request ID、安全头、访问日志、全局 body limit、`/healthz`/`/readyz`、进程 readiness 门控、401/429/503 错误码 |
 | 请求审计 Dashboard | `request_audits`/`request_attempts`、窗口成功率/P95/Top 模型账号/最近失败、默认 30 天 prune |
+| 模型注册表 | SQLite `models` seed+managed、别名、启停；`/api/admin/v1/models`；运行时 Catalog facade |
 
 ---
 

@@ -56,8 +56,8 @@ func TestV4SchemaUpgradesToV5WithoutLosingAccountsEventsOrMetadata(t *testing.T)
 		t.Fatalf("upgrade v4: %v", err)
 	}
 	defer repo.Close()
-	if got := repo.SchemaVersion(ctx); got != 6 {
-		t.Fatalf("schema version = %d; want 6", got)
+	if got := repo.SchemaVersion(ctx); got != 7 {
+		t.Fatalf("schema version = %d; want 7", got)
 	}
 	item, found, err := repo.GetAccount(ctx, "legacy-v4")
 	if err != nil || !found || item.Priority != 9 || item.MaxActive != 2 {

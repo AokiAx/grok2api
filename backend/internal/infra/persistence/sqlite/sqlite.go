@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 type SQLite struct {
 	db     *sql.DB
@@ -265,6 +265,9 @@ func (r *SQLite) migrate(ctx context.Context) error {
 		}
 	}
 	if err := r.ensureRequestAuditSchema(ctx); err != nil {
+		return err
+	}
+	if err := r.ensureModelRegistrySchema(ctx); err != nil {
 		return err
 	}
 	if err := r.ensureAccountColumns(ctx); err != nil {
