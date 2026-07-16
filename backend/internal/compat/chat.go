@@ -20,7 +20,11 @@ func NormalizeChatRequest(payload []byte, defaultModel string) ([]byte, string, 
 	stream, _ := input["stream"].(bool)
 	if effort := extractReasoningEffort(input); effort != "" {
 		input["reasoning_effort"] = effort
-		if _, ok := input["reasoning"].(map[string]any); !ok {
+		// Keep nested reasoning.effort in sync when the client already sent a map.
+		if reasoning, ok := input["reasoning"].(map[string]any); ok {
+			reasoning["effort"] = effort
+			input["reasoning"] = reasoning
+		} else {
 			input["reasoning"] = map[string]any{"effort": effort}
 		}
 	}
@@ -118,13 +122,21 @@ func extractReasoningEffort(input map[string]any) string {
 	return ""
 }
 
+// normalizeEffort maps client aliases onto Grok-supported reasoning levels.
+// Production Grok reasoning models (incl. grok-4.5) accept low/medium/high only;
+// Codex/OpenAI often send xhigh/max/minimal, which upstream rejects as
+// "Invalid reasoning effort."
 func normalizeEffort(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
-		if strings.EqualFold(value, "max") {
-			return "xhigh"
-		}
+	case "none":
+		return "none"
+	case "minimal":
+		return "low"
+	case "low", "medium", "high":
 		return strings.ToLower(strings.TrimSpace(value))
+	case "xhigh", "max":
+		// Ceiling is high — xhigh is not accepted on grok-4.5.
+		return "high"
 	default:
 		return strings.TrimSpace(value)
 	}

@@ -146,9 +146,8 @@ func sanitizeResponsesMap(input map[string]any) (bool, []string, error) {
 		}
 	}
 
-	// grok-4.5 rejects reasoning_effort=none ("This model does not support … none").
-	// Drop none so the request is valid; models that support disable get default.
-	if stripped := stripUnsupportedReasoningNone(input); stripped {
+	// Clamp/strip reasoning effort values Grok rejects (none/xhigh/max/minimal).
+	if clamped := clampUnsupportedReasoningEffort(input); clamped {
 		changed = true
 	}
 
@@ -175,26 +174,65 @@ func sanitizeResponsesMap(input map[string]any) (bool, []string, error) {
 	return changed, warnings, nil
 }
 
-// stripUnsupportedReasoningNone removes reasoning_effort/reasoning.effort when
-// the value is "none" (unsupported on grok-4.5 and most production models).
-func stripUnsupportedReasoningNone(input map[string]any) bool {
+// clampUnsupportedReasoningEffort rewrites or drops effort values that Grok
+// rejects on production reasoning models (notably grok-4.5):
+//
+//	none     → strip (model cannot disable reasoning)
+//	minimal  → low
+//	xhigh/max → high (ceiling; Codex often requests max/xhigh)
+//
+// Unknown non-empty values are left for the upstream to validate.
+func clampUnsupportedReasoningEffort(input map[string]any) bool {
 	changed := false
-	if effort, ok := input["reasoning_effort"].(string); ok && strings.EqualFold(strings.TrimSpace(effort), "none") {
-		delete(input, "reasoning_effort")
-		changed = true
+	if effort, ok := input["reasoning_effort"].(string); ok {
+		if next, drop, ok := clampEffortValue(effort); ok {
+			if drop {
+				delete(input, "reasoning_effort")
+			} else {
+				input["reasoning_effort"] = next
+			}
+			changed = true
+		}
 	}
 	if reasoning, ok := input["reasoning"].(map[string]any); ok {
-		if effort, ok := reasoning["effort"].(string); ok && strings.EqualFold(strings.TrimSpace(effort), "none") {
-			delete(reasoning, "effort")
-			changed = true
-			if len(reasoning) == 0 {
-				delete(input, "reasoning")
-			} else {
-				input["reasoning"] = reasoning
+		if effort, ok := reasoning["effort"].(string); ok {
+			if next, drop, ok := clampEffortValue(effort); ok {
+				if drop {
+					delete(reasoning, "effort")
+				} else {
+					reasoning["effort"] = next
+				}
+				changed = true
+				if len(reasoning) == 0 {
+					delete(input, "reasoning")
+				} else {
+					input["reasoning"] = reasoning
+				}
 			}
 		}
 	}
 	return changed
+}
+
+// clampEffortValue returns (normalized, drop, changed).
+func clampEffortValue(effort string) (string, bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none":
+		return "", true, true
+	case "minimal":
+		return "low", false, true
+	case "xhigh", "max":
+		return "high", false, true
+	case "low", "medium", "high":
+		// Already valid; only rewrite if casing differs.
+		normalized := strings.ToLower(strings.TrimSpace(effort))
+		if normalized != effort {
+			return normalized, false, true
+		}
+		return effort, false, false
+	default:
+		return effort, false, false
+	}
 }
 
 // promoteResponseFormat maps OpenAI Chat Completions response_format onto

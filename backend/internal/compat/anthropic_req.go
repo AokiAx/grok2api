@@ -589,14 +589,8 @@ func anthropicOutputFormat(raw any) map[string]any {
 }
 
 func normalizeAnthropicEffort(effort string) string {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "low", "medium", "high":
-		return strings.ToLower(strings.TrimSpace(effort))
-	case "xhigh", "max":
-		return "xhigh"
-	default:
-		return normalizeEffort(effort)
-	}
+	// Reuse shared Grok ceiling (xhigh/max → high, minimal → low).
+	return normalizeEffort(effort)
 }
 
 func effortFromThinkingBudget(budget int) string {

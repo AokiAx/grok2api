@@ -312,8 +312,12 @@ func TestNormalizeChatRequestFillsModelAndEffort(t *testing.T) {
 	if err := json.Unmarshal(out, &payload); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if payload["reasoning_effort"] != "xhigh" {
+	// max/xhigh ceiling on production Grok is high (not xhigh).
+	if payload["reasoning_effort"] != "high" {
 		t.Fatalf("effort=%#v", payload["reasoning_effort"])
+	}
+	if reasoning, _ := payload["reasoning"].(map[string]any); reasoning["effort"] != "high" {
+		t.Fatalf("reasoning.effort=%#v", reasoning)
 	}
 }
 
@@ -798,6 +802,70 @@ func TestCollapseSearchToolNameCollisionsDropsFunctionWebSearch(t *testing.T) {
 	}
 	if !sawBare || sawFnWeb || !sawRead {
 		t.Fatalf("bare=%v fnWeb=%v read=%v tools=%#v", sawBare, sawFnWeb, sawRead, out)
+	}
+}
+
+func TestFinalizeClampsReasoningEffortAliases(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		want   string
+		absent bool
+	}{
+		{
+			name: "none stripped",
+			body: `{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			absent: true,
+		},
+		{
+			name: "xhigh to high",
+			body: `{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh","reasoning":{"effort":"xhigh"}}`,
+			want: "high",
+		},
+		{
+			name: "max to high",
+			body: `{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"max"}}`,
+			want: "high",
+		},
+		{
+			name: "minimal to low",
+			body: `{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":"hi"}],"reasoning_effort":"minimal"}`,
+			want: "low",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := compat.FinalizeResponsesUpstream([]byte(tc.body), compat.ModelHints{})
+			if err != nil {
+				t.Fatalf("finalize: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(out, &payload); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if tc.absent {
+				if _, ok := payload["reasoning_effort"]; ok {
+					t.Fatalf("reasoning_effort should be stripped: %#v", payload["reasoning_effort"])
+				}
+				if reasoning, ok := payload["reasoning"].(map[string]any); ok {
+					if _, has := reasoning["effort"]; has {
+						t.Fatalf("reasoning.effort should be stripped: %#v", reasoning)
+					}
+				}
+				return
+			}
+			if payload["reasoning_effort"] != tc.want {
+				// nested-only inputs may only rewrite reasoning.effort
+				if reasoning, _ := payload["reasoning"].(map[string]any); reasoning["effort"] != tc.want {
+					t.Fatalf("effort top=%#v nested=%#v want %q", payload["reasoning_effort"], reasoning, tc.want)
+				}
+			}
+			if reasoning, ok := payload["reasoning"].(map[string]any); ok {
+				if reasoning["effort"] != tc.want && payload["reasoning_effort"] != tc.want {
+					t.Fatalf("reasoning=%#v top=%#v want %q", reasoning, payload["reasoning_effort"], tc.want)
+				}
+			}
+		})
 	}
 }
 
