@@ -77,13 +77,21 @@ func TestFinalizeResponsesUpstreamForcesStreamAndStrips(t *testing.T) {
 	if payload["prompt_cache_key"] != "abc" {
 		t.Fatalf("prompt_cache_key=%#v", payload["prompt_cache_key"])
 	}
-	// external_web_access:true maps backend_search but does NOT inject tools
-	// (inject only via InjectDefaultSearchTools).
-	if tools, ok := payload["tools"]; ok && tools != nil {
-		if list, _ := tools.([]any); len(list) > 0 {
-			t.Fatalf("must not auto-inject search tools, got %#v", tools)
-		}
+	// SupportsBackendSearch=true → default native search tools.
+	tools, _ := payload["tools"].([]any)
+	types := map[string]bool{}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		types[stringValueLocalPrep(tool["type"])] = true
 	}
+	if !types["web_search"] || !types["x_search"] {
+		t.Fatalf("expected default web_search+x_search, got %#v", tools)
+	}
+}
+
+func stringValueLocalPrep(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func TestEnsureDefaultSearchToolsRespectsDisableAndDedupes(t *testing.T) {

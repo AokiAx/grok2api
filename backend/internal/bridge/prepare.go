@@ -60,6 +60,7 @@ func (p *Pipeline) hintsFor(model string) compat.ModelHints {
 		return hints
 	}
 	if info, ok := p.Catalog.Get(model); ok {
+		// Catalog flag: model can use native search → inject web_search/x_search by default.
 		hints.SupportsBackendSearch = info.SupportsBackendSearch
 	}
 	return hints

@@ -78,14 +78,20 @@ func TestPipelineChatNonStreamAggregatesResponses(t *testing.T) {
 	if forwarded["stream"] != true {
 		t.Fatalf("expected forced stream=true: %#v", forwarded)
 	}
-	// Bare chat must not force backend_search / inject search tools.
-	if _, ok := forwarded["backend_search"]; ok {
-		t.Fatalf("bare chat must not set backend_search: %#v", forwarded)
+	// Catalog models with SupportsBackendSearch get native search by default.
+	if forwarded["backend_search"] != true {
+		t.Fatalf("expected backend_search for native search models: %#v", forwarded)
 	}
-	if tools, ok := forwarded["tools"]; ok && tools != nil {
-		if list, _ := tools.([]any); len(list) > 0 {
-			t.Fatalf("bare chat must not inject tools: %#v", tools)
+	tools, _ := forwarded["tools"].([]any)
+	types := map[string]bool{}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		if tname, _ := tool["type"].(string); tname != "" {
+			types[tname] = true
 		}
+	}
+	if !types["web_search"] || !types["x_search"] {
+		t.Fatalf("expected default web_search+x_search, got %#v", tools)
 	}
 }
 

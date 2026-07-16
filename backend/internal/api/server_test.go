@@ -136,7 +136,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5",
 	}
 }
 
-func TestChatRoutesResponsesBackendWithoutForcedSearch(t *testing.T) {
+func TestChatRoutesResponsesBackendWithDefaultNativeSearch(t *testing.T) {
 	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.5\",\"output_text\":\"searched\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
 	gateway := &fakeGateway{requestResult: service.ChatResult{
 		Status: http.StatusOK,
@@ -163,14 +163,19 @@ func TestChatRoutesResponsesBackendWithoutForcedSearch(t *testing.T) {
 	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
 		t.Fatalf("decode forwarded: %v", err)
 	}
-	// Bare chat must not force backend_search or inject search tools.
-	if _, ok := forwarded["backend_search"]; ok {
-		t.Fatalf("bare chat must not set backend_search: %#v", forwarded)
+	if forwarded["backend_search"] != true {
+		t.Fatalf("backend_search missing/false: %#v", forwarded)
 	}
-	if tools, ok := forwarded["tools"]; ok && tools != nil {
-		if list, _ := tools.([]any); len(list) > 0 {
-			t.Fatalf("bare chat must not inject tools: %#v", tools)
+	tools, _ := forwarded["tools"].([]any)
+	have := map[string]bool{}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		if tname, _ := tool["type"].(string); tname != "" {
+			have[tname] = true
 		}
+	}
+	if !have["web_search"] || !have["x_search"] {
+		t.Fatalf("expected default native search tools, got %#v", tools)
 	}
 	if forwarded["stream"] != true {
 		t.Fatalf("expected upstream stream=true even for non-stream clients: %#v", forwarded)
@@ -245,8 +250,8 @@ func TestChatStreamsConvertedResponsesSSE(t *testing.T) {
 	if err := json.Unmarshal(gateway.payload, &forwarded); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if _, ok := forwarded["backend_search"]; ok {
-		t.Fatalf("bare stream chat must not set backend_search: %#v", forwarded)
+	if forwarded["backend_search"] != true {
+		t.Fatalf("backend_search = %#v", forwarded["backend_search"])
 	}
 }
 
@@ -494,18 +499,23 @@ func TestResponsesRouteFlattensFunctionToolsAndChoice(t *testing.T) {
 	}
 	tools, _ := forwarded["tools"].([]any)
 	var tool map[string]any
+	haveSearch := map[string]bool{}
 	for _, raw := range tools {
 		item, _ := raw.(map[string]any)
-		// No default web_search/x_search inject (opt-in only).
-		if item["type"] == "web_search" || item["type"] == "x_search" {
-			t.Fatalf("must not auto-inject search tools: %#v", tools)
-		}
-		if item["type"] == "function" && item["name"] == "Inspect" {
-			tool = item
+		switch item["type"] {
+		case "web_search", "x_search":
+			haveSearch[item["type"].(string)] = true
+		case "function":
+			if item["name"] == "Inspect" {
+				tool = item
+			}
 		}
 	}
 	if tool == nil {
 		t.Fatalf("Inspect function missing: %#v", tools)
+	}
+	if !haveSearch["web_search"] || !haveSearch["x_search"] {
+		t.Fatalf("default native search tools missing: %#v", tools)
 	}
 	if _, ok := tool["parameters"].(map[string]any); !ok {
 		t.Fatalf("top-level parameters missing: %#v", tool)
@@ -546,9 +556,9 @@ func TestAnthropicMessagesConvertsRequestAndResponse(t *testing.T) {
 	if _, ok := forwarded["input"]; !ok {
 		t.Fatalf("forwarded missing input: %#v", forwarded)
 	}
-	// Bare Anthropic turn must not force backend_search (search is opt-in).
-	if _, ok := forwarded["backend_search"]; ok {
-		t.Fatalf("bare anthropic must not set backend_search: %#v", forwarded)
+	// Catalog models with native search get backend_search by default.
+	if forwarded["backend_search"] != true {
+		t.Fatalf("backend_search missing on anthropic path: %#v", forwarded)
 	}
 	var response map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {

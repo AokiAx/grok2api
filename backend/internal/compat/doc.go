@@ -14,8 +14,8 @@
 //  2. ChatToResponses / NormalizeResponsesRequest — field mapping + tools
 //  3. ChatMessagesToResponsesInput — multi-turn tool history → Responses items
 //     (images preserved as input_image; call_id paired in order)
-//  4. FinalizeResponsesUpstream — whitelist, align backend_search with client
-//     search signals (no force-on), optional InjectDefaultSearchTools, stream:true
+//  4. FinalizeResponsesUpstream — whitelist, align backend_search; default-inject
+//     web_search/x_search when the model SupportsBackendSearch, stream:true
 //  5. AggregateResponsesStream / ResponsesToChatStream / ResponsesToChat — egress
 //
 // Anthropic Messages always use a direct path (no Chat hop):

@@ -8,12 +8,16 @@ import (
 
 // ModelHints carries catalog-derived policy for preparing upstream Responses requests.
 type ModelHints struct {
-	// SupportsBackendSearch means the model can honor native search. It does NOT
-	// auto-inject search tools (search is opt-in only).
+	// SupportsBackendSearch means the model can honor native search.
+	// When true, Finalize injects bare web_search + x_search by default (unless
+	// the client already set backend_search/web_search to false).
 	SupportsBackendSearch bool
-	// InjectDefaultSearchTools prepends bare web_search + x_search when true and
-	// the client has not disabled search. Default false — clients must request search.
+	// InjectDefaultSearchTools forces search-tool injection even when
+	// SupportsBackendSearch is false. Prefer SupportsBackendSearch for normal paths.
 	InjectDefaultSearchTools bool
+	// DisableDefaultSearchTools skips default web_search/x_search injection even
+	// when SupportsBackendSearch is true (client may still send search tools).
+	DisableDefaultSearchTools bool
 }
 
 // NormalizeResponsesRequest turns a client Responses (or chat-shaped) body into a
@@ -153,8 +157,9 @@ func PrepareResponsesFromAnthropicWithOptions(payload []byte, opts AnthropicToRe
 // FinalizeResponsesUpstream applies catalog policy and hard invariants required
 // before calling the Grok /responses endpoint:
 //  1. strip unknown fields + normalize tools/input once (avoid 422)
-//  2. align backend_search with client search signals (never force-on by model alone)
-//  3. optionally inject web_search + x_search when InjectDefaultSearchTools
+//  2. align backend_search with client search signals
+//  3. default-inject web_search + x_search when the model supports native search
+//     (skipped if client disabled search or DisableDefaultSearchTools)
 //  4. force stream:true so the gateway can always read SSE (non-stream clients
 //     are aggregated after the fact)
 func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error) {
@@ -169,12 +174,12 @@ func FinalizeResponsesUpstreamDetailed(payload []byte, hints ModelHints) ([]byte
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// Align backend_search with existing client search signals only — no force-true.
+	// Align backend_search with existing client search signals.
 	if ensured, ensureErr := AlignBackendSearch(body); ensureErr == nil {
 		body = ensured
 	}
-	// Opt-in default search tools (off by default).
-	if hints.InjectDefaultSearchTools {
+	// Native search tools: on by default for models that support backend search.
+	if shouldInjectDefaultSearchTools(hints) {
 		if withTools, toolErr := EnsureDefaultSearchTools(body, true); toolErr == nil {
 			body = withTools
 			// Re-sanitize after inject so extras/collisions cannot leak.
@@ -193,6 +198,13 @@ func FinalizeResponsesUpstreamDetailed(payload []byte, hints ModelHints) ([]byte
 		return nil, warnings, toolCompat, err
 	}
 	return forced, warnings, toolCompat, nil
+}
+
+func shouldInjectDefaultSearchTools(hints ModelHints) bool {
+	if hints.DisableDefaultSearchTools {
+		return false
+	}
+	return hints.SupportsBackendSearch || hints.InjectDefaultSearchTools
 }
 
 func mergeWarningCodes(a, b []string) []string {

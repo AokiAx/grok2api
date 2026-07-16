@@ -25,13 +25,23 @@ func (p *Pipeline) deliver(result Result, req prepared) (Result, error) {
 }
 
 func applyToolResponseRewrite(result Result, toolCompat *compat.ToolCompatibility) Result {
-	if toolCompat == nil || !toolCompat.HasRewrites() {
+	if toolCompat == nil {
 		return result
 	}
-	if result.Stream != nil {
-		result.Stream = toolCompat.RewriteResponseStream(result.Stream)
+	// Full rewrite path (aliases / local_shell). Avoid wrapping non-SSE JSON as SSE.
+	if toolCompat.HasRewrites() {
+		if result.Stream != nil {
+			result.Stream = toolCompat.RewriteResponseStream(result.Stream)
+			return result
+		}
+		if len(result.Body) > 0 {
+			if rewritten, err := toolCompat.RewriteResponseJSON(result.Body); err == nil {
+				result.Body = rewritten
+			}
+		}
 		return result
 	}
+	// visibleTools-only: restore client tools[] on buffered JSON bodies when present.
 	if len(result.Body) > 0 {
 		if rewritten, err := toolCompat.RewriteResponseJSON(result.Body); err == nil {
 			result.Body = rewritten

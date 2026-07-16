@@ -18,7 +18,10 @@ const (
 // RewriteResponseJSON restores client-facing tool names/types on a completed
 // Responses JSON body (or response.completed envelope).
 func (c *ToolCompatibility) RewriteResponseJSON(body []byte) ([]byte, error) {
-	if c == nil || !c.HasRewrites() || len(body) == 0 {
+	if c == nil || len(body) == 0 {
+		return body, nil
+	}
+	if !c.HasRewrites() && len(c.visibleTools) == 0 {
 		return body, nil
 	}
 	trimmed := bytes.TrimSpace(body)

@@ -974,7 +974,7 @@ func TestFinalizeClampsReasoningEffortAliases(t *testing.T) {
 	}
 }
 
-func TestFinalizeDropsReasoningEffortNoneAndCollapsesSearchWithoutInject(t *testing.T) {
+func TestFinalizeDropsReasoningEffortNoneAndInjectsNativeSearch(t *testing.T) {
 	body := []byte(`{
 		"model":"grok-4.5",
 		"stream":false,
@@ -982,7 +982,7 @@ func TestFinalizeDropsReasoningEffortNoneAndCollapsesSearchWithoutInject(t *test
 		"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}],
 		"reasoning_effort":"none"
 	}`)
-	// SupportsBackendSearch alone must NOT inject x_search (opt-in only).
+	// SupportsBackendSearch → default native search (web_search already present; inject x_search).
 	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: true})
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
@@ -1012,19 +1012,19 @@ func TestFinalizeDropsReasoningEffortNoneAndCollapsesSearchWithoutInject(t *test
 	if names["web_search:"] != 1 {
 		t.Fatalf("want one bare web_search, got %#v tools=%#v", names, tools)
 	}
-	if names["x_search:"] != 0 {
-		t.Fatalf("must not inject x_search without InjectDefaultSearchTools: %#v", tools)
+	if names["x_search:"] != 1 {
+		t.Fatalf("want default-injected x_search: %#v", tools)
 	}
 	if names["function:shell_command"] != 1 {
 		t.Fatalf("want shell_command preserved: %#v", names)
 	}
 }
 
-func TestFinalizeInjectDefaultSearchToolsOptIn(t *testing.T) {
+func TestFinalizeDisableDefaultSearchTools(t *testing.T) {
 	body := []byte(`{"model":"grok-4.5","stream":false,"input":[{"role":"user","content":"hi"}],"tools":[{"type":"function","name":"a","parameters":{"type":"object"}}]}`)
 	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{
-		SupportsBackendSearch:    true,
-		InjectDefaultSearchTools: true,
+		SupportsBackendSearch:     true,
+		DisableDefaultSearchTools: true,
 	})
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
@@ -1034,13 +1034,11 @@ func TestFinalizeInjectDefaultSearchToolsOptIn(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	tools, _ := payload["tools"].([]any)
-	types := map[string]bool{}
 	for _, raw := range tools {
 		tool, _ := raw.(map[string]any)
-		types[stringValueTest(tool["type"])] = true
-	}
-	if !types["web_search"] || !types["x_search"] {
-		t.Fatalf("opt-in inject expected web+x search, got %#v", tools)
+		if tool["type"] == "web_search" || tool["type"] == "x_search" {
+			t.Fatalf("DisableDefaultSearchTools must not inject search: %#v", tools)
+		}
 	}
 }
 

@@ -134,9 +134,11 @@ func (c *ToolCompatibility) Warnings() []string {
 	return append([]string(nil), c.warnings...)
 }
 
-// HasRewrites reports whether response-side name/type restore is needed.
+// HasRewrites reports whether response-side stream/body rewrite is needed.
+// Alias and local_shell restoration require parsing; visibleTools alone does not
+// (and must not wrap plain JSON upstream bodies as SSE).
 func (c *ToolCompatibility) HasRewrites() bool {
-	return c != nil && (len(c.aliases) > 0 || c.legacyLocalShell || len(c.visibleTools) > 0)
+	return c != nil && (len(c.aliases) > 0 || c.legacyLocalShell)
 }
 
 // CaptureVisibleTools stores the client-facing tools list for response restore.
