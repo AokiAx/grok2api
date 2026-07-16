@@ -21,14 +21,26 @@ import (
 //   - null message content → ""
 //   - role developer → system (Grok ModelInput rejects developer)
 //   - OpenAI compaction blobs / foreign encrypted_content → dropped or note
+//
+// call_id pairing: missing ids on calls/outputs are paired in order within one
+// request, not independently random.
 func SanitizeResponsesInput(raw any) any {
+	return SanitizeResponsesInputWithCompat(raw, newToolCompatibility())
+}
+
+// SanitizeResponsesInputWithCompat is SanitizeResponsesInput using a shared
+// ToolCompatibility (so apply_patch/shell aliases match the tools[] pass).
+func SanitizeResponsesInputWithCompat(raw any, state *ToolCompatibility) any {
+	if state == nil {
+		state = newToolCompatibility()
+	}
 	switch typed := raw.(type) {
 	case string:
 		return typed
 	case []any:
 		out := make([]any, 0, len(typed))
 		for _, item := range typed {
-			if sanitized := sanitizeInputItem(item); sanitized != nil {
+			if sanitized := sanitizeInputItem(item, state); sanitized != nil {
 				out = append(out, sanitized)
 			}
 		}
@@ -42,7 +54,7 @@ func SanitizeResponsesInput(raw any) any {
 	}
 }
 
-func sanitizeInputItem(raw any) any {
+func sanitizeInputItem(raw any, state *ToolCompatibility) any {
 	item, ok := raw.(map[string]any)
 	if !ok {
 		return nil
@@ -52,9 +64,21 @@ func sanitizeInputItem(raw any) any {
 	case "", "message":
 		return sanitizeMessageItem(item)
 	case "function_call", "tool_call":
-		return sanitizeFunctionCallItem(item)
+		return sanitizeFunctionCallItem(item, state)
 	case "function_call_output", "tool_result", "tool_call_output":
-		return sanitizeFunctionCallOutputItem(item)
+		return sanitizeFunctionCallOutputItem(item, state)
+	case "tool_search_call":
+		return toolSearchCallToFunctionCall(item, state)
+	case "tool_search_output":
+		return toolSearchOutputToFunctionCallOutput(item, state)
+	case "additional_tools":
+		return additionalToolsToHistoryMessage(item, state)
+	case "agent_message":
+		return agentMessageToHistory(item, state)
+	case "mcp_tool_call_output":
+		return mcpToolCallOutputToHistory(item)
+	case "compaction_trigger":
+		return compactionTriggerToHistory(state)
 	case "reasoning":
 		return sanitizeReasoningItem(item)
 	case "compaction", "compact_result", "compaction_result":
@@ -62,56 +86,64 @@ func sanitizeInputItem(raw any) any {
 		// ("Could not decode the compaction blob").
 		return historyNote("assistant", "compaction", item)
 	case "local_shell_call", "shell_call":
-		return localShellCallToFunctionCall(item)
+		return localShellCallToNativeOrFunction(item, state)
 	case "local_shell_call_output", "shell_call_output":
+		// When tools upgraded to native shell, keep shell_call_output shape.
+		if state != nil && (state.legacyLocalShell || state.nativeShell) {
+			return map[string]any{
+				"type":    "shell_call_output",
+				"call_id": state.takeCallID(firstNonEmptyString(item["call_id"], item["id"])),
+				"output":  firstNonNil(item["output"], item["result"]),
+			}
+		}
 		return map[string]any{
 			"type":    "function_call_output",
-			"call_id": firstNonEmptyString(item["call_id"], item["id"], "call_"+randomID(10)),
+			"call_id": state.takeCallID(firstNonEmptyString(item["call_id"], item["id"])),
 			"output":  stringifyOutput(firstNonNil(item["output"], item["result"])),
 		}
 	case "custom_tool_call":
-		return customToolCallToFunctionCall(item)
+		return customToolCallToFunctionCall(item, state)
 	case "custom_tool_call_output":
 		return map[string]any{
 			"type":    "function_call_output",
-			"call_id": firstNonEmptyString(item["call_id"], item["id"], "call_"+randomID(10)),
+			"call_id": state.takeCallID(firstNonEmptyString(item["call_id"], item["id"])),
 			"output":  stringifyOutput(firstNonNil(item["output"], item["result"])),
 		}
 	case "web_search_call":
 		return builtinCallToFunctionCall(item, "web_search", map[string]any{
 			"query":  firstNonEmptyString(item["query"], digString(item, "action", "query")),
 			"status": stringValue(item["status"]),
-		})
+		}, state)
 	case "web_search_call_output":
-		return builtinOutputToFunctionCallOutput(item)
+		return builtinOutputToFunctionCallOutput(item, state)
 	case "file_search_call":
 		return builtinCallToFunctionCall(item, "file_search", map[string]any{
 			"queries": firstNonNil(item["queries"], digAny(item, "action", "queries")),
 			"status":  stringValue(item["status"]),
-		})
+		}, state)
 	case "file_search_call_output":
-		return builtinOutputToFunctionCallOutput(item)
+		return builtinOutputToFunctionCallOutput(item, state)
 	case "code_interpreter_call":
 		return builtinCallToFunctionCall(item, "code_interpreter", map[string]any{
 			"code":   firstNonEmptyString(item["code"], digString(item, "action", "code")),
 			"status": stringValue(item["status"]),
-		})
+		}, state)
 	case "code_interpreter_call_output":
-		return builtinOutputToFunctionCallOutput(item)
+		return builtinOutputToFunctionCallOutput(item, state)
 	case "image_generation_call":
 		return builtinCallToFunctionCall(item, "image_generation", map[string]any{
 			"prompt": firstNonEmptyString(item["prompt"], digString(item, "action", "prompt")),
 			"status": stringValue(item["status"]),
-		})
+		}, state)
 	case "image_generation_call_output":
-		return builtinOutputToFunctionCallOutput(item)
+		return builtinOutputToFunctionCallOutput(item, state)
 	case "computer_call":
 		return builtinCallToFunctionCall(item, "computer", map[string]any{
 			"action": firstNonNil(item["action"], item["pending_safety_checks"]),
 			"status": stringValue(item["status"]),
-		})
+		}, state)
 	case "computer_call_output":
-		return builtinOutputToFunctionCallOutput(item)
+		return builtinOutputToFunctionCallOutput(item, state)
 	case "mcp_call":
 		return builtinCallToFunctionCall(item, firstNonEmptyString(item["name"], "mcp_call"), map[string]any{
 			"server":    firstNonEmptyString(item["server_label"], item["server"]),
@@ -120,21 +152,18 @@ func sanitizeInputItem(raw any) any {
 			"tool":      stringValue(item["name"]),
 			"error":     item["error"],
 			"output":    item["output"],
-		})
+		}, state)
 	case "mcp_list_tools":
 		return builtinCallToFunctionCall(item, "mcp_list_tools", map[string]any{
 			"server": stringValue(firstNonEmptyString(item["server_label"], item["server"])),
 			"tools":  firstNonNil(item["tools"], item["output"]),
-		})
+		}, state)
 	case "mcp_approval_request", "mcp_approval_response":
 		return historyNote("assistant", typeName, item)
 	case "apply_patch_call":
-		return builtinCallToFunctionCall(item, "apply_patch", map[string]any{
-			"patch":  firstNonEmptyString(item["patch"], digString(item, "action", "patch"), digString(item, "action", "input")),
-			"status": stringValue(item["status"]),
-		})
+		return applyPatchCallToFunctionCall(item, state)
 	case "apply_patch_call_output":
-		return builtinOutputToFunctionCallOutput(item)
+		return applyPatchOutputToFunctionCallOutput(item, state)
 	case "item_reference":
 		// Cannot resolve without a response store; keep a visible breadcrumb.
 		id := firstNonEmptyString(item["id"], item["item_id"], digString(item, "item", "id"))
@@ -175,11 +204,8 @@ func sanitizeReasoningItem(item map[string]any) map[string]any {
 }
 
 // builtinCallToFunctionCall maps OpenAI built-in call items onto function_call.
-func builtinCallToFunctionCall(item map[string]any, name string, args map[string]any) map[string]any {
-	callID := firstNonEmptyString(item["call_id"], item["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
-	}
+func builtinCallToFunctionCall(item map[string]any, name string, args map[string]any, state *ToolCompatibility) map[string]any {
+	callID := state.ensureCallID(firstNonEmptyString(item["call_id"], item["id"]))
 	// Drop empty string values for cleaner arguments.
 	clean := map[string]any{}
 	for k, v := range args {
@@ -211,11 +237,8 @@ func builtinCallToFunctionCall(item map[string]any, name string, args map[string
 	return out
 }
 
-func builtinOutputToFunctionCallOutput(item map[string]any) map[string]any {
-	callID := firstNonEmptyString(item["call_id"], item["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
-	}
+func builtinOutputToFunctionCallOutput(item map[string]any, state *ToolCompatibility) map[string]any {
+	callID := state.takeCallID(firstNonEmptyString(item["call_id"], item["id"]))
 	output := firstNonNil(item["output"], item["result"], item["content"], item["text"])
 	return map[string]any{
 		"type":    "function_call_output",
@@ -317,11 +340,7 @@ func sanitizeMessageItem(item map[string]any) map[string]any {
 	return out
 }
 
-func sanitizeFunctionCallItem(item map[string]any) map[string]any {
-	callID := firstNonEmptyString(item["call_id"], item["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
-	}
+func sanitizeFunctionCallItem(item map[string]any, state *ToolCompatibility) map[string]any {
 	name := firstNonEmptyString(item["name"], item["tool_name"])
 	if name == "" {
 		if fn, ok := item["function"].(map[string]any); ok {
@@ -331,6 +350,16 @@ func sanitizeFunctionCallItem(item map[string]any) map[string]any {
 	if name == "" {
 		return nil
 	}
+	namespace := firstNonEmptyString(item["namespace"])
+	if state != nil && namespace != "" {
+		name = state.registerFunction(namespace, name)
+	} else if state != nil {
+		// If the client already used an upstream alias, keep it; otherwise leave bare name.
+		if alias, ok := state.lookupAlias("", name); ok {
+			name = alias
+		}
+	}
+	callID := state.ensureCallID(firstNonEmptyString(item["call_id"], item["id"]))
 	arguments := jsonString(item["arguments"])
 	if arguments == "" {
 		arguments = jsonString(item["input"])
@@ -353,23 +382,80 @@ func sanitizeFunctionCallItem(item map[string]any) map[string]any {
 	return out
 }
 
-func sanitizeFunctionCallOutputItem(item map[string]any) map[string]any {
-	callID := firstNonEmptyString(item["call_id"], item["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
+func toolSearchCallToFunctionCall(item map[string]any, state *ToolCompatibility) map[string]any {
+	callID := state.ensureCallID(firstNonEmptyString(item["call_id"], item["id"]))
+	arguments, err := encodeFunctionArguments(firstNonNil(item["arguments"], item["input"]))
+	if err != nil || arguments == "" {
+		arguments = "{}"
+	}
+	return map[string]any{
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      state.registerToolSearch("tool_search"),
+		"arguments": arguments,
+	}
+}
+
+func toolSearchOutputToFunctionCallOutput(item map[string]any, state *ToolCompatibility) map[string]any {
+	execution := strings.ToLower(strings.TrimSpace(stringValue(item["execution"])))
+	if execution != "" && execution != "client" {
+		// Soft-degrade: still pair the turn so multi-turn continues.
+		state.addWarning("tool_search_output_execution_forced_client")
+	}
+	callID := state.takeCallID(firstNonEmptyString(item["call_id"], item["id"]))
+	tools, _ := item["tools"].([]any)
+	if len(tools) > 0 {
+		_ = state.loadToolsFromHistory(tools, "input.tool_search_output.tools")
+		state.AppendVisibleTools(tools)
 	}
 	return map[string]any{
 		"type":    "function_call_output",
 		"call_id": callID,
+		"output":  fmt.Sprintf("Tool search completed; %d selected tool definitions are now available.", len(tools)),
+	}
+}
+
+func additionalToolsToHistoryMessage(item map[string]any, state *ToolCompatibility) map[string]any {
+	tools, _ := item["tools"].([]any)
+	if len(tools) > 0 {
+		_ = state.loadToolsFromHistory(tools, "input.additional_tools.tools")
+		state.AppendVisibleTools(tools)
+		state.addWarning("additional_tools_position_approximated")
+	}
+	names := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := firstNonEmptyString(tool["name"], tool["server_label"], tool["type"])
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	message := "Additional tools become available at this point in the conversation."
+	if len(names) > 0 {
+		message += "\nTools: " + strings.Join(names, ", ")
+	}
+	return sanitizeMessageItem(map[string]any{
+		"type": "message",
+		"role": "developer",
+		"content": []any{
+			map[string]any{"type": "input_text", "text": message},
+		},
+	})
+}
+
+func sanitizeFunctionCallOutputItem(item map[string]any, state *ToolCompatibility) map[string]any {
+	return map[string]any{
+		"type":    "function_call_output",
+		"call_id": state.takeCallID(firstNonEmptyString(item["call_id"], item["id"])),
 		"output":  stringifyOutput(item["output"]),
 	}
 }
 
-func localShellCallToFunctionCall(item map[string]any) map[string]any {
-	callID := firstNonEmptyString(item["call_id"], item["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
-	}
+func localShellCallToFunctionCall(item map[string]any, state *ToolCompatibility) map[string]any {
+	callID := state.ensureCallID(firstNonEmptyString(item["call_id"], item["id"]))
 	action, _ := item["action"].(map[string]any)
 	command := ""
 	if action != nil {
@@ -405,11 +491,8 @@ func localShellCallToFunctionCall(item map[string]any) map[string]any {
 	}
 }
 
-func customToolCallToFunctionCall(item map[string]any) map[string]any {
-	callID := firstNonEmptyString(item["call_id"], item["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
-	}
+func customToolCallToFunctionCall(item map[string]any, state *ToolCompatibility) map[string]any {
+	callID := state.ensureCallID(firstNonEmptyString(item["call_id"], item["id"]))
 	name := firstNonEmptyString(item["name"], item["tool_name"])
 	if name == "" {
 		name = "custom_tool"
@@ -449,14 +532,17 @@ func stringifyOutput(value any) string {
 // ChatMessagesToResponsesInput converts OpenAI Chat Completions messages into
 // Responses API input items.
 //
-// Mapping (aligned with Continue.dev / OpenAI Responses agent clients):
+// Mapping:
 //   - system → accumulated into instructions (not duplicated in input)
-//   - user/assistant text → {role, content}
+//   - user/assistant text or multimodal → {role, content} (images as input_image)
 //   - assistant tool_calls → {type:function_call, call_id, name, arguments}
 //   - tool results → {type:function_call_output, call_id, output}
+//
+// Missing tool_call_id is paired in order with prior assistant tool_calls.
 func ChatMessagesToResponsesInput(messages []any) (input []any, instructions string) {
 	input = make([]any, 0, len(messages))
 	var systemParts []string
+	state := newToolCompatibility()
 
 	for _, raw := range messages {
 		msg, ok := raw.(map[string]any)
@@ -464,15 +550,16 @@ func ChatMessagesToResponsesInput(messages []any) (input []any, instructions str
 			continue
 		}
 		role := strings.ToLower(strings.TrimSpace(stringValue(msg["role"])))
-		content := normalizeMessageContent(msg["content"])
+		content := convertChatMessageContent(msg["content"])
 
 		switch role {
 		case "system", "developer":
-			if text := strings.TrimSpace(content); text != "" {
+			if text := strings.TrimSpace(contentAsPlainText(content)); text != "" {
 				systemParts = append(systemParts, text)
 			}
 		case "assistant":
-			if content != "" {
+			hasContent := !isEmptyChatContent(content)
+			if hasContent {
 				input = append(input, map[string]any{
 					"role":    "assistant",
 					"content": content,
@@ -480,7 +567,7 @@ func ChatMessagesToResponsesInput(messages []any) (input []any, instructions str
 			}
 			if calls, ok := msg["tool_calls"].([]any); ok {
 				for _, rawCall := range calls {
-					if item := chatToolCallToFunctionCall(rawCall); item != nil {
+					if item := chatToolCallToFunctionCall(rawCall, state); item != nil {
 						input = append(input, item)
 					}
 				}
@@ -491,12 +578,12 @@ func ChatMessagesToResponsesInput(messages []any) (input []any, instructions str
 				if name != "" {
 					input = append(input, map[string]any{
 						"type":      "function_call",
-						"call_id":   "call_" + randomID(12),
+						"call_id":   state.ensureCallID(""),
 						"name":      name,
 						"arguments": firstNonEmpty(args, "{}"),
 					})
 				}
-			} else if content == "" {
+			} else if !hasContent {
 				// Empty assistant with no tools — still keep a placeholder turn.
 				input = append(input, map[string]any{
 					"role":    "assistant",
@@ -504,14 +591,11 @@ func ChatMessagesToResponsesInput(messages []any) (input []any, instructions str
 				})
 			}
 		case "tool":
-			callID := firstNonEmptyString(msg["tool_call_id"], msg["id"])
-			if callID == "" {
-				callID = "call_" + randomID(12)
-			}
+			callID := state.takeCallID(firstNonEmptyString(msg["tool_call_id"], msg["id"]))
 			input = append(input, map[string]any{
 				"type":    "function_call_output",
 				"call_id": callID,
-				"output":  content,
+				"output":  contentAsPlainText(content),
 			})
 		default:
 			// user and any other roles
@@ -532,7 +616,7 @@ func ChatMessagesToResponsesInput(messages []any) (input []any, instructions str
 	return input, instructions
 }
 
-func chatToolCallToFunctionCall(raw any) map[string]any {
+func chatToolCallToFunctionCall(raw any, state *ToolCompatibility) map[string]any {
 	call, ok := raw.(map[string]any)
 	if !ok {
 		return nil
@@ -542,10 +626,7 @@ func chatToolCallToFunctionCall(raw any) map[string]any {
 	if name == "" {
 		return nil
 	}
-	callID := firstNonEmptyString(call["id"], call["call_id"], function["id"])
-	if callID == "" {
-		callID = "call_" + randomID(12)
-	}
+	callID := state.ensureCallID(firstNonEmptyString(call["id"], call["call_id"], function["id"]))
 	arguments := jsonString(firstNonNil(call["arguments"], function["arguments"]))
 	if arguments == "" {
 		arguments = "{}"
@@ -558,12 +639,31 @@ func chatToolCallToFunctionCall(raw any) map[string]any {
 	}
 }
 
-func normalizeMessageContent(content any) string {
+// convertChatMessageContent keeps multimodal structure (text + images).
+// Plain strings stay strings; arrays become Responses content parts.
+func convertChatMessageContent(content any) any {
 	switch typed := content.(type) {
 	case string:
 		return typed
 	case []any:
-		return flattenContentParts(typed)
+		parts := convertChatContentParts(typed)
+		if len(parts) == 0 {
+			return ""
+		}
+		// Text-only arrays collapse to a string (legacy chat clients / smaller body).
+		// Images force structured content so vision is not dropped.
+		hasImage := false
+		for _, raw := range parts {
+			if part, ok := raw.(map[string]any); ok &&
+				strings.EqualFold(stringValue(part["type"]), "input_image") {
+				hasImage = true
+				break
+			}
+		}
+		if !hasImage {
+			return contentAsPlainText(parts)
+		}
+		return parts
 	case nil:
 		return ""
 	default:
@@ -571,9 +671,8 @@ func normalizeMessageContent(content any) string {
 	}
 }
 
-// flattenContentParts extracts text from OpenAI multimodal content arrays.
-func flattenContentParts(parts []any) string {
-	var b strings.Builder
+func convertChatContentParts(parts []any) []any {
+	result := make([]any, 0, len(parts))
 	for _, raw := range parts {
 		part, ok := raw.(map[string]any)
 		if !ok {
@@ -581,16 +680,71 @@ func flattenContentParts(parts []any) string {
 		}
 		switch strings.ToLower(strings.TrimSpace(stringValue(part["type"]))) {
 		case "text", "input_text", "output_text":
-			if text, _ := part["text"].(string); text != "" {
-				b.WriteString(text)
+			if text := stringValue(part["text"]); text != "" {
+				result = append(result, map[string]any{"type": "input_text", "text": text})
 			}
 		case "image_url", "input_image":
-			// Images are not forwarded on the Responses text path.
+			if url := parseChatImageURL(part); url != "" {
+				result = append(result, map[string]any{"type": "input_image", "image_url": url})
+			}
 		default:
-			if text, _ := part["text"].(string); text != "" {
-				b.WriteString(text)
+			if text := stringValue(part["text"]); text != "" {
+				result = append(result, map[string]any{"type": "input_text", "text": text})
 			}
 		}
 	}
-	return b.String()
+	return result
+}
+
+func parseChatImageURL(part map[string]any) string {
+	switch typed := part["image_url"].(type) {
+	case string:
+		if url := strings.TrimSpace(typed); url != "" {
+			return url
+		}
+	case map[string]any:
+		if url := strings.TrimSpace(stringValue(typed["url"])); url != "" {
+			return url
+		}
+	}
+	if url := strings.TrimSpace(stringValue(part["url"])); url != "" {
+		return url
+	}
+	return ""
+}
+
+func contentAsPlainText(content any) string {
+	switch typed := content.(type) {
+	case string:
+		return typed
+	case []any:
+		var b strings.Builder
+		for _, raw := range typed {
+			part, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text := stringValue(part["text"]); text != "" {
+				b.WriteString(text)
+			}
+		}
+		return b.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func isEmptyChatContent(content any) bool {
+	switch typed := content.(type) {
+	case nil:
+		return true
+	case string:
+		return typed == ""
+	case []any:
+		return len(typed) == 0
+	default:
+		return false
+	}
 }

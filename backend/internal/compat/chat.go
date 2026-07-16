@@ -75,11 +75,29 @@ func ChatToResponses(payload []byte) ([]byte, bool, error) {
 	if value, ok := input["instructions"]; ok && output["instructions"] == nil {
 		output["instructions"] = value
 	}
-	if tools := NormalizeResponsesTools(input["tools"], MaxUpstreamTools); len(tools) > 0 {
-		output["tools"] = tools
+	toolResult := NormalizeResponsesToolsDetailed(input["tools"], MaxUpstreamTools)
+	if toolResult.Err != nil {
+		return nil, false, toolResult.Err
+	}
+	if len(toolResult.Tools) > 0 {
+		output["tools"] = toolResult.Tools
+	}
+	if toolResult.BackendSearch != nil {
+		if _, exists := output["backend_search"]; !exists {
+			output["backend_search"] = *toolResult.BackendSearch
+		}
 	}
 	if choice, ok := input["tool_choice"]; ok && choice != nil {
-		output["tool_choice"] = NormalizeResponsesToolChoice(choice)
+		tools, _ := output["tools"].([]any)
+		var aligned any
+		if toolResult.Compat != nil {
+			aligned, _ = toolResult.Compat.AlignToolChoice(choice, tools)
+		} else {
+			aligned, _ = AlignResponsesToolChoice(choice, tools, toolResult.WebSearchDisabled)
+		}
+		if aligned != nil {
+			output["tool_choice"] = aligned
+		}
 	}
 	if _, ok := input["web_search_options"]; ok {
 		if _, exists := output["backend_search"]; !exists {

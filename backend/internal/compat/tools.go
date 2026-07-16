@@ -170,10 +170,15 @@ type ToolNormalizeResult struct {
 	Tools []any
 	// BackendSearch is set when a Codex web_search tool carried external_web_access.
 	BackendSearch *bool
+	// WebSearchDisabled is true when external_web_access:false removed search tools.
+	WebSearchDisabled bool
 	// Warnings are compatibility codes for X-Grok2API-Compatibility-Warnings.
 	Warnings []string
 	// Err is a client-facing validation error (hard reject); tools must not be sent upstream.
 	Err error
+	// Compat is the request-scoped rewrite state (aliases for response restore).
+	// Nil when no tools were present.
+	Compat *ToolCompatibility
 }
 
 // NormalizeResponsesTools adapts client tool lists for strict Grok Responses backends.
@@ -194,19 +199,42 @@ func NormalizeResponsesTools(raw any, maxTools int) []any {
 
 // NormalizeResponsesToolsDetailed is like NormalizeResponsesTools but also returns
 // backend_search hints inferred from nested Codex tool fields.
+//
+// Single-pass policy: expand → map → hard-validate → collapse names.
+// Call AlignResponsesToolChoice afterwards so tool_choice stays coherent.
 func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult {
 	tools, ok := raw.([]any)
 	if !ok || len(tools) == 0 {
 		return ToolNormalizeResult{}
 	}
+	compatState := newToolCompatibility()
+	// Pre-register client tool_search so defer_loading decisions are correct regardless of list order.
+	for index, item := range tools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(stringValue(tool["type"]))) != "tool_search" {
+			continue
+		}
+		if err := compatState.registerClientToolSearch(tool, fmt.Sprintf("tools[%d]", index)); err != nil {
+			return ToolNormalizeResult{Err: err}
+		}
+	}
+
 	out := make([]any, 0, len(tools))
 	seen := map[string]struct{}{}
 	var backendSearch *bool
-	var warnings []string
 	webSearchDisabled := false
+	truncated := false
+	clientSearch := compatState.clientSearchActive
 
 	appendTool := func(tool map[string]any) {
 		if maxTools > 0 && len(out) >= maxTools {
+			if !truncated {
+				compatState.addWarning("tools_soft_capped")
+				truncated = true
+			}
 			return
 		}
 		name := firstNonEmptyString(tool["name"])
@@ -241,18 +269,40 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 		switch typeName {
 		case "namespace":
 			nested, _ := tool["tools"].([]any)
+			nsName := firstNonEmptyString(tool["name"])
+			if nsName == "" {
+				return ToolNormalizeResult{Err: newRequestError(param+".name", "invalid_parameter", "namespace.name is required")}
+			}
+			compatState.addWarning("namespace_flattened")
+			if clientSearch && namespaceHasDeferredFunctions(nested) {
+				compatState.addDeferredSurface(nsName, firstNonEmptyString(tool["description"]))
+			}
 			for _, child := range nested {
 				childTool, ok := child.(map[string]any)
 				if !ok {
 					continue
 				}
-				// Nested namespaces only carry function tools in Codex.
 				definition, valid := parseToolDefinition(childTool)
 				if !valid || definition.Type != "function" {
 					continue
 				}
-				appendTool(definition.responseTool())
+				deferred := toolHasDeferLoading(childTool)
+				if deferred && clientSearch {
+					// Keep surface only; do not send deferred children until tool_search_output.
+					continue
+				}
+				if deferred && !clientSearch {
+					return ToolNormalizeResult{Err: newRequestError(param+".tools", "invalid_parameter",
+						`defer_loading: true requires a client tool_search (execution: "client")`)}
+				}
+				rt := definition.responseTool()
+				rt["name"] = compatState.registerFunction(nsName, definition.Name)
+				delete(rt, "defer_loading")
+				appendTool(rt)
 			}
+		case "tool_search":
+			// Already registered in pre-scan; synthetic function emitted after the loop.
+			continue
 		case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26", "websearch":
 			// Codex: {type:web_search, external_web_access:bool, search_context_size, …}
 			// Grok only accepts the bare variant (and uses top-level backend_search).
@@ -260,7 +310,9 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 			if err != nil {
 				return ToolNormalizeResult{Err: err}
 			}
-			warnings = mergeWarningCodes(warnings, warn)
+			for _, code := range warn {
+				compatState.addWarning(code)
+			}
 			if access != nil {
 				backendSearch = access
 				if !*access {
@@ -272,60 +324,131 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 				appendTool(normalized)
 			}
 		case "local_shell":
-			// OpenAI built-in tool type — map to the same function name used when
-			// rewriting local_shell_call items in input history.
-			appendTool(syntheticFunctionTool(
-				"shell_command",
-				firstNonEmptyString(tool["description"], "Run a shell command in the local environment."),
-				shellCommandParameters(),
-			))
+			// Upgrade bare local_shell → native shell + local environment.
+			converted, err := compatState.normalizeLegacyLocalShellTool(tool, param)
+			if err != nil {
+				return ToolNormalizeResult{Err: err}
+			}
+			for _, item := range converted {
+				if m, ok := item.(map[string]any); ok {
+					appendTool(m)
+				}
+			}
 		case "shell":
-			// Grok native shell requires environment; incomplete objects 422.
-			// Fall back to shell_command function so the capability is not lost.
-			if _, hasEnv := tool["environment"]; !hasEnv {
-				appendTool(syntheticFunctionTool(
-					"shell_command",
-					firstNonEmptyString(tool["description"], "Run a shell command."),
-					shellCommandParameters(),
-				))
-				continue
+			converted, err := compatState.normalizeNativeShellTool(tool, param)
+			if err != nil {
+				return ToolNormalizeResult{Err: err}
 			}
-			clean := map[string]any{"type": "shell", "environment": tool["environment"]}
-			if name := firstNonEmptyString(tool["name"]); name != "" {
-				clean["name"] = name
+			for _, item := range converted {
+				if m, ok := item.(map[string]any); ok {
+					appendTool(m)
+				}
 			}
-			appendTool(clean)
+		case "apply_patch":
+			converted, err := compatState.normalizeApplyPatchToolDeclaration(tool, param)
+			if err != nil {
+				return ToolNormalizeResult{Err: err}
+			}
+			for _, item := range converted {
+				if m, ok := item.(map[string]any); ok {
+					appendTool(m)
+				}
+			}
 		case "custom":
-			// Codex freeform / custom tools → flat function.
+			// Codex freeform / custom tools → flat function (restored on response).
+			// Grammar formats other than text cannot be expressed on Grok Build.
+			if format, exists := tool["format"]; exists {
+				if formatObj, ok := format.(map[string]any); ok {
+					ft := strings.ToLower(strings.TrimSpace(stringValue(formatObj["type"])))
+					if ft != "" && ft != "text" {
+						return ToolNormalizeResult{Err: newRequestError(param+".format", "unsupported_parameter", "Grok Build cannot emulate custom tool grammar")}
+					}
+				}
+			}
+			compatState.addWarning("custom_tool_emulated")
 			name := firstNonEmptyString(tool["name"], "custom_tool")
+			alias := compatState.registerCustom("", name)
 			desc := firstNonEmptyString(tool["description"], "Custom tool "+name)
+			if desc != "" && !strings.Contains(desc, "input string") {
+				desc += "\nProvide the custom tool input in the input string field."
+			}
 			params := firstNonNil(tool["parameters"], tool["input_schema"])
 			if params == nil {
 				params = freeformToolParameters(tool)
 			}
-			appendTool(syntheticFunctionTool(name, desc, params))
-		case "tool_search":
-			name := firstNonEmptyString(tool["name"], "tool_search")
-			desc := firstNonEmptyString(tool["description"], "Search for available tools.")
-			params := firstNonNil(tool["parameters"], tool["input_schema"])
-			if params == nil {
-				params = map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{"type": "string", "description": "Search query for tools"},
-					},
-					"required": []any{"query"},
+			appendTool(syntheticFunctionTool(alias, desc, params))
+		case "mcp":
+			deferred, _ := tool["defer_loading"].(bool)
+			if deferred && !clientSearch {
+				return ToolNormalizeResult{Err: newRequestError(param+".defer_loading", "invalid_parameter",
+					`MCP defer_loading: true requires a client tool_search (execution: "client")`)}
+			}
+			if deferred && clientSearch {
+				label := firstNonEmptyString(tool["server_label"], tool["name"])
+				if label == "" {
+					return ToolNormalizeResult{Err: newRequestError(param+".server_label", "invalid_parameter",
+						"deferred MCP tool requires server_label")}
+				}
+				compatState.addDeferredSurface(label, firstNonEmptyString(tool["description"]))
+				continue
+			}
+			clean := cloneMap(tool)
+			delete(clean, "defer_loading")
+			// Keep known-safe MCP keys only.
+			allowed := map[string]struct{}{
+				"type": {}, "server_label": {}, "server_url": {}, "server_description": {},
+				"name": {}, "description": {}, "headers": {}, "require_approval": {},
+				"allowed_tools": {}, "authorization": {},
+			}
+			for key := range clean {
+				if _, ok := allowed[key]; !ok {
+					delete(clean, key)
 				}
 			}
-			appendTool(syntheticFunctionTool(name, desc, params))
+			appendTool(clean)
+		case "computer_use_preview":
+			return ToolNormalizeResult{Err: newRequestError(param+".type", "unsupported_parameter",
+				fmt.Sprintf("tools.type=%q is not supported on this backend", typeName))}
 		case "function", "":
 			definition, valid := parseToolDefinition(tool)
 			if valid && definition.Type == "function" {
-				appendTool(definition.responseTool())
+				deferred := toolHasDeferLoading(tool)
+				if deferred && !clientSearch {
+					return ToolNormalizeResult{Err: newRequestError(param+".defer_loading", "invalid_parameter",
+						`defer_loading: true requires a client tool_search (execution: "client")`)}
+				}
+				if deferred && clientSearch {
+					compatState.addDeferredSurface(definition.Name, definition.Description)
+					continue
+				}
+				// Client-declared function named apply_patch still gets reverse mapping.
+				if strings.EqualFold(definition.Name, "apply_patch") {
+					alias := compatState.registerApplyPatch()
+					rt := definition.responseTool()
+					rt["name"] = alias
+					if !functionSchemaHasOperation(rt["parameters"]) {
+						rt = applyPatchFunctionTool(alias)
+					}
+					delete(rt, "defer_loading")
+					appendTool(rt)
+					compatState.addWarning("apply_patch_emulated")
+					continue
+				}
+				rt := definition.responseTool()
+				delete(rt, "defer_loading")
+				appendTool(rt)
 			}
 		default:
+			if deferred, _ := tool["defer_loading"].(bool); deferred {
+				return ToolNormalizeResult{Err: newRequestError(param+".defer_loading", "unsupported_parameter",
+					"defer_loading is only supported on function and mcp tools with client tool_search")}
+			}
 			if _, allowed := grokBuiltinToolTypes[typeName]; allowed {
 				// Keep type (+ name/description when present); drop Codex/OpenAI extras.
+				// mcp is handled above; do not double-handle.
+				if typeName == "mcp" {
+					continue
+				}
 				clean := map[string]any{"type": typeName}
 				if name := firstNonEmptyString(tool["name"]); name != "" {
 					clean["name"] = name
@@ -333,68 +456,82 @@ func NormalizeResponsesToolsDetailed(raw any, maxTools int) ToolNormalizeResult 
 				if desc := firstNonEmptyString(tool["description"]); desc != "" {
 					clean["description"] = desc
 				}
-				// mcp / file_search may need server_label / vector_store_ids — pass through
-				// only a small allowlist of known-safe keys.
-				for _, key := range []string{
+				// file_search / code tools: pass known-safe keys.
+				passthrough := []string{
 					"server_label", "server_url", "server_description",
-					"vector_store_ids", "max_num_results", "filters",
-					"container", "parameters",
-				} {
+					"vector_store_ids", "max_num_results", "container", "parameters",
+				}
+				if typeName == "file_search" {
+					passthrough = append(passthrough, "filters")
+				}
+				for _, key := range passthrough {
 					if value, ok := tool[key]; ok {
 						clean[key] = value
 					}
 				}
-				// Never forward external_web_access on any builtin.
-				for _, key := range webSearchRejectedFields {
-					delete(clean, key)
-				}
 				appendTool(clean)
 				continue
 			}
-			// Unknown OpenAI/Codex type with a name → function so capability remains.
-			if name := firstNonEmptyString(tool["name"]); name != "" {
-				params := firstNonNil(tool["parameters"], tool["input_schema"], emptyObjectSchema())
-				appendTool(syntheticFunctionTool(
-					name,
-					firstNonEmptyString(tool["description"], "Tool "+name+" (converted from "+typeName+")"),
-					params,
-				))
-			}
+			// Unknown OpenAI/Codex type: hard-reject (do not invent a fake function).
+			return ToolNormalizeResult{Err: newRequestError(param+".type", "unsupported_parameter",
+				fmt.Sprintf("tools.type=%q is not supported on this backend", typeName))}
 		}
 	}
+	// Emit synthetic client tool_search function after all deferred surfaces are known.
+	if clientSearch {
+		searchFn, err := compatState.buildClientSearchFunction()
+		if err != nil {
+			return ToolNormalizeResult{Err: err}
+		}
+		if searchFn != nil {
+			appendTool(searchFn)
+		}
+	}
+
 	if webSearchDisabled {
 		// Strip any bare web_search that slipped in from other tools in the same list.
-		filtered := out[:0]
-		for _, rawTool := range out {
-			tool, ok := rawTool.(map[string]any)
-			if !ok {
-				filtered = append(filtered, rawTool)
-				continue
-			}
-			typeName := strings.ToLower(strings.TrimSpace(stringValue(tool["type"])))
-			if typeName == "web_search" || typeName == "web_search_preview" || typeName == "websearch" {
-				continue
-			}
-			if (typeName == "function" || typeName == "") &&
-				strings.EqualFold(firstNonEmptyString(tool["name"]), "web_search") {
-				continue
-			}
-			filtered = append(filtered, rawTool)
+		out = StripSearchTools(out)
+		if out == nil {
+			out = []any{}
 		}
-		out = filtered
 		falseVal := false
 		backendSearch = &falseVal
-		warnings = mergeWarningCodes(warnings, []string{"web_search_disabled_no_external_access"})
+		compatState.webSearchDisabled = true
+		compatState.addWarning("web_search_disabled_no_external_access")
 	}
 	if len(out) == 0 {
-		return ToolNormalizeResult{BackendSearch: backendSearch, Warnings: warnings}
+		return ToolNormalizeResult{
+			BackendSearch:     backendSearch,
+			WebSearchDisabled: webSearchDisabled || compatState.webSearchDisabled,
+			Warnings:          compatState.Warnings(),
+			Compat:            compatState,
+		}
 	}
 	// Grok keys tools by name across types: bare web_search + function web_search → 422.
 	out = CollapseSearchToolNameCollisions(out)
 	if maxTools > 0 && len(out) > maxTools {
 		out = out[:maxTools]
+		compatState.addWarning("tools_soft_capped")
 	}
-	return ToolNormalizeResult{Tools: out, BackendSearch: backendSearch, Warnings: warnings}
+	return ToolNormalizeResult{
+		Tools:             out,
+		BackendSearch:     backendSearch,
+		WebSearchDisabled: webSearchDisabled || compatState.webSearchDisabled,
+		Warnings:          compatState.Warnings(),
+		Compat:            compatState,
+	}
+}
+
+func toolHasDeferLoading(tool map[string]any) bool {
+	if deferred, ok := tool["defer_loading"].(bool); ok && deferred {
+		return true
+	}
+	if fn, ok := tool["function"].(map[string]any); ok {
+		if deferred, ok := fn["defer_loading"].(bool); ok && deferred {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeWebSearchTool collapses Codex web_search to bare form or rejects unsafe constraints.
@@ -411,17 +548,17 @@ func normalizeWebSearchTool(tool map[string]any, param string) (map[string]any, 
 		}
 	}
 	if filters, ok := tool["filters"]; ok && hasNonEmptyConstraint(filters) {
-		return nil, access, nil, fmt.Errorf("%s.filters: Grok Build cannot enforce web_search filters", param)
+		return nil, access, nil, newRequestError(param+".filters", "unsupported_parameter", "Grok Build cannot enforce web_search filters")
 	}
 	if domains, ok := tool["allowed_domains"]; ok && hasNonEmptyConstraint(domains) {
-		return nil, access, nil, fmt.Errorf("%s.allowed_domains: Grok Build cannot enforce allowed_domains", param)
+		return nil, access, nil, newRequestError(param+".allowed_domains", "unsupported_parameter", "Grok Build cannot enforce allowed_domains")
 	}
 	if contentTypes, ok := tool["search_content_types"]; ok {
 		if values, isArr := contentTypes.([]any); isArr {
 			for _, value := range values {
 				if !strings.EqualFold(strings.TrimSpace(stringValue(value)), "text") &&
 					strings.TrimSpace(stringValue(value)) != "" {
-					return nil, access, nil, fmt.Errorf("%s.search_content_types: Grok Build only supports text web search", param)
+					return nil, access, nil, newRequestError(param+".search_content_types", "unsupported_parameter", "Grok Build only supports text web search")
 				}
 			}
 		}
@@ -561,6 +698,19 @@ func shellCommandParameters() map[string]any {
 		},
 		"required": []any{"command"},
 	}
+}
+
+func functionSchemaHasOperation(params any) bool {
+	obj, ok := params.(map[string]any)
+	if !ok {
+		return false
+	}
+	props, ok := obj["properties"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, has := props["operation"]
+	return has
 }
 
 func freeformToolParameters(tool map[string]any) map[string]any {

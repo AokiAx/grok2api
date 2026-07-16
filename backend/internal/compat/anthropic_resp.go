@@ -9,7 +9,7 @@ import (
 
 // ResponsesToAnthropic converts a non-stream Grok/OpenAI Responses JSON body
 // into an Anthropic Messages response. Reasoning items become thinking blocks
-// with CPA-style opaque signatures when thinking is enabled.
+// with opaque thinking signatures when thinking is enabled.
 func ResponsesToAnthropic(payload []byte, requestModel string, thinkingEnabled bool, thinkingDisplay string) ([]byte, error) {
 	var root map[string]any
 	if err := json.Unmarshal(payload, &root); err != nil {

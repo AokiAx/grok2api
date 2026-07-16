@@ -114,17 +114,18 @@ func TestChatToResponsesMapsWebSearchTool(t *testing.T) {
 	}
 }
 
-func TestEnsureBackendSearchDefaultsOnAndRespectsExplicit(t *testing.T) {
-	enabled, err := compat.EnsureBackendSearch([]byte(`{"model":"grok-4.5","input":[]}`), true)
+func TestEnsureBackendSearchNoForceOnBareRequest(t *testing.T) {
+	// Bare chat must not invent backend_search:true.
+	bare, err := compat.EnsureBackendSearch([]byte(`{"model":"grok-4.5","input":[]}`), true)
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(enabled, &payload); err != nil {
+	if err := json.Unmarshal(bare, &payload); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if payload["backend_search"] != true {
-		t.Fatalf("default backend_search = %#v", payload["backend_search"])
+	if _, ok := payload["backend_search"]; ok {
+		t.Fatalf("bare request must not force backend_search: %#v", payload["backend_search"])
 	}
 
 	kept, err := compat.EnsureBackendSearch([]byte(`{"model":"grok-4.5","backend_search":false}`), true)
@@ -147,6 +148,18 @@ func TestEnsureBackendSearchDefaultsOnAndRespectsExplicit(t *testing.T) {
 	}
 	if payload["backend_search"] != true {
 		t.Fatalf("web_search mirror = %#v", payload["backend_search"])
+	}
+
+	// Search tools align backend_search.
+	withTool, err := compat.AlignBackendSearch([]byte(`{"model":"grok-4.5","tools":[{"type":"web_search"}]}`))
+	if err != nil {
+		t.Fatalf("align tool: %v", err)
+	}
+	if err := json.Unmarshal(withTool, &payload); err != nil {
+		t.Fatalf("decode tool: %v", err)
+	}
+	if payload["backend_search"] != true {
+		t.Fatalf("tools web_search should set backend_search: %#v", payload["backend_search"])
 	}
 }
 
@@ -184,8 +197,9 @@ func TestNormalizeResponsesToolsDedupsExpandedNames(t *testing.T) {
 		map[string]any{"type": "function", "name": "a", "parameters": map[string]any{"type": "object"}},
 	}
 	out := compat.NormalizeResponsesTools(raw, 10)
-	if len(out) != 2 {
-		t.Fatalf("len=%d want 2 (expanded+dedup): %#v", len(out), out)
+	// namespace children become ns__a / ns__b; top-level function a stays "a" (distinct aliases).
+	if len(out) != 3 {
+		t.Fatalf("len=%d want 3 (ns__a, ns__b, a): %#v", len(out), out)
 	}
 }
 
@@ -299,6 +313,82 @@ func TestChatToResponsesFlattensMultimodalContent(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesPreservesImages(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":[
+		{"type":"text","text":"what is this?"},
+		{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}
+	]}]}`)
+	out, _, err := compat.ChatToResponses(body)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	input := payload["input"].([]any)
+	msg := input[0].(map[string]any)
+	parts, ok := msg["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("expected structured multimodal content, got %#v", msg["content"])
+	}
+	textPart := parts[0].(map[string]any)
+	imgPart := parts[1].(map[string]any)
+	if textPart["type"] != "input_text" || textPart["text"] != "what is this?" {
+		t.Fatalf("text part=%#v", textPart)
+	}
+	if imgPart["type"] != "input_image" || imgPart["image_url"] != "https://example.test/a.png" {
+		t.Fatalf("image part=%#v", imgPart)
+	}
+}
+
+func TestSanitizePairsMissingCallIDsInOrder(t *testing.T) {
+	raw := []any{
+		map[string]any{"type": "function_call", "name": "a", "arguments": "{}"},
+		map[string]any{"type": "function_call_output", "output": "ra"},
+		map[string]any{"type": "function_call", "name": "b", "arguments": "{}"},
+		map[string]any{"type": "function_call_output", "output": "rb"},
+	}
+	out := compat.SanitizeResponsesInput(raw).([]any)
+	if len(out) != 4 {
+		t.Fatalf("len=%d %#v", len(out), out)
+	}
+	c1 := out[0].(map[string]any)["call_id"]
+	o1 := out[1].(map[string]any)["call_id"]
+	c2 := out[2].(map[string]any)["call_id"]
+	o2 := out[3].(map[string]any)["call_id"]
+	if c1 == "" || c1 != o1 {
+		t.Fatalf("pair1 call=%#v out=%#v", c1, o1)
+	}
+	if c2 == "" || c2 != o2 {
+		t.Fatalf("pair2 call=%#v out=%#v", c2, o2)
+	}
+	if c1 == c2 {
+		t.Fatalf("expected distinct call ids, both=%#v", c1)
+	}
+}
+
+func TestAlignToolChoiceSearchForceBecomesRequired(t *testing.T) {
+	tools := []any{map[string]any{"type": "web_search"}, map[string]any{"type": "function", "name": "Read", "parameters": map[string]any{"type": "object"}}}
+	aligned, warnings := compat.AlignResponsesToolChoice(
+		map[string]any{"type": "function", "name": "web_search"},
+		tools,
+		false,
+	)
+	if aligned != "required" {
+		t.Fatalf("aligned=%#v want required", aligned)
+	}
+	found := false
+	for _, w := range warnings {
+		if w == "search_tool_choice_aligned" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings=%v", warnings)
+	}
+}
+
 func TestNormalizeChatRequestFillsModelAndEffort(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"MAX"}`)
 	out, model, stream, err := compat.NormalizeChatRequest(body, "grok-4.5")
@@ -391,8 +481,8 @@ func TestNormalizeResponsesToolsSoftCapAndNestedFunctionName(t *testing.T) {
 		t.Fatalf("soft cap len=%d want 2: %#v", len(out), out)
 	}
 	first := out[0].(map[string]any)
-	if first["type"] != "function" || first["name"] != "nested_only" {
-		t.Fatalf("first=%#v", first)
+	if first["type"] != "function" || first["name"] != "ns__nested_only" {
+		t.Fatalf("first=%#v want ns__nested_only", first)
 	}
 }
 
@@ -529,10 +619,12 @@ func TestNormalizeResponsesToolsMapsCodexBuiltinsToFunctions(t *testing.T) {
 			// filters/allowed_domains hard-reject; use strip-only extras here.
 			"user_location": map[string]any{"type": "approximate", "country": "US"},
 		},
-		map[string]any{"type": "local_shell"},
-		map[string]any{"type": "tool_search", "execution": "x", "description": "Search tools", "parameters": map[string]any{"type": "object"}},
+		// local_shell upgrades to native shell; bare shell alone becomes shell_command.
+		// Do not mix both in one request (hard reject).
+		map[string]any{"type": "tool_search", "execution": "client", "description": "Search tools", "parameters": map[string]any{"type": "object"}},
 		map[string]any{"type": "shell"}, // missing environment → shell_command function
-		map[string]any{"type": "custom", "name": "apply_patch", "description": "Apply a patch"},
+		map[string]any{"type": "custom", "name": "my_custom", "description": "Custom tool"},
+		map[string]any{"type": "apply_patch"},
 		map[string]any{
 			"type": "function",
 			"name": "shell_command",
@@ -543,9 +635,9 @@ func TestNormalizeResponsesToolsMapsCodexBuiltinsToFunctions(t *testing.T) {
 		},
 	}
 	result := compat.NormalizeResponsesToolsDetailed(raw, 16)
-	// web_search + shell_command (deduped from local_shell/shell/function) + tool_search + apply_patch
-	if len(result.Tools) != 4 {
-		t.Fatalf("tools=%#v want 4", result.Tools)
+	// web_search + tool_search + shell_command (bare shell + function deduped) + custom + apply_patch
+	if len(result.Tools) != 5 {
+		t.Fatalf("tools=%#v want 5", result.Tools)
 	}
 	first := result.Tools[0].(map[string]any)
 	if first["type"] != "web_search" || len(first) != 1 {
@@ -555,17 +647,21 @@ func TestNormalizeResponsesToolsMapsCodexBuiltinsToFunctions(t *testing.T) {
 		t.Fatalf("BackendSearch=%v want true from external_web_access", result.BackendSearch)
 	}
 	byName := map[string]map[string]any{}
+	byType := map[string]bool{}
 	for _, rawTool := range result.Tools {
 		tool := rawTool.(map[string]any)
+		byType[stringValueTest(tool["type"])] = true
 		if tool["type"] == "function" {
 			byName[stringValueTest(tool["name"])] = tool
 		}
 	}
-	for _, name := range []string{"shell_command", "tool_search", "apply_patch"} {
+	// tool_search / apply_patch use stable aliases for reverse mapping.
+	for _, name := range []string{"shell_command", "grok2api_tool_search", "my_custom", "grok2api_apply_patch"} {
 		if byName[name] == nil {
 			t.Fatalf("missing function %s in %#v", name, result.Tools)
 		}
 	}
+	_ = byType
 }
 
 func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T) {
@@ -576,7 +672,7 @@ func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T
 		"tools":[
 			{"type":"web_search","external_web_access":true,"search_context_size":"medium"},
 			{"type":"local_shell"},
-			{"type":"function","name":"shell_command","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}
+			{"type":"function","name":"Read","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}
 		],
 		"external_web_access":false,
 		"store":false,
@@ -593,14 +689,13 @@ func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T
 	if _, ok := payload["external_web_access"]; ok {
 		t.Fatalf("top-level external_web_access leaked: %#v", payload)
 	}
-	// Nested tool external_web_access wins when top-level was only a rejected field
-	// (mapped first); tool-level true should still set backend_search if not set —
-	// but top-level false was mapped first. Either way tools must be clean.
+	// Top-level external_web_access:false → backend_search:false → strip search tools.
+	// local_shell upgrades to native shell{environment:local}.
 	tools, _ := payload["tools"].([]any)
-	if len(tools) < 2 {
-		t.Fatalf("tools=%#v", tools)
+	if payload["backend_search"] != false {
+		t.Fatalf("backend_search=%#v want false", payload["backend_search"])
 	}
-	var sawWeb, sawShell, sawLocalShell bool
+	var sawWeb, sawNativeShell, sawLocalShell, sawRead bool
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
 		if _, ok := tool["external_web_access"]; ok {
@@ -615,15 +710,25 @@ func TestFinalizeResponsesUpstreamStripsNestedToolExternalWebAccess(t *testing.T
 		if tool["type"] == "web_search" {
 			sawWeb = true
 		}
-		if tool["type"] == "function" && tool["name"] == "shell_command" {
-			sawShell = true
+		if tool["type"] == "shell" {
+			sawNativeShell = true
+			env, _ := tool["environment"].(map[string]any)
+			if env["type"] != "local" {
+				t.Fatalf("shell environment=%#v", env)
+			}
+		}
+		if tool["type"] == "function" && tool["name"] == "Read" {
+			sawRead = true
 		}
 	}
 	if sawLocalShell {
 		t.Fatalf("local_shell type must be converted, not forwarded: %#v", tools)
 	}
-	if !sawWeb || !sawShell {
-		t.Fatalf("expected web_search + shell_command function, got %#v", tools)
+	if sawWeb {
+		t.Fatalf("web_search must be stripped when backend_search false: %#v", tools)
+	}
+	if !sawNativeShell || !sawRead {
+		t.Fatalf("expected native shell + Read, got %#v", tools)
 	}
 	encoded := string(out)
 	if strings.Contains(encoded, "external_web_access") || strings.Contains(encoded, `"type":"local_shell"`) {
@@ -717,8 +822,8 @@ func TestNormalizeResponsesToolsFlattensNamespaceChildren(t *testing.T) {
 		t.Fatalf("len=%d want 1: %#v", len(out), out)
 	}
 	tool := out[0].(map[string]any)
-	if tool["name"] != "Search" {
-		t.Fatalf("name=%#v tool=%#v", tool["name"], tool)
+	if tool["name"] != "workspace__Search" {
+		t.Fatalf("name=%#v want workspace__Search tool=%#v", tool["name"], tool)
 	}
 	parameters, ok := tool["parameters"].(map[string]any)
 	if !ok || parameters["type"] != "object" {
@@ -869,7 +974,7 @@ func TestFinalizeClampsReasoningEffortAliases(t *testing.T) {
 	}
 }
 
-func TestFinalizeDropsReasoningEffortNoneAndInjectsSearchWithoutDup(t *testing.T) {
+func TestFinalizeDropsReasoningEffortNoneAndCollapsesSearchWithoutInject(t *testing.T) {
 	body := []byte(`{
 		"model":"grok-4.5",
 		"stream":false,
@@ -877,6 +982,7 @@ func TestFinalizeDropsReasoningEffortNoneAndInjectsSearchWithoutDup(t *testing.T
 		"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}],
 		"reasoning_effort":"none"
 	}`)
+	// SupportsBackendSearch alone must NOT inject x_search (opt-in only).
 	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{SupportsBackendSearch: true})
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
@@ -906,8 +1012,35 @@ func TestFinalizeDropsReasoningEffortNoneAndInjectsSearchWithoutDup(t *testing.T
 	if names["web_search:"] != 1 {
 		t.Fatalf("want one bare web_search, got %#v tools=%#v", names, tools)
 	}
-	if names["x_search:"] != 1 {
-		t.Fatalf("want injected x_search: %#v", tools)
+	if names["x_search:"] != 0 {
+		t.Fatalf("must not inject x_search without InjectDefaultSearchTools: %#v", tools)
+	}
+	if names["function:shell_command"] != 1 {
+		t.Fatalf("want shell_command preserved: %#v", names)
+	}
+}
+
+func TestFinalizeInjectDefaultSearchToolsOptIn(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","stream":false,"input":[{"role":"user","content":"hi"}],"tools":[{"type":"function","name":"a","parameters":{"type":"object"}}]}`)
+	out, err := compat.FinalizeResponsesUpstream(body, compat.ModelHints{
+		SupportsBackendSearch:    true,
+		InjectDefaultSearchTools: true,
+	})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	tools, _ := payload["tools"].([]any)
+	types := map[string]bool{}
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		types[stringValueTest(tool["type"])] = true
+	}
+	if !types["web_search"] || !types["x_search"] {
+		t.Fatalf("opt-in inject expected web+x search, got %#v", tools)
 	}
 }
 

@@ -8,9 +8,12 @@ import (
 
 // ModelHints carries catalog-derived policy for preparing upstream Responses requests.
 type ModelHints struct {
-	// SupportsBackendSearch enables default-on native WebSearch when the client
-	// did not already set backend_search / web_search.
+	// SupportsBackendSearch means the model can honor native search. It does NOT
+	// auto-inject search tools (search is opt-in only).
 	SupportsBackendSearch bool
+	// InjectDefaultSearchTools prepends bare web_search + x_search when true and
+	// the client has not disabled search. Default false — clients must request search.
+	InjectDefaultSearchTools bool
 }
 
 // NormalizeResponsesRequest turns a client Responses (or chat-shaped) body into a
@@ -79,8 +82,28 @@ func NormalizeResponsesRequest(payload []byte, defaultModel string) ([]byte, str
 			input["backend_search"] = *toolResult.BackendSearch
 		}
 	}
+	if toolResult.WebSearchDisabled {
+		if raw, ok := input["backend_search"]; !ok || truthy(raw) {
+			input["backend_search"] = false
+		}
+		input["tools"] = StripSearchTools(input["tools"])
+		if tools, ok := input["tools"].([]any); !ok || len(tools) == 0 {
+			delete(input, "tools")
+		}
+	}
 	if choice, exists := input["tool_choice"]; exists && choice != nil {
-		input["tool_choice"] = NormalizeResponsesToolChoice(choice)
+		tools, _ := input["tools"].([]any)
+		var aligned any
+		if toolResult.Compat != nil {
+			aligned, _ = toolResult.Compat.AlignToolChoice(choice, tools)
+		} else {
+			aligned, _ = AlignResponsesToolChoice(choice, tools, toolResult.WebSearchDisabled)
+		}
+		if aligned == nil {
+			delete(input, "tool_choice")
+		} else {
+			input["tool_choice"] = aligned
+		}
 	}
 	if _, ok := input["web_search_options"]; ok {
 		if _, exists := input["backend_search"]; !exists {
@@ -129,38 +152,47 @@ func PrepareResponsesFromAnthropicWithOptions(payload []byte, opts AnthropicToRe
 
 // FinalizeResponsesUpstream applies catalog policy and hard invariants required
 // before calling the Grok /responses endpoint:
-//  1. strip unknown fields (avoid 422)
-//  2. default backend_search when the model supports it
-//  3. default-inject web_search + x_search tools when search is enabled
+//  1. strip unknown fields + normalize tools/input once (avoid 422)
+//  2. align backend_search with client search signals (never force-on by model alone)
+//  3. optionally inject web_search + x_search when InjectDefaultSearchTools
 //  4. force stream:true so the gateway can always read SSE (non-stream clients
 //     are aggregated after the fact)
 func FinalizeResponsesUpstream(payload []byte, hints ModelHints) ([]byte, error) {
-	body, _, err := FinalizeResponsesUpstreamDetailed(payload, hints)
+	body, _, _, err := FinalizeResponsesUpstreamDetailed(payload, hints)
 	return body, err
 }
 
 // FinalizeResponsesUpstreamDetailed is FinalizeResponsesUpstream plus compatibility
-// warning codes for the X-Grok2API-Compatibility-Warnings response header.
-func FinalizeResponsesUpstreamDetailed(payload []byte, hints ModelHints) ([]byte, []string, error) {
-	body, warnings, err := SanitizeResponsesWithWarnings(payload)
+// warning codes and request-scoped tool rewrite state for response-side restore.
+func FinalizeResponsesUpstreamDetailed(payload []byte, hints ModelHints) ([]byte, []string, *ToolCompatibility, error) {
+	body, warnings, toolCompat, err := SanitizeResponsesWithWarnings(payload)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if ensured, ensureErr := EnsureBackendSearch(body, hints.SupportsBackendSearch); ensureErr == nil {
+	// Align backend_search with existing client search signals only — no force-true.
+	if ensured, ensureErr := AlignBackendSearch(body); ensureErr == nil {
 		body = ensured
 	}
-	if withTools, toolErr := EnsureDefaultSearchTools(body, hints.SupportsBackendSearch); toolErr == nil {
-		body = withTools
-	}
-	if stripped, more, stripErr := SanitizeResponsesWithWarnings(body); stripErr == nil {
-		body = stripped
-		warnings = mergeWarningCodes(warnings, more)
+	// Opt-in default search tools (off by default).
+	if hints.InjectDefaultSearchTools {
+		if withTools, toolErr := EnsureDefaultSearchTools(body, true); toolErr == nil {
+			body = withTools
+			// Re-sanitize after inject so extras/collisions cannot leak.
+			if stripped, more, moreCompat, stripErr := SanitizeResponsesWithWarnings(body); stripErr == nil {
+				body = stripped
+				warnings = mergeWarningCodes(warnings, more)
+				// Prefer the post-inject compat (has full alias table).
+				if moreCompat != nil {
+					toolCompat = moreCompat
+				}
+			}
+		}
 	}
 	forced, err := SetJSONStreamFlag(body, true)
 	if err != nil {
-		return nil, warnings, err
+		return nil, warnings, toolCompat, err
 	}
-	return forced, warnings, nil
+	return forced, warnings, toolCompat, nil
 }
 
 func mergeWarningCodes(a, b []string) []string {

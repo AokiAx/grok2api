@@ -45,8 +45,9 @@ func TestNormalizeResponsesRequestMapsChatShape(t *testing.T) {
 		t.Fatalf("tools=%#v", payload["tools"])
 	}
 	tool := tools[0].(map[string]any)
-	if tool["type"] != "function" || tool["name"] != "inner" {
-		t.Fatalf("tool=%#v", tool)
+	// Namespace children become namespace__name aliases for upstream.
+	if tool["type"] != "function" || tool["name"] != "demo__inner" {
+		t.Fatalf("tool=%#v want name demo__inner", tool)
 	}
 }
 
@@ -76,15 +77,12 @@ func TestFinalizeResponsesUpstreamForcesStreamAndStrips(t *testing.T) {
 	if payload["prompt_cache_key"] != "abc" {
 		t.Fatalf("prompt_cache_key=%#v", payload["prompt_cache_key"])
 	}
-	// Default-on search tools for models that support backend search.
-	tools, _ := payload["tools"].([]any)
-	types := map[string]bool{}
-	for _, raw := range tools {
-		tool, _ := raw.(map[string]any)
-		types[stringValueLocal(tool["type"])] = true
-	}
-	if !types["web_search"] || !types["x_search"] {
-		t.Fatalf("expected default web_search+x_search tools, got %#v", tools)
+	// external_web_access:true maps backend_search but does NOT inject tools
+	// (inject only via InjectDefaultSearchTools).
+	if tools, ok := payload["tools"]; ok && tools != nil {
+		if list, _ := tools.([]any); len(list) > 0 {
+			t.Fatalf("must not auto-inject search tools, got %#v", tools)
+		}
 	}
 }
 
@@ -131,11 +129,6 @@ func TestEnsureDefaultSearchToolsRespectsDisableAndDedupes(t *testing.T) {
 	if countWeb != 1 || countX != 1 {
 		t.Fatalf("web=%d x=%d tools=%#v", countWeb, countX, tools)
 	}
-}
-
-func stringValueLocal(v any) string {
-	s, _ := v.(string)
-	return s
 }
 
 func TestFinalizeMapsExternalWebAccessWithoutDefaultSearch(t *testing.T) {
@@ -380,7 +373,7 @@ func TestExistingTextFormatNotOverwritten(t *testing.T) {
 
 func TestFinalizeCompatibilityWarnings(t *testing.T) {
 	body := []byte(`{"model":"grok-4.5","input":[],"external_web_access":true,"store":false,"response_format":{"type":"json_object"}}`)
-	out, warnings, err := compat.FinalizeResponsesUpstreamDetailed(body, compat.ModelHints{})
+	out, warnings, _, err := compat.FinalizeResponsesUpstreamDetailed(body, compat.ModelHints{})
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
 	}

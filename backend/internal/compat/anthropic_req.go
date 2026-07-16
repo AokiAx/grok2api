@@ -282,7 +282,7 @@ func anthropicMessageToResponsesItems(msg map[string]any) ([]any, error) {
 				continue
 			}
 			flushText()
-			// CPA-style: Anthropic opaque signature is Grok encrypted reasoning.
+			// Anthropic opaque signature maps to Grok encrypted reasoning field.
 			out = append(out, map[string]any{
 				"type":              "reasoning",
 				"summary":           []any{},
