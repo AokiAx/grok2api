@@ -179,6 +179,7 @@ func TestFreshInstallRequiresClientKeyForEveryClientEndpoint(t *testing.T) {
 		{method: http.MethodPost, path: "/v1/chat/completions", body: `{}`},
 		{method: http.MethodPost, path: "/chat/completions", body: `{}`},
 		{method: http.MethodPost, path: "/v1/responses", body: `{}`},
+		// Client-key middleware still returns the OpenAI envelope for all /v1 inference routes.
 		{method: http.MethodPost, path: "/v1/messages", body: `{}`},
 	} {
 		recorder := httptest.NewRecorder()

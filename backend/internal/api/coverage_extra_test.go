@@ -139,7 +139,7 @@ func TestResponsesExpandsNamespaceTools(t *testing.T) {
 	if strings.Contains(forwarded, `"type":"namespace"`) {
 		t.Fatalf("namespace should be expanded: %s", forwarded)
 	}
-	if !strings.Contains(forwarded, `"type":"function"`) || !strings.Contains(forwarded, `"name":"inner"`) {
-		t.Fatalf("expected expanded function tool: %s", forwarded)
+	if !strings.Contains(forwarded, `"type":"function"`) || !strings.Contains(forwarded, `"name":"demo__inner"`) {
+		t.Fatalf("expected expanded namespaced function tool: %s", forwarded)
 	}
 }

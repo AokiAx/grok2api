@@ -74,7 +74,6 @@ func TestOpenAIAuthenticationAndErrorEnvelopeContract(t *testing.T) {
 		{name: "chat canonical", method: http.MethodPost, path: "/v1/chat/completions", body: `{}`},
 		{name: "chat alias", method: http.MethodPost, path: "/chat/completions", body: `{}`},
 		{name: "responses", method: http.MethodPost, path: "/v1/responses", body: `{}`},
-		{name: "anthropic messages", method: http.MethodPost, path: "/v1/messages", body: `{}`},
 	}
 
 	for _, tt := range tests {
@@ -86,6 +85,29 @@ func TestOpenAIAuthenticationAndErrorEnvelopeContract(t *testing.T) {
 
 			assertOpenAIErrorEnvelope(t, recorder, http.StatusUnauthorized, "invalid_api_key", "Invalid API key")
 		})
+	}
+}
+
+func TestAnthropicMessagesAuthenticationEnvelopeContract(t *testing.T) {
+	server := api.NewServer(&fakeGateway{}, fakeStatus{}, "api-secret")
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v body=%s", err, recorder.Body.String())
+	}
+	if payload.Type != "error" || payload.Error.Type != "authentication_error" || payload.Error.Message != "Invalid API key" {
+		t.Fatalf("anthropic error envelope=%#v", payload)
 	}
 }
 

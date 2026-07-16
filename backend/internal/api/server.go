@@ -574,34 +574,121 @@ func (s *Server) responses(writer http.ResponseWriter, request *http.Request) {
 
 func (s *Server) messages(writer http.ResponseWriter, request *http.Request) {
 	if !s.authorized(request) {
-		writeOpenAIError(writer, http.StatusUnauthorized, "Invalid API key")
+		writeAnthropicError(writer, http.StatusUnauthorized, "authentication_error", "Invalid API key", "")
 		return
 	}
 	body, err := readInferenceRequestBody(writer, request)
 	if err != nil {
-		writeOpenAIError(writer, http.StatusBadRequest, "Invalid request body")
+		writeAnthropicError(writer, http.StatusBadRequest, "invalid_request_error", "Invalid request body", "")
 		return
 	}
 	// Session sticky: Claude Code session header → prompt_cache_key + x-grok-conv-id.
 	// Account-pool sticky still uses withStickyContext (requestctx).
 	result, err := s.bridge.Messages(withStickyContext(request), body, compat.SessionIDFromRequest(request))
 	if err != nil {
-		s.writeBridgeError(writer, err)
+		s.writeBridgeErrorAnthropic(writer, err)
 		return
 	}
 	s.writeResult(writer, result)
 }
 
 func (s *Server) writeBridgeError(writer http.ResponseWriter, err error) {
+	status, code, message, param := classifyBridgeError(err)
+	if status == 0 {
+		s.writeGatewayError(writer, err)
+		return
+	}
+	writeOpenAIErrorParam(writer, status, code, message, param)
+}
+
+// writeBridgeErrorAnthropic maps the same bridge failures onto Anthropic's error envelope.
+func (s *Server) writeBridgeErrorAnthropic(writer http.ResponseWriter, err error) {
+	status, code, message, param := classifyBridgeError(err)
+	if status == 0 {
+		// Capacity / pool errors still use Anthropic shape.
+		if poolError, ok := service.AsPoolUnavailable(err); ok {
+			status = poolError.Status
+			if status < http.StatusBadRequest {
+				status = http.StatusServiceUnavailable
+			}
+			code = string(poolError.Reason)
+			if code == "" {
+				code = "api_error"
+			}
+			message = poolError.Error()
+			if message == "" {
+				message = "No ready accounts; retry later"
+			}
+			writeAnthropicError(writer, status, anthropicErrorType(status), message, "")
+			return
+		}
+		writeAnthropicError(writer, http.StatusBadGateway, "api_error", err.Error(), "")
+		return
+	}
+	writeAnthropicError(writer, status, anthropicErrorType(status), message, param)
+}
+
+func classifyBridgeError(err error) (status int, code, message, param string) {
 	if bridgeErr, ok := bridge.AsError(err); ok {
-		status := http.StatusBadGateway
+		status = http.StatusBadGateway
 		if bridgeErr.Class == bridge.ClassInvalidRequest {
 			status = http.StatusBadRequest
 		}
-		writeOpenAIError(writer, status, bridgeErr.Message)
-		return
+		code = bridgeErr.Code
+		if code == "" {
+			code = publicErrorCode(status)
+		}
+		return status, code, bridgeErr.Message, bridgeErr.Param
 	}
-	s.writeGatewayError(writer, err)
+	if re, ok := compat.AsRequestError(err); ok {
+		msg := re.Message
+		if re.Param != "" {
+			msg = re.Param + ": " + re.Message
+		}
+		code = re.Code
+		if code == "" {
+			code = "invalid_request"
+		}
+		return http.StatusBadRequest, code, msg, re.Param
+	}
+	return 0, "", "", ""
+}
+
+func writeAnthropicError(writer http.ResponseWriter, status int, errType, message, param string) {
+	if errType == "" {
+		errType = anthropicErrorType(status)
+	}
+	if status >= http.StatusInternalServerError {
+		slog.Error("api request failed", "status", status, "type", errType, "error", message)
+		message = publicServerErrorMessage(status)
+	}
+	payload := map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    errType,
+			"message": message,
+		},
+	}
+	if strings.TrimSpace(param) != "" {
+		// Non-standard but useful for clients debugging tool validation.
+		payload["error"].(map[string]any)["param"] = param
+	}
+	writeJSON(writer, status, payload)
+}
+
+func anthropicErrorType(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "authentication_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	default:
+		return "api_error"
+	}
 }
 
 func (s *Server) writeGatewayError(writer http.ResponseWriter, err error) {
@@ -704,6 +791,10 @@ func writeOpenAIError(writer http.ResponseWriter, status int, message string) {
 }
 
 func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message string) {
+	writeOpenAIErrorParam(writer, status, code, message, "")
+}
+
+func writeOpenAIErrorParam(writer http.ResponseWriter, status int, code, message, param string) {
 	if code == "" {
 		code = publicErrorCode(status)
 	}
@@ -711,12 +802,16 @@ func writeOpenAIErrorCode(writer http.ResponseWriter, status int, code, message 
 		slog.Error("api request failed", "status", status, "code", code, "error", message)
 		message = publicServerErrorMessage(status)
 	}
+	var paramValue any
+	if strings.TrimSpace(param) != "" {
+		paramValue = param
+	}
 	writeJSON(writer, status, map[string]any{
 		"error": map[string]any{
 			"message": message,
 			"type":    errorTypeForStatus(status),
 			"code":    code,
-			"param":   nil,
+			"param":   paramValue,
 		},
 	})
 }
