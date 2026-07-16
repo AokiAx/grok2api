@@ -21,9 +21,11 @@ type prepared struct {
 	ChatBody []byte
 	// Session sticky id (Claude Code session → prompt_cache_key + x-grok-conv-id).
 	ConvID string
-	// Anthropic thinking bridge (CPA-style signature / summary blocks).
+	// Anthropic thinking bridge (signature / summary blocks).
 	ThinkingEnabled bool
 	ThinkingDisplay string
+	// ToolCompat is filled after Finalize (namespace/custom aliases for response restore).
+	ToolCompat *compat.ToolCompatibility
 }
 
 func (p *Pipeline) resolveUpstreamModel(public string) string {

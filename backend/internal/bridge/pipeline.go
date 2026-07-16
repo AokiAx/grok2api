@@ -127,9 +127,13 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 		}
 		body = rewritten
 	}
-	upstreamBody, warnings, err := compat.FinalizeResponsesUpstreamDetailed(body, p.hintsFor(req.UpstreamModel))
+	upstreamBody, warnings, toolCompat, err := compat.FinalizeResponsesUpstreamDetailed(body, p.hintsFor(req.UpstreamModel))
 	if err != nil {
 		return Result{}, invalidRequest("Invalid request payload", err)
+	}
+	req.ToolCompat = toolCompat
+	if toolCompat != nil {
+		warnings = mergeWarningLists(warnings, toolCompat.Warnings())
 	}
 
 	if conv := strings.TrimSpace(req.ConvID); conv != "" {
@@ -146,6 +150,25 @@ func (p *Pipeline) executeResponses(ctx context.Context, req prepared) (Result, 
 	}
 	result = withCompatibilityWarnings(result, warnings)
 	return p.deliver(result, req)
+}
+
+func mergeWarningLists(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	out := append([]string(nil), a...)
+	seen := map[string]struct{}{}
+	for _, code := range out {
+		seen[code] = struct{}{}
+	}
+	for _, code := range b {
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+		out = append(out, code)
+	}
+	return out
 }
 
 func (p *Pipeline) executeNativeChat(ctx context.Context, req prepared) (Result, error) {

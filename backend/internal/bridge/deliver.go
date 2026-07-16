@@ -9,6 +9,9 @@ import (
 )
 
 func (p *Pipeline) deliver(result Result, req prepared) (Result, error) {
+	// Restore client-facing tool identities before protocol re-encoding.
+	result = applyToolResponseRewrite(result, req.ToolCompat)
+
 	switch req.Format {
 	case FormatChat:
 		return deliverChat(result, req.Model, req.ClientStream)
@@ -19,6 +22,22 @@ func (p *Pipeline) deliver(result Result, req prepared) (Result, error) {
 	default:
 		return Result{}, badGateway("unknown client format", nil)
 	}
+}
+
+func applyToolResponseRewrite(result Result, toolCompat *compat.ToolCompatibility) Result {
+	if toolCompat == nil || !toolCompat.HasRewrites() {
+		return result
+	}
+	if result.Stream != nil {
+		result.Stream = toolCompat.RewriteResponseStream(result.Stream)
+		return result
+	}
+	if len(result.Body) > 0 {
+		if rewritten, err := toolCompat.RewriteResponseJSON(result.Body); err == nil {
+			result.Body = rewritten
+		}
+	}
+	return result
 }
 
 func deliverChat(result Result, model string, clientStream bool) (Result, error) {

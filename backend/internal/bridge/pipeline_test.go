@@ -78,8 +78,14 @@ func TestPipelineChatNonStreamAggregatesResponses(t *testing.T) {
 	if forwarded["stream"] != true {
 		t.Fatalf("expected forced stream=true: %#v", forwarded)
 	}
-	if forwarded["backend_search"] != true {
-		t.Fatalf("expected backend_search: %#v", forwarded)
+	// Bare chat must not force backend_search / inject search tools.
+	if _, ok := forwarded["backend_search"]; ok {
+		t.Fatalf("bare chat must not set backend_search: %#v", forwarded)
+	}
+	if tools, ok := forwarded["tools"]; ok && tools != nil {
+		if list, _ := tools.([]any); len(list) > 0 {
+			t.Fatalf("bare chat must not inject tools: %#v", tools)
+		}
 	}
 }
 
