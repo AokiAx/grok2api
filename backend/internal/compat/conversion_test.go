@@ -813,8 +813,8 @@ func TestFinalizeClampsReasoningEffortAliases(t *testing.T) {
 		absent bool
 	}{
 		{
-			name: "none stripped",
-			body: `{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			name:   "none stripped",
+			body:   `{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
 			absent: true,
 		},
 		{
