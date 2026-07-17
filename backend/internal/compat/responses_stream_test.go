@@ -239,6 +239,85 @@ func TestResponsesToChatStreamDoneWithoutDeltasUsesFinalArgs(t *testing.T) {
 	}
 }
 
+func TestResponsesToChatStreamPrematureEOFEmitsErrorNotStop(t *testing.T) {
+	// Upstream closes after partial text without response.completed.
+	sse := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_cut"}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"partial"}`,
+		``,
+	}, "\n")
+	stream := compat.NewResponsesToChatStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	data, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `"content":"partial"`) {
+		t.Fatalf("missing partial content: %s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("must not forge stop on truncated stream: %s", body)
+	}
+	if strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("must not emit [DONE] after truncated stream: %s", body)
+	}
+	if !strings.Contains(body, `"upstream_stream_truncated"`) || !strings.Contains(body, "terminal event") {
+		t.Fatalf("expected stream error payload: %s", body)
+	}
+}
+
+func TestResponsesToChatStreamIncompleteUsesLength(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"cut"}`,
+		``,
+		`event: response.incomplete`,
+		`data: {"type":"response.incomplete","response":{"id":"resp_i","status":"incomplete","output_text":"cut"}}`,
+		``,
+	}, "\n")
+	stream := compat.NewResponsesToChatStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	data, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `"finish_reason":"length"`) {
+		t.Fatalf("want length finish: %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("want [DONE] after incomplete: %s", body)
+	}
+}
+
+func TestResponsesToChatStreamFailedEmitsError(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_f"}}`,
+		``,
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"error":{"message":"quota boom"}}}`,
+		``,
+	}, "\n")
+	stream := compat.NewResponsesToChatStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5")
+	data, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "quota boom") {
+		t.Fatalf("missing error message: %s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("must not stop-finish after failed: %s", body)
+	}
+}
+
 func TestResponsesToChatObjectArgumentsBecomeJSONString(t *testing.T) {
 	// Upstream occasionally returns structured arguments objects.
 	body := []byte(`{

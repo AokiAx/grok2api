@@ -231,12 +231,12 @@ func (s *ResponsesToChatStream) pull() error {
 	if err != nil {
 		if err == io.EOF {
 			if !s.done {
-				finish := "stop"
-				if s.sawTools {
-					finish = "tool_calls"
+				// Do not forge finish_reason=stop: clients treat that as a full answer.
+				msg := "upstream stream ended before a terminal event"
+				if !s.started {
+					msg = "upstream stream empty"
 				}
-				s.queueContentChunk("", finish)
-				s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
+				s.queueStreamError(msg, "upstream_stream_truncated")
 				s.done = true
 				return nil
 			}
@@ -245,13 +245,8 @@ func (s *ResponsesToChatStream) pull() error {
 		return err
 	}
 	if event.Data == "[DONE]" {
-		finish := "stop"
-		if s.sawTools {
-			finish = "tool_calls"
-		}
-		s.queueContentChunk("", finish)
-		s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
-		s.done = true
+		// Bare [DONE] without response.completed/incomplete is not a success terminal.
+		// Ignore here; EOF without a real terminal still surfaces as an error.
 		return nil
 	}
 	outIdx := intValue(event.Payload["output_index"])
@@ -284,11 +279,92 @@ func (s *ResponsesToChatStream) pull() error {
 		if s.sawTools {
 			finish = "tool_calls"
 		}
-		s.queueContentChunk("", finish)
-		s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
+		s.queueTerminal(finish)
+	case "response.incomplete":
+		// Truncated by max tokens / budget — still a terminal event, not a transport fault.
+		finish := "length"
+		if s.sawTools {
+			finish = "tool_calls"
+		}
+		s.queueTerminal(finish)
+	case "response.failed", "error":
+		msg := streamErrorMessage(event.Payload, event.Data)
+		if msg == "" {
+			msg = "upstream response failed"
+		}
+		s.queueStreamError(msg, "upstream_error")
 		s.done = true
 	}
 	return nil
+}
+
+func (s *ResponsesToChatStream) queueTerminal(finish string) {
+	if s.done {
+		return
+	}
+	if !s.started {
+		s.queueContentChunk("", "")
+		s.started = true
+	}
+	s.queueContentChunk("", finish)
+	s.pending = append(s.pending, []byte("data: [DONE]\n\n")...)
+	s.done = true
+}
+
+// queueStreamError emits an OpenAI-style mid-stream error object (no finish_reason stop).
+func (s *ResponsesToChatStream) queueStreamError(message, code string) {
+	if message == "" {
+		message = "upstream stream error"
+	}
+	if code == "" {
+		code = "upstream_error"
+	}
+	payload := map[string]any{
+		"id":      s.id,
+		"object":  "chat.completion.chunk",
+		"created": 0,
+		"model":   s.model,
+		"choices": []any{},
+		"error": map[string]any{
+			"message": message,
+			"type":    "server_error",
+			"code":    code,
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	var builder bytes.Buffer
+	builder.WriteString("data: ")
+	builder.Write(encoded)
+	builder.WriteString("\n\n")
+	s.pending = append(s.pending, builder.Bytes()...)
+}
+
+func streamErrorMessage(payload map[string]any, raw string) string {
+	if payload == nil {
+		return strings.TrimSpace(raw)
+	}
+	if msg := stringValue(payload["message"]); msg != "" {
+		return msg
+	}
+	if errObj, ok := payload["error"].(map[string]any); ok {
+		if msg := stringValue(errObj["message"]); msg != "" {
+			return msg
+		}
+	}
+	if response, ok := payload["response"].(map[string]any); ok {
+		if errObj, ok := response["error"].(map[string]any); ok {
+			if msg := stringValue(errObj["message"]); msg != "" {
+				return msg
+			}
+		}
+		if msg := stringValue(response["message"]); msg != "" {
+			return msg
+		}
+	}
+	return ""
 }
 
 func isFunctionCallItem(item map[string]any) bool {

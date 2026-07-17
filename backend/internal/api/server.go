@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -745,6 +746,8 @@ func (s *Server) writeResult(writer http.ResponseWriter, result service.ChatResu
 			count, readErr := result.Stream.Read(buffer)
 			if count > 0 {
 				if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
+					// Client gone mid-stream — not an upstream fault, but useful for ops.
+					slog.Debug("stream client write failed", "error", writeErr, "bytes", count)
 					return
 				}
 				if flusher, ok := writer.(http.Flusher); ok {
@@ -752,6 +755,9 @@ func (s *Server) writeResult(writer http.ResponseWriter, result service.ChatResu
 				}
 			}
 			if readErr != nil {
+				if readErr != io.EOF {
+					slog.Warn("stream read failed", "error", readErr)
+				}
 				return
 			}
 		}

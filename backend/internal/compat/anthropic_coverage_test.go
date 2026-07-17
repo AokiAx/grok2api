@@ -196,7 +196,7 @@ func TestResponsesToAnthropicStream_IncompleteAndDone(t *testing.T) {
 	if !strings.Contains(string(data), `"stop_reason":"max_tokens"`) {
 		t.Fatalf("%s", data)
 	}
-	// [DONE] terminal
+	// Bare [DONE] is not a success terminal — must surface as error, not message_stop.
 	sse2 := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_d\"}}\n\ndata: [DONE]\n\n"
 	stream = compat.NewResponsesToAnthropicStream(io.NopCloser(strings.NewReader(sse2)), "grok-4.5", false, "")
 	data, err = io.ReadAll(stream)
@@ -204,8 +204,37 @@ func TestResponsesToAnthropicStream_IncompleteAndDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "message_stop") {
-		t.Fatalf("%s", data)
+	text := string(data)
+	if !strings.Contains(text, `event: error`) || !strings.Contains(text, "terminal event") {
+		t.Fatalf("expected stream error for bare [DONE]: %s", text)
+	}
+	if strings.Contains(text, "message_stop") {
+		t.Fatalf("must not message_stop after bare [DONE]: %s", text)
+	}
+}
+
+func TestResponsesToAnthropicStream_PrematureEOFEmitsError(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_cut"}}`,
+		``,
+		`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		``,
+	}, "\n")
+	stream := compat.NewResponsesToAnthropicStream(io.NopCloser(strings.NewReader(sse)), "grok-4.5", false, "")
+	data, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"text":"hi"`) {
+		t.Fatalf("missing partial text: %s", text)
+	}
+	if !strings.Contains(text, `event: error`) || !strings.Contains(text, "terminal event") {
+		t.Fatalf("expected truncated stream error: %s", text)
+	}
+	if strings.Contains(text, "message_stop") {
+		t.Fatalf("must not message_stop after premature EOF: %s", text)
 	}
 }
 

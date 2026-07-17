@@ -174,9 +174,8 @@ func (t *anthropicStreamTranslator) processData(data []byte) error {
 		return nil
 	}
 	if bytes.Equal(data, []byte("[DONE]")) {
-		if t.started && !t.finished {
-			return t.finish("", t.usageIn, t.usageOut)
-		}
+		// Bare [DONE] is not a Responses terminal event. Ignore it so a missing
+		// response.completed/incomplete still surfaces as stream failure (see pipe exit).
 		return nil
 	}
 	var root map[string]any
